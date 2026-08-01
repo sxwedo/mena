@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
+};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -15,6 +18,7 @@ use crate::view::{AgentReport, format_bytes, format_duration};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
+const METADATA_KEY: Color = Color::LightMagenta;
 type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
 type ExportCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<PathBuf>;
@@ -100,23 +104,29 @@ fn run_session_browser(
     mut delete: Option<DeleteCallback<'_>>,
 ) -> Result<Option<AgentSession>> {
     let mut app = SessionsApp::new(sessions, active_targets, purpose);
-    let mut terminal = ManagedTerminal::enter()?;
+    let mut terminal = ManagedTerminal::enter_with_mouse_capture()?;
     loop {
         terminal
             .terminal
             .draw(|frame| draw_sessions(frame, &mut app))
             .context("failed to draw session browser")?;
-        match event::read().context("failed to read terminal input")? {
+        let input = event::read().context("failed to read terminal input")?;
+        if app.mode == BrowserMode::Detail {
+            for input in read_detail_event_batch(input)? {
+                match export.as_mut() {
+                    Some(export) => handle_detail_event(&mut app, &input, Some(&mut **export)),
+                    None => handle_detail_event(&mut app, &input, None),
+                }
+                if app.mode != BrowserMode::Detail {
+                    break;
+                }
+            }
+            continue;
+        }
+        match input {
             Event::Key(key) if is_key_press(&key) => {
                 if app.mode == BrowserMode::Search {
                     handle_search_key(&mut app, key);
-                    continue;
-                }
-                if app.mode == BrowserMode::Detail {
-                    match export.as_mut() {
-                        Some(export) => handle_detail_key(&mut app, key, Some(&mut **export)),
-                        None => handle_detail_key(&mut app, key, None),
-                    }
                     continue;
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
@@ -184,12 +194,20 @@ fn run_session_browser(
                     _ => {}
                 }
             }
-            Event::Paste(value) if app.mode == BrowserMode::Search => {
-                app.query.push_str(&value);
-                app.recompute_filter();
+            Event::Paste(value) if app.mode == BrowserMode::Search => app.append_search(&value),
+            Event::Mouse(mouse) if app.mode == BrowserMode::Browse => {
+                handle_session_mouse(&mut app, mouse.kind);
             }
             _ => {}
         }
+    }
+}
+
+fn handle_session_mouse(app: &mut SessionsApp, kind: MouseEventKind) {
+    match kind {
+        MouseEventKind::ScrollUp => app.move_by(-3),
+        MouseEventKind::ScrollDown => app.move_by(3),
+        _ => {}
     }
 }
 
@@ -219,22 +237,46 @@ fn handle_search_key(app: &mut SessionsApp, key: KeyEvent) {
 
 struct ManagedTerminal {
     terminal: DefaultTerminal,
+    mouse_capture: bool,
 }
 
 impl ManagedTerminal {
     fn enter() -> Result<Self> {
+        Self::enter_internal(false)
+    }
+
+    fn enter_with_mouse_capture() -> Result<Self> {
+        Self::enter_internal(true)
+    }
+
+    fn enter_internal(mouse_capture: bool) -> Result<Self> {
         let mut terminal = ratatui::try_init().context("failed to initialize terminal UI")?;
+        if mouse_capture
+            && let Err(error) = crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+        {
+            let _ = ratatui::try_restore();
+            return Err(error).context("failed to enable terminal mouse capture");
+        }
         if let Err(error) = terminal.hide_cursor() {
+            if mouse_capture {
+                let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+            }
             let _ = ratatui::try_restore();
             return Err(error).context("failed to hide terminal cursor");
         }
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            mouse_capture,
+        })
     }
 }
 
 impl Drop for ManagedTerminal {
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
+        if self.mouse_capture {
+            let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        }
         let _ = ratatui::try_restore();
     }
 }
@@ -316,6 +358,7 @@ struct SessionsApp {
     detail: Option<SessionDetail>,
     detail_scroll: u16,
     detail_max_scroll: u16,
+    detail_primary_offsets: Vec<u16>,
     detail_status: Option<StatusMessage>,
     status: Option<StatusMessage>,
 }
@@ -337,6 +380,7 @@ impl SessionsApp {
             detail: None,
             detail_scroll: 0,
             detail_max_scroll: 0,
+            detail_primary_offsets: Vec::new(),
             detail_status: None,
             status: None,
         };
@@ -360,6 +404,11 @@ impl SessionsApp {
                 .checked_sub(1)
                 .map(|last| selected.min(last)),
         );
+    }
+
+    fn append_search(&mut self, value: &str) {
+        self.query.push_str(value);
+        self.recompute_filter();
     }
 
     fn selected_session(&self) -> Option<&AgentSession> {
@@ -401,6 +450,7 @@ impl SessionsApp {
         self.detail = Some(detail);
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
+        self.detail_primary_offsets.clear();
         self.detail_status = None;
         self.mode = BrowserMode::Detail;
     }
@@ -409,6 +459,7 @@ impl SessionsApp {
         self.detail = None;
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
+        self.detail_primary_offsets.clear();
         self.detail_status = None;
         self.mode = BrowserMode::Browse;
     }
@@ -418,6 +469,24 @@ impl SessionsApp {
             .detail_scroll
             .saturating_add_signed(amount)
             .min(self.detail_max_scroll);
+    }
+
+    fn jump_detail_primary(&mut self, forward: bool) {
+        let target = if forward {
+            self.detail_primary_offsets
+                .iter()
+                .copied()
+                .find(|offset| *offset > self.detail_scroll)
+        } else {
+            self.detail_primary_offsets
+                .iter()
+                .copied()
+                .rev()
+                .find(|offset| *offset < self.detail_scroll)
+        };
+        if let Some(target) = target {
+            self.detail_scroll = target;
+        }
     }
 
     fn request_delete(&mut self) {
@@ -462,6 +531,12 @@ fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent, export: Option<Export
                 });
             }
         }
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.jump_detail_primary(false);
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.jump_detail_primary(true);
+        }
         KeyCode::Up | KeyCode::Char('k') => app.scroll_detail(-1),
         KeyCode::Down | KeyCode::Char('j') => app.scroll_detail(1),
         KeyCode::PageUp => app.scroll_detail(-10),
@@ -469,6 +544,56 @@ fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent, export: Option<Export
         KeyCode::Home => app.detail_scroll = 0,
         KeyCode::End => app.detail_scroll = app.detail_max_scroll,
         _ => {}
+    }
+}
+
+fn handle_detail_event(app: &mut SessionsApp, input: &Event, export: Option<ExportCallback<'_>>) {
+    match input {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            handle_detail_key(app, *key, export);
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => app.scroll_detail(-3),
+            MouseEventKind::ScrollDown => app.scroll_detail(3),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn read_detail_event_batch(first: Event) -> Result<Vec<Event>> {
+    const MAX_BATCH_SIZE: usize = 1_024;
+
+    let mut events = vec![first];
+    while events.len() < MAX_BATCH_SIZE
+        && event::poll(Duration::ZERO).context("failed to poll queued detail input")?
+    {
+        events.push(event::read().context("failed to read queued detail input")?);
+    }
+    Ok(coalesce_detail_events(events))
+}
+
+fn coalesce_detail_events(events: impl IntoIterator<Item = Event>) -> Vec<Event> {
+    let mut coalesced = Vec::new();
+    for input in events {
+        let direction = detail_scroll_direction(&input);
+        if direction.is_some()
+            && coalesced
+                .last()
+                .is_some_and(|previous| detail_scroll_direction(previous) == direction)
+        {
+            continue;
+        }
+        coalesced.push(input);
+    }
+    coalesced
+}
+
+fn detail_scroll_direction(input: &Event) -> Option<bool> {
+    match input {
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => Some(false),
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => Some(true),
+        _ => None,
     }
 }
 
@@ -713,7 +838,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     let Some(detail) = app.detail.as_ref() else {
         return;
     };
-    let lines = session_detail_lines(detail);
+    let content = session_detail_content(detail);
 
     let popup = centered_rect(
         frame.area(),
@@ -737,12 +862,24 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         Constraint::Length(1),
     ])
     .split(inner);
-    let text = Text::from(lines);
-    let content_height = wrapped_text_height(&text, areas[0].width.max(1));
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let content_width = areas[0].width.max(1);
+    let content_height = wrapped_lines_height(&content.lines, content_width);
     let max_scroll = content_height.saturating_sub(usize::from(areas[0].height));
     app.detail_max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
     app.detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
+    app.detail_primary_offsets = content
+        .primary_line_indices
+        .iter()
+        .map(|index| wrapped_lines_height(&content.lines[..*index], content_width))
+        .map(|offset| {
+            u16::try_from(offset)
+                .unwrap_or(u16::MAX)
+                .min(app.detail_max_scroll)
+        })
+        .collect();
+    app.detail_primary_offsets.dedup();
+    let text = Text::from(content.lines);
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
@@ -760,6 +897,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
             ("↑/↓", "scroll"),
             ("PgUp/PgDn", "page"),
             ("Home/End", "jump"),
+            ("Shift+↑/↓", "message"),
             ("e", "export"),
             ("Enter/Esc", "close"),
         ]))
@@ -768,7 +906,12 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     );
 }
 
-fn session_detail_lines(detail: &SessionDetail) -> Vec<Line<'static>> {
+struct SessionDetailContent {
+    lines: Vec<Line<'static>>,
+    primary_line_indices: Vec<usize>,
+}
+
+fn session_detail_content(detail: &SessionDetail) -> SessionDetailContent {
     let session = &detail.session;
     let mut lines = vec![
         detail_line("Target", session_target(session)),
@@ -805,17 +948,24 @@ fn session_detail_lines(detail: &SessionDetail) -> Vec<Line<'static>> {
         )),
         Line::from(""),
     ];
+    let mut primary_line_indices = Vec::new();
     for message in &detail.messages {
+        if matches!(
+            message.kind,
+            SessionMessageKind::User | SessionMessageKind::Assistant
+        ) {
+            primary_line_indices.push(lines.len());
+        }
         let timestamp = message.timestamp.as_deref().unwrap_or("-");
         lines.push(Line::from(Span::styled(
-            format!("[{timestamp}] {}", message.kind.label()),
+            message_header(message, timestamp),
             message_kind_style(message.kind),
         )));
         lines.extend(
             message
                 .content
                 .lines()
-                .map(|line| Line::from(line.to_owned())),
+                .map(|line| Line::styled(line.to_owned(), message_body_style(message.kind))),
         );
         lines.push(Line::from(""));
     }
@@ -825,24 +975,52 @@ fn session_detail_lines(detail: &SessionDetail) -> Vec<Line<'static>> {
             Style::default().fg(MUTED),
         )));
     }
-    lines
+    SessionDetailContent {
+        lines,
+        primary_line_indices,
+    }
+}
+
+fn message_header(message: &crate::session::SessionMessage, timestamp: &str) -> String {
+    let model = (message.kind == SessionMessageKind::Assistant)
+        .then(|| message.model.as_deref().map(str::trim))
+        .flatten()
+        .filter(|model| !model.is_empty());
+    model.map_or_else(
+        || format!("[{timestamp}] {}", message.kind.label()),
+        |model| format!("[{timestamp}] {} · {model}", message.kind.label()),
+    )
 }
 
 fn message_kind_style(kind: SessionMessageKind) -> Style {
-    let color = match kind {
-        SessionMessageKind::User => Color::Green,
+    Style::default()
+        .fg(message_kind_color(kind))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn message_body_style(kind: SessionMessageKind) -> Style {
+    Style::default().fg(message_kind_color(kind))
+}
+
+const fn message_kind_color(kind: SessionMessageKind) -> Color {
+    match kind {
+        SessionMessageKind::User => Color::LightGreen,
         SessionMessageKind::Assistant => Color::Cyan,
-        SessionMessageKind::ToolCall => Color::Yellow,
-        SessionMessageKind::ToolResult => Color::Magenta,
-        SessionMessageKind::System => Color::DarkGray,
-        SessionMessageKind::Error => Color::Red,
-    };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+        SessionMessageKind::Skill => Color::LightYellow,
+        SessionMessageKind::ToolCall
+        | SessionMessageKind::ToolResult
+        | SessionMessageKind::System
+        | SessionMessageKind::Error => Color::DarkGray,
+    }
 }
 
 fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
+    wrapped_lines_height(&text.lines, width)
+}
+
+fn wrapped_lines_height(lines: &[Line<'_>], width: u16) -> usize {
     let width = usize::from(width.max(1));
-    text.lines
+    lines
         .iter()
         .map(|line| line.width().max(1).div_ceil(width))
         .sum()
@@ -1135,7 +1313,7 @@ fn status_style(status: &str) -> Style {
 
 fn detail_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<8}"), Style::default().fg(MUTED)),
+        Span::styled(format!("{label:<8}"), Style::default().fg(METADATA_KEY)),
         Span::raw(value),
     ])
 }
@@ -1172,14 +1350,16 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        BrowserMode, BrowserPurpose, SessionsApp, TopApp, draw_sessions, draw_top,
-        handle_detail_key, session_columns, session_target,
+        BrowserMode, BrowserPurpose, SessionsApp, TopApp, coalesce_detail_events, draw_sessions,
+        draw_top, handle_detail_event, handle_detail_key, session_columns, session_target,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -1268,6 +1448,7 @@ mod tests {
             messages: vec![SessionMessage {
                 kind: SessionMessageKind::User,
                 timestamp: None,
+                model: None,
                 content: "line\n".repeat(40),
             }],
         });
@@ -1301,12 +1482,20 @@ mod tests {
                 SessionMessage {
                     kind: SessionMessageKind::User,
                     timestamp: Some("2026-08-01T01:02:04Z".to_owned()),
+                    model: None,
                     content: "complete first question".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::Assistant,
                     timestamp: Some("2026-08-01T01:02:05Z".to_owned()),
+                    model: Some("gpt-5.5".to_owned()),
                     content: "complete first answer".to_owned(),
+                },
+                SessionMessage {
+                    kind: SessionMessageKind::Assistant,
+                    timestamp: Some("2026-08-01T01:02:06Z".to_owned()),
+                    model: Some("gpt-5.6".to_owned()),
+                    content: "complete second answer".to_owned(),
                 },
             ],
         });
@@ -1325,9 +1514,12 @@ mod tests {
             "125500000",
             "Cost",
             "$1.2500",
-            "Conversation (2 messages)",
+            "Conversation (3 messages)",
+            "ASSISTANT · gpt-5.5",
+            "ASSISTANT · gpt-5.6",
             "complete first question",
             "complete first answer",
+            "complete second answer",
             "scroll",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
@@ -1335,15 +1527,16 @@ mod tests {
     }
 
     #[test]
-    fn detail_message_headers_use_kind_colors_while_bodies_keep_default_style() {
+    fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
         let session = report().session.expect("fixture session");
         let kinds = [
-            (SessionMessageKind::User, Color::Green),
+            (SessionMessageKind::User, Color::LightGreen),
             (SessionMessageKind::Assistant, Color::Cyan),
-            (SessionMessageKind::ToolCall, Color::Yellow),
-            (SessionMessageKind::ToolResult, Color::Magenta),
+            (SessionMessageKind::Skill, Color::LightYellow),
+            (SessionMessageKind::ToolCall, Color::DarkGray),
+            (SessionMessageKind::ToolResult, Color::DarkGray),
             (SessionMessageKind::System, Color::DarkGray),
-            (SessionMessageKind::Error, Color::Red),
+            (SessionMessageKind::Error, Color::DarkGray),
         ];
         let messages = kinds
             .iter()
@@ -1351,6 +1544,7 @@ mod tests {
             .map(|(index, (kind, _))| SessionMessage {
                 kind: *kind,
                 timestamp: None,
+                model: None,
                 content: format!("plain-body-{index}"),
             })
             .collect();
@@ -1380,8 +1574,37 @@ mod tests {
             let body = format!("plain-body-{index}");
             let body_position = find_text(buffer, 100, 42, &body).expect("message body");
             let body_cell = buffer.cell(body_position).expect("body cell");
-            assert_eq!(body_cell.fg, Color::Reset, "{body} foreground");
+            assert_eq!(body_cell.fg, *expected_color, "{body} foreground");
             assert!(!body_cell.modifier.contains(Modifier::BOLD), "{body} bold");
+        }
+    }
+
+    #[test]
+    fn detail_metadata_keys_are_pink_purple() {
+        let session = report().session.expect("fixture session");
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: Vec::new(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        let buffer = terminal.backend().buffer();
+        for key in ["Target", "Agent", "Title", "Project"] {
+            let position = find_text(buffer, 100, 30, key).expect("metadata key");
+            assert_eq!(
+                buffer.cell(position).expect("metadata cell").fg,
+                Color::LightMagenta,
+                "{key} color"
+            );
         }
     }
 
@@ -1396,6 +1619,7 @@ mod tests {
                     SessionMessageKind::Assistant
                 },
                 timestamp: None,
+                model: None,
                 content: format!("complete message number {index}"),
             })
             .collect();
@@ -1424,6 +1648,117 @@ mod tests {
         assert!(screen.contains("complete message number 39"));
         assert_eq!(app.table_state.selected(), selected);
         assert!(app.detail_scroll > 0);
+    }
+
+    #[test]
+    fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
+        let session = report().session.expect("fixture session");
+        let messages = vec![
+            SessionMessage {
+                kind: SessionMessageKind::User,
+                timestamp: None,
+                model: None,
+                content: "first user message".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::ToolCall,
+                timestamp: None,
+                model: None,
+                content: "tool detail\n".repeat(15),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::ToolResult,
+                timestamp: None,
+                model: None,
+                content: "tool result\n".repeat(15),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::Assistant,
+                timestamp: None,
+                model: Some("gpt-5.5".to_owned()),
+                content: "assistant answer".to_owned(),
+            },
+        ];
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            None,
+        );
+        let first_user_scroll = app.detail_scroll;
+        assert!(first_user_scroll > 1, "should jump past metadata");
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            None,
+        );
+        let assistant_scroll = app.detail_scroll;
+        assert!(
+            assistant_scroll > first_user_scroll + 10,
+            "should skip tool messages"
+        );
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+            None,
+        );
+        assert_eq!(app.detail_scroll, first_user_scroll);
+    }
+
+    #[test]
+    fn detail_scroll_bursts_are_coalesced_and_key_repeats_do_not_keep_scrolling() {
+        let session = report().session.expect("fixture session");
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: Vec::new(),
+        });
+        app.detail_max_scroll = 200;
+        let mut events = vec![Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ))];
+        events.extend((0..100).map(|_| {
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            ))
+        }));
+        events.extend((0..100).map(|_| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            })
+        }));
+
+        for event in coalesce_detail_events(events) {
+            handle_detail_event(&mut app, &event, None);
+        }
+
+        assert_eq!(
+            app.detail_scroll, 4,
+            "one key press and one three-line wheel step should be applied"
+        );
     }
 
     #[test]

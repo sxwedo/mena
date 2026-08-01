@@ -31,6 +31,7 @@ pub struct AgentSession {
 pub enum SessionMessageKind {
     User,
     Assistant,
+    Skill,
     ToolCall,
     ToolResult,
     System,
@@ -43,6 +44,7 @@ impl SessionMessageKind {
         match self {
             Self::User => "USER",
             Self::Assistant => "ASSISTANT",
+            Self::Skill => "SKILL",
             Self::ToolCall => "TOOL CALL",
             Self::ToolResult => "TOOL RESULT",
             Self::System => "SYSTEM / META",
@@ -54,6 +56,7 @@ impl SessionMessageKind {
         match role.to_ascii_lowercase().as_str() {
             "user" | "human" => Self::User,
             "assistant" | "gemini" | "model" => Self::Assistant,
+            "skill" => Self::Skill,
             "tool_call" | "tool_use" | "function_call" => Self::ToolCall,
             "tool_result" | "function_call_output" => Self::ToolResult,
             "error" => Self::Error,
@@ -66,6 +69,7 @@ impl SessionMessageKind {
 pub struct SessionMessage {
     pub kind: SessionMessageKind,
     pub timestamp: Option<String>,
+    pub model: Option<String>,
     pub content: String,
 }
 
@@ -1177,6 +1181,7 @@ fn codex_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
 
 fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
     let mut messages = Vec::new();
+    let mut current_model = None;
     let skipped = visit_bounded_lines(path, |line| {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
@@ -1184,6 +1189,10 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         let Some(payload) = record.get("payload") else {
             return;
         };
+        if record.get("type").and_then(Value::as_str) == Some("turn_context") {
+            current_model = model_id(payload);
+            return;
+        }
         let Some(payload_type) = payload.get("type").and_then(Value::as_str) else {
             return;
         };
@@ -1197,11 +1206,11 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
             payload
                 .get("content")
                 .map(|content| {
-                    messages_from_content(
-                        SessionMessageKind::from_provider_role(role),
-                        timestamp,
-                        content,
-                    )
+                    let kind = SessionMessageKind::from_provider_role(role);
+                    let model = (kind == SessionMessageKind::Assistant)
+                        .then(|| model_id(payload).or_else(|| current_model.clone()))
+                        .flatten();
+                    messages_from_content(kind, timestamp, model, content)
                 })
                 .unwrap_or_default()
         } else {
@@ -1210,7 +1219,7 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
             } else if payload_type.contains("call_output") || payload_type.ends_with("_result") {
                 Some(SessionMessageKind::ToolResult)
             } else if payload_type.ends_with("_call") {
-                Some(SessionMessageKind::ToolCall)
+                Some(tool_call_kind(payload))
             } else {
                 Some(SessionMessageKind::System)
             };
@@ -1218,6 +1227,7 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
                 content_text_full(payload).map(|content| SessionMessage {
                     kind,
                     timestamp,
+                    model: None,
                     content,
                 })
             })
@@ -1249,9 +1259,11 @@ fn nested_jsonl_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         };
         let timestamp =
             string_at(&record, "/timestamp").or_else(|| string_at(&record, "/message/timestamp"));
+        let model = record.pointer("/message").and_then(model_id);
         messages.extend(messages_from_content(
             SessionMessageKind::from_provider_role(role),
             timestamp,
+            model,
             content,
         ));
     })?;
@@ -1283,6 +1295,7 @@ fn gemini_messages(path: &Path) -> Result<Vec<SessionMessage>> {
                 messages_from_content(
                     SessionMessageKind::from_provider_role(role),
                     string_at(message, "/timestamp"),
+                    model_id(message),
                     content,
                 )
             })
@@ -1310,6 +1323,7 @@ fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage
             .map(Value::to_string)
             .or_else(|| string_at(&message, "/timestamp"));
         let parent_kind = SessionMessageKind::from_provider_role(role);
+        let model = model_id(&message);
         let mut part_paths = files_with_extension(&storage.join("part").join(&message_id), "json")?;
         part_paths.sort();
         let mut parsed = Vec::new();
@@ -1320,6 +1334,7 @@ fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage
             parsed.extend(opencode_part_messages(
                 parent_kind,
                 timestamp.clone(),
+                model.clone(),
                 &part,
             ));
         }
@@ -1329,6 +1344,7 @@ fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage
             parsed.extend(messages_from_content(
                 parent_kind,
                 timestamp.clone(),
+                model.clone(),
                 content,
             ));
         }
@@ -1356,12 +1372,15 @@ fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage
 fn messages_from_content(
     parent_kind: SessionMessageKind,
     timestamp: Option<String>,
+    model: Option<String>,
     content: &Value,
 ) -> Vec<SessionMessage> {
     if let Value::Array(parts) = content {
         return parts
             .iter()
-            .flat_map(|part| messages_from_content(parent_kind, timestamp.clone(), part))
+            .flat_map(|part| {
+                messages_from_content(parent_kind, timestamp.clone(), model.clone(), part)
+            })
             .collect();
     }
 
@@ -1371,7 +1390,7 @@ fn messages_from_content(
             .and_then(Value::as_str)
             .map_or(parent_kind, |value| match value {
                 "text" | "input_text" | "output_text" => parent_kind,
-                "tool_use" | "tool_call" | "function_call" => SessionMessageKind::ToolCall,
+                "tool_use" | "tool_call" | "function_call" => tool_call_kind(content),
                 "tool_result" | "function_call_output" => SessionMessageKind::ToolResult,
                 "error" => SessionMessageKind::Error,
                 "thinking" | "reasoning" | "system" | "meta" | "developer_message" => {
@@ -1384,6 +1403,9 @@ fn messages_from_content(
             vec![SessionMessage {
                 kind,
                 timestamp,
+                model: (kind == SessionMessageKind::Assistant)
+                    .then_some(model)
+                    .flatten(),
                 content,
             }]
         })
@@ -1393,15 +1415,16 @@ fn messages_from_content(
 fn opencode_part_messages(
     parent_kind: SessionMessageKind,
     timestamp: Option<String>,
+    model: Option<String>,
     part: &Value,
 ) -> Vec<SessionMessage> {
     if part.get("type").and_then(Value::as_str) != Some("tool") {
-        return messages_from_content(parent_kind, timestamp, part);
+        return messages_from_content(parent_kind, timestamp, model, part);
     }
 
     let mut messages = Vec::new();
     for (pointer, kind) in [
-        ("/state/input", SessionMessageKind::ToolCall),
+        ("/state/input", tool_call_kind(part)),
         ("/state/output", SessionMessageKind::ToolResult),
         ("/state/error", SessionMessageKind::Error),
     ] {
@@ -1421,6 +1444,7 @@ fn opencode_part_messages(
             messages.push(SessionMessage {
                 kind,
                 timestamp: timestamp.clone(),
+                model: None,
                 content,
             });
         }
@@ -1429,12 +1453,39 @@ fn opencode_part_messages(
         && let Some(content) = content_text_full(part)
     {
         messages.push(SessionMessage {
-            kind: SessionMessageKind::ToolCall,
+            kind: tool_call_kind(part),
             timestamp,
+            model: None,
             content,
         });
     }
     messages
+}
+
+fn tool_call_kind(value: &Value) -> SessionMessageKind {
+    let name = value
+        .get("name")
+        .or_else(|| value.get("tool"))
+        .or_else(|| value.pointer("/function/name"))
+        .and_then(Value::as_str);
+    if name.is_some_and(|name| name.to_ascii_lowercase().contains("skill")) {
+        SessionMessageKind::Skill
+    } else {
+        SessionMessageKind::ToolCall
+    }
+}
+
+fn model_id(value: &Value) -> Option<String> {
+    [
+        "/model",
+        "/modelId",
+        "/modelID",
+        "/model/id",
+        "/model/modelId",
+        "/model/modelID",
+    ]
+    .into_iter()
+    .find_map(|pointer| string_at(value, pointer))
 }
 
 fn claude_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
@@ -1707,8 +1758,11 @@ mod tests {
             &session_path,
             &format!(
                 "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-detail\",\"cwd\":\"/work/codex\",\"timestamp\":\"2026-01-02T03:04:05Z\"}}}}\n\
+                 {{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-5.5\"}}}}\n\
                  {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"first question\"}}]}}}}\n\
-                 {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":{long_reply:?}}}]}}}}\n"
+                 {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":{long_reply:?}}}]}}}}\n\
+                 {{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-5.6\"}}}}\n\
+                 {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"second model answer\"}}]}}}}\n"
             ),
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
@@ -1718,11 +1772,13 @@ mod tests {
 
         let detail = catalog.detail(session).expect("load complete detail");
 
-        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages.len(), 3);
         assert_eq!(detail.messages[0].kind, SessionMessageKind::User);
         assert_eq!(detail.messages[0].content, "first question");
         assert_eq!(detail.messages[1].kind, SessionMessageKind::Assistant);
         assert_eq!(detail.messages[1].content, long_reply);
+        assert_eq!(detail.messages[1].model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(detail.messages[2].model.as_deref(), Some("gpt-5.6"));
     }
 
     #[test]
@@ -1735,6 +1791,7 @@ mod tests {
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-kinds\",\"cwd\":\"/work\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"use_skill\",\"arguments\":\"{\\\"name\\\":\\\"frontend-design\\\"}\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"file contents\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n",
                 "{\"type\":\"event_msg\",\"payload\":{\"type\":\"unknown_event\",\"value\":\"meta value\"}}\n",
@@ -1757,6 +1814,7 @@ mod tests {
             [
                 SessionMessageKind::User,
                 SessionMessageKind::ToolCall,
+                SessionMessageKind::Skill,
                 SessionMessageKind::ToolResult,
                 SessionMessageKind::Assistant,
                 SessionMessageKind::System,
@@ -1764,8 +1822,9 @@ mod tests {
             ]
         );
         assert!(detail.messages[1].content.contains("read_file"));
-        assert!(detail.messages[2].content.contains("file contents"));
-        assert!(detail.messages[4].content.contains("meta value"));
+        assert!(detail.messages[2].content.contains("frontend-design"));
+        assert!(detail.messages[3].content.contains("file contents"));
+        assert!(detail.messages[5].content.contains("meta value"));
     }
 
     #[test]
@@ -1778,8 +1837,9 @@ mod tests {
             &session_path,
             concat!(
                 "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"cwd\":\"/work/claude\",\"timestamp\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"user\",\"content\":\"first question\"}}\n",
-                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
-                "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:07Z\",\"message\":{\"role\":\"user\",\"content\":\"second question\"}}\n"
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
+                "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:07Z\",\"message\":{\"role\":\"user\",\"content\":\"second question\"}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:08Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-6\",\"content\":\"second answer\"}}\n"
             ),
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
@@ -1798,9 +1858,15 @@ mod tests {
             [
                 (SessionMessageKind::User, "first question"),
                 (SessionMessageKind::Assistant, "first answer"),
-                (SessionMessageKind::User, "second question")
+                (SessionMessageKind::User, "second question"),
+                (SessionMessageKind::Assistant, "second answer")
             ]
         );
+        assert_eq!(
+            detail.messages[1].model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(detail.messages[3].model.as_deref(), Some("claude-opus-4-6"));
     }
 
     #[test]
@@ -1815,7 +1881,7 @@ mod tests {
                 &temp.path().join(root).join(format!("{session_id}.jsonl")),
                 &format!(
                     "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/work\"}}\n\
-                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"before\"}},{{\"type\":\"tool_use\",\"name\":\"read\",\"input\":{{\"path\":\"README.md\"}}}},{{\"type\":\"tool_result\",\"content\":\"file contents\"}},{{\"type\":\"thinking\",\"thinking\":\"private note\"}},{{\"type\":\"error\",\"message\":\"tool failed\"}},{{\"type\":\"text\",\"text\":\"after\"}}]}}}}\n"
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"before\"}},{{\"type\":\"tool_use\",\"name\":\"read\",\"input\":{{\"path\":\"README.md\"}}}},{{\"type\":\"tool_result\",\"content\":\"file contents\"}},{{\"type\":\"thinking\",\"thinking\":\"private note\"}},{{\"type\":\"error\",\"message\":\"tool failed\"}},{{\"type\":\"tool_use\",\"name\":\"Skill\",\"input\":{{\"skill\":\"frontend-design\"}}}},{{\"type\":\"text\",\"text\":\"after\"}}]}}}}\n"
                 ),
             );
         }
@@ -1842,6 +1908,7 @@ mod tests {
                     SessionMessageKind::ToolResult,
                     SessionMessageKind::System,
                     SessionMessageKind::Error,
+                    SessionMessageKind::Skill,
                     SessionMessageKind::Assistant,
                 ],
                 "provider {provider}"
@@ -1850,6 +1917,7 @@ mod tests {
             assert!(detail.messages[2].content.contains("file contents"));
             assert!(detail.messages[3].content.contains("private note"));
             assert!(detail.messages[4].content.contains("tool failed"));
+            assert!(detail.messages[5].content.contains("frontend-design"));
         }
     }
 
@@ -1861,7 +1929,7 @@ mod tests {
             .join(".gemini/tmp/project/chats/gemini-detail.json");
         write(
             &session_path,
-            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","content":"first answer"},{"type":"user","content":"second question"}]}"#,
+            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","content":"second answer"}]}"#,
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let session = catalog
@@ -1879,8 +1947,14 @@ mod tests {
             [
                 (SessionMessageKind::User, "first question"),
                 (SessionMessageKind::Assistant, "first answer"),
-                (SessionMessageKind::User, "second question")
+                (SessionMessageKind::User, "second question"),
+                (SessionMessageKind::Assistant, "second answer")
             ]
+        );
+        assert_eq!(detail.messages[1].model.as_deref(), Some("gemini-3.1-pro"));
+        assert_eq!(
+            detail.messages[3].model.as_deref(),
+            Some("gemini-3.1-flash")
         );
     }
 
@@ -1892,7 +1966,7 @@ mod tests {
             .join(".gemini/tmp/project/chats/gemini-structured.json");
         write(
             &session_path,
-            r#"{"sessionId":"gemini-structured","messages":[{"type":"gemini","content":[{"type":"text","text":"before"},{"type":"function_call","name":"read","args":{"path":"README.md"}},{"type":"function_call_output","output":"file contents"},{"type":"mystery","value":"meta"},{"type":"text","text":"after"}]}]}"#,
+            r#"{"sessionId":"gemini-structured","messages":[{"type":"gemini","content":[{"type":"text","text":"before"},{"type":"function_call","name":"read","args":{"path":"README.md"}},{"type":"function_call_output","output":"file contents"},{"type":"mystery","value":"meta"},{"type":"function_call","name":"activate_skill","args":{"skill":"frontend-design"}},{"type":"text","text":"after"}]}]}"#,
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let session = catalog
@@ -1912,12 +1986,14 @@ mod tests {
                 SessionMessageKind::ToolCall,
                 SessionMessageKind::ToolResult,
                 SessionMessageKind::System,
+                SessionMessageKind::Skill,
                 SessionMessageKind::Assistant,
             ]
         );
         assert!(detail.messages[1].content.contains("README.md"));
         assert!(detail.messages[2].content.contains("file contents"));
         assert!(detail.messages[3].content.contains("meta"));
+        assert!(detail.messages[4].content.contains("frontend-design"));
     }
 
     #[test]
@@ -1932,7 +2008,7 @@ mod tests {
                 &format!(
                     "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/work\"}}\n\
                      {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"question for {session_id}\"}}}}\n\
-                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":\"answer for {session_id}\"}}}}\n"
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"model\":\"model-for-{session_id}\",\"content\":\"answer for {session_id}\"}}}}\n"
                 ),
             );
         }
@@ -1952,6 +2028,10 @@ mod tests {
                 detail.messages[1].content,
                 format!("answer for {session_id}")
             );
+            assert_eq!(
+                detail.messages[1].model,
+                Some(format!("model-for-{session_id}"))
+            );
         }
     }
 
@@ -1965,7 +2045,7 @@ mod tests {
         );
         write(
             &storage.join("message/opencode-detail/message-2.json"),
-            r#"{"id":"message-2","role":"assistant","time":{"created":3}}"#,
+            r#"{"id":"message-2","role":"assistant","modelID":"big-pickle","time":{"created":3}}"#,
         );
         write(
             &storage.join("part/message-2/part-2.json"),
@@ -1983,6 +2063,10 @@ mod tests {
             &storage.join("part/message-1/part-tool.json"),
             r#"{"type":"tool","tool":"read","state":{"input":{"path":"README.md"},"output":"file contents"}}"#,
         );
+        write(
+            &storage.join("part/message-1/part-skill.json"),
+            r#"{"type":"tool","tool":"skill","state":{"input":{"name":"frontend-design"}}}"#,
+        );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let session = catalog
             .resolve(Some("opencode"), "opencode-detail")
@@ -1990,15 +2074,18 @@ mod tests {
 
         let detail = catalog.detail(session).expect("load complete detail");
 
-        assert_eq!(detail.messages.len(), 4);
+        assert_eq!(detail.messages.len(), 5);
         assert_eq!(detail.messages[0].kind, SessionMessageKind::User);
         assert_eq!(detail.messages[0].content, "first question");
-        assert_eq!(detail.messages[1].kind, SessionMessageKind::ToolCall);
-        assert!(detail.messages[1].content.contains("README.md"));
-        assert_eq!(detail.messages[2].kind, SessionMessageKind::ToolResult);
-        assert!(detail.messages[2].content.contains("file contents"));
-        assert_eq!(detail.messages[3].kind, SessionMessageKind::Assistant);
-        assert_eq!(detail.messages[3].content, "second answer");
+        assert_eq!(detail.messages[1].kind, SessionMessageKind::Skill);
+        assert!(detail.messages[1].content.contains("frontend-design"));
+        assert_eq!(detail.messages[2].kind, SessionMessageKind::ToolCall);
+        assert!(detail.messages[2].content.contains("README.md"));
+        assert_eq!(detail.messages[3].kind, SessionMessageKind::ToolResult);
+        assert!(detail.messages[3].content.contains("file contents"));
+        assert_eq!(detail.messages[4].kind, SessionMessageKind::Assistant);
+        assert_eq!(detail.messages[4].content, "second answer");
+        assert_eq!(detail.messages[4].model.as_deref(), Some("big-pickle"));
     }
 
     #[test]

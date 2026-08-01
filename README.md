@@ -87,11 +87,20 @@ The interactive session manager supports `/` search, `Enter`/`i` to open a
 large session-detail popup, `r` resume, and `d` followed by `y` for permanent
 deletion. The detail popup shows complete session metadata and the full native
 chat transcript. While it is open, arrows or `j`/`k` scroll the transcript,
-`PgUp`/`PgDn` page, `Home`/`End` jump, `e` exports the complete detail as
-Markdown, and `Enter` or `Esc` returns to the session list without changing its
-selection. Message headers are bold and color-coded: user green, assistant
-cyan, tool call yellow, tool result magenta, system/meta dark gray, and error
-red. Message bodies keep the terminal's default foreground color.
+`Shift`+`↑`/`↓` jumps between user and assistant messages while skipping tool
+traffic, `PgUp`/`PgDn` pages, `Home`/`End` jumps to the bounds, and `e` exports
+the complete detail as Markdown. `Enter` or `Esc` returns to the session list
+without changing its selection. Touchpad and mouse-wheel input is captured
+directly; queued same-direction wheel events are coalesced so inertial input
+cannot leave the detail view scrolling through a large backlog.
+
+Message headers stay bold and message bodies use the same category color: user
+is light green, assistant is cyan, skill invocation is light yellow, and tool
+calls, tool results, system/meta, and errors use the same muted gray previously
+used by metadata keys. Detail metadata keys such as `Target`, `Agent`, and
+`Title` are light magenta. When a provider persists a model id, every assistant
+header displays its own value, so model switches inside one session remain
+visible. Markdown exports preserve those per-message model ids too.
 
 Exports are created in the directory where `mena` was started and the popup
 shows the resulting absolute path. Names use

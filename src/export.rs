@@ -99,10 +99,21 @@ fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String
     );
     for message in &detail.messages {
         let timestamp = message.timestamp.as_deref().unwrap_or("-");
-        let _ = writeln!(markdown, "### [{timestamp}] {}\n", message.kind.label());
+        let model = (message.kind == SessionMessageKind::Assistant)
+            .then(|| message.model.as_deref().map(str::trim))
+            .flatten()
+            .filter(|model| !model.is_empty())
+            .map_or_else(String::new, |model| format!(" · {model}"));
+        let _ = writeln!(
+            markdown,
+            "### [{timestamp}] {}{model}\n",
+            message.kind.label()
+        );
         if matches!(
             message.kind,
-            SessionMessageKind::ToolCall | SessionMessageKind::ToolResult
+            SessionMessageKind::Skill
+                | SessionMessageKind::ToolCall
+                | SessionMessageKind::ToolResult
         ) {
             let language = if serde_json::from_str::<serde_json::Value>(&message.content).is_ok() {
                 "json"
@@ -232,6 +243,8 @@ mod tests {
             "2026-01-01T00:04:05+00:00",
             "USER",
             "第一行\n第二行",
+            "ASSISTANT · gpt-5.5",
+            "model-specific answer",
             "TOOL CALL",
             "README.md",
             "TOOL RESULT",
@@ -272,16 +285,25 @@ mod tests {
                 SessionMessage {
                     kind: SessionMessageKind::User,
                     timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
+                    model: None,
                     content: "第一行\n第二行".to_owned(),
+                },
+                SessionMessage {
+                    kind: SessionMessageKind::Assistant,
+                    timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
+                    model: Some("gpt-5.5".to_owned()),
+                    content: "model-specific answer".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::ToolCall,
                     timestamp: Some("2026-01-01T00:00:03Z".to_owned()),
+                    model: None,
                     content: "{\n  \"name\": \"read\",\n  \"path\": \"README.md\",\n  \"literal\": \"```\"\n}".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::ToolResult,
                     timestamp: None,
+                    model: None,
                     content: "最后一条，完整保留".to_owned(),
                 },
             ],
