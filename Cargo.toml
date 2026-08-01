@@ -1,0 +1,28 @@
+[package]
+name = "mena"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.1"
+description = "A local-first control plane for developer-agent processes and sessions."
+license = "MIT"
+repository = "https://github.com/sxwedo/mena"
+homepage = "https://github.com/sxwedo/mena"
+readme = "README.md"
+keywords = ["agents", "cli", "developer-tools", "local-first", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anstyle = "1.0"
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+dirs = "5"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+tempfile = "3.27"
+toml = "0.8"
+unicode-width = "0.2"
