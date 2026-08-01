@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,7 +15,9 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessageKind};
-use crate::view::{AgentReport, format_bytes, format_duration};
+use crate::view::{
+    AgentReport, format_bytes, format_count, format_duration, format_duration_millis,
+};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
@@ -1215,14 +1218,28 @@ fn session_detail_content(detail: &SessionDetail) -> SessionDetailContent {
 }
 
 fn message_header(message: &crate::session::SessionMessage, timestamp: &str) -> String {
-    let model = (message.kind == SessionMessageKind::Assistant)
-        .then(|| message.model.as_deref().map(str::trim))
-        .flatten()
-        .filter(|model| !model.is_empty());
-    model.map_or_else(
-        || format!("[{timestamp}] {}", message.kind.label()),
-        |model| format!("[{timestamp}] {} · {model}", message.kind.label()),
-    )
+    let mut header = format!("[{timestamp}] {}", message.kind.label());
+    if message.kind != SessionMessageKind::Assistant {
+        return header;
+    }
+    if let Some(model) = message
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        header.push_str(" · ");
+        header.push_str(model);
+    }
+    if let Some(duration_ms) = message.metrics.duration_ms {
+        header.push_str(" · ");
+        header.push_str(&format_duration_millis(duration_ms));
+    }
+    if let Some(tokens) = message.metrics.tokens {
+        header.push_str(" · ");
+        let _ = write!(header, "{} tokens", format_count(tokens));
+    }
+    header
 }
 
 fn message_kind_style(kind: SessionMessageKind) -> Style {
@@ -1593,6 +1610,7 @@ mod tests {
     use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
         AgentSession, DeletionSummary, SessionDetail, SessionMessage, SessionMessageKind,
+        SessionMessageMetrics,
     };
     use crate::view::AgentReport;
 
@@ -1695,6 +1713,7 @@ mod tests {
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content: "line\n".repeat(40),
             }],
         });
@@ -1756,18 +1775,24 @@ mod tests {
                     kind: SessionMessageKind::User,
                     timestamp: Some("2026-08-01T01:02:04Z".to_owned()),
                     model: None,
+                    metrics: SessionMessageMetrics::default(),
                     content: "complete first question".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::Assistant,
                     timestamp: Some("2026-08-01T01:02:05Z".to_owned()),
                     model: Some("gpt-5.5".to_owned()),
+                    metrics: SessionMessageMetrics::default(),
                     content: "complete first answer".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::Assistant,
                     timestamp: Some("2026-08-01T01:02:06Z".to_owned()),
                     model: Some("gpt-5.6".to_owned()),
+                    metrics: SessionMessageMetrics {
+                        duration_ms: Some(125_450),
+                        tokens: Some(123_456),
+                    },
                     content: "complete second answer".to_owned(),
                 },
             ],
@@ -1789,7 +1814,7 @@ mod tests {
             "$1.2500",
             "Conversation (3 messages)",
             "ASSISTANT · gpt-5.5",
-            "ASSISTANT · gpt-5.6",
+            "ASSISTANT · gpt-5.6 · 2m 05.5s · 123,456 tokens",
             "complete first question",
             "complete first answer",
             "complete second answer",
@@ -1828,6 +1853,7 @@ mod tests {
                 kind: *kind,
                 timestamp: None,
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content: format!("plain-body-{index}"),
             })
             .collect();
@@ -1903,6 +1929,7 @@ mod tests {
                 },
                 timestamp: None,
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content: format!("complete message number {index}"),
             })
             .collect();
@@ -1942,6 +1969,7 @@ mod tests {
             kind: SessionMessageKind::Assistant,
             timestamp: None,
             model: Some("gpt-5.6".to_owned()),
+            metrics: SessionMessageMetrics::default(),
             content: format!("{wrapped}FINAL DETAIL CONTENT"),
         }];
         let mut app = SessionsApp::new(
@@ -1980,6 +2008,7 @@ mod tests {
             kind: SessionMessageKind::Assistant,
             timestamp: None,
             model: Some("gpt-5.6".to_owned()),
+            metrics: SessionMessageMetrics::default(),
             content: format!("{wrapped}FINAL CONTENT AFTER RESIZE"),
         }];
         let mut app = SessionsApp::new(
@@ -2022,6 +2051,7 @@ mod tests {
             kind: SessionMessageKind::Assistant,
             timestamp: None,
             model: Some("gpt-5.6".to_owned()),
+            metrics: SessionMessageMetrics::default(),
             content,
         }];
         let mut app = SessionsApp::new(
@@ -2064,24 +2094,28 @@ mod tests {
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content: "first user message".to_owned(),
             },
             SessionMessage {
                 kind: SessionMessageKind::ToolCall,
                 timestamp: None,
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content: "tool detail\n".repeat(15),
             },
             SessionMessage {
                 kind: SessionMessageKind::ToolResult,
                 timestamp: None,
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content: "tool result\n".repeat(15),
             },
             SessionMessage {
                 kind: SessionMessageKind::Assistant,
                 timestamp: None,
                 model: Some("gpt-5.5".to_owned()),
+                metrics: SessionMessageMetrics::default(),
                 content: "assistant answer".to_owned(),
             },
         ];
@@ -2237,6 +2271,7 @@ mod tests {
                 kind: SessionMessageKind::Assistant,
                 timestamp: None,
                 model: Some("gpt-5.6".to_owned()),
+                metrics: SessionMessageMetrics::default(),
                 content: "complete clipboard tail".to_owned(),
             }],
         });

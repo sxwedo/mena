@@ -70,7 +70,15 @@ pub struct SessionMessage {
     pub kind: SessionMessageKind,
     pub timestamp: Option<String>,
     pub model: Option<String>,
+    pub metrics: SessionMessageMetrics,
     pub content: String,
+}
+
+/// Exact per-response metrics persisted by a provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionMessageMetrics {
+    pub duration_ms: Option<u64>,
+    pub tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1180,8 +1188,10 @@ fn codex_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
 }
 
 fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
-    let mut messages = Vec::new();
+    let mut messages: Vec<SessionMessage> = Vec::new();
     let mut current_model = None;
+    let mut pending_assistant: Option<usize> = None;
+    let mut turn_last_assistant: Option<usize> = None;
     let skipped = visit_bounded_lines(path, |line| {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
@@ -1196,6 +1206,23 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         let Some(payload_type) = payload.get("type").and_then(Value::as_str) else {
             return;
         };
+        if payload_type == "task_started" {
+            pending_assistant = None;
+            turn_last_assistant = None;
+        } else if payload_type == "token_count" {
+            if let Some(index) = pending_assistant.take()
+                && let Some(tokens) = payload
+                    .pointer("/info/last_token_usage")
+                    .and_then(message_usage_tokens)
+            {
+                messages[index].metrics.tokens = Some(tokens);
+            }
+        } else if payload_type == "task_complete"
+            && let Some(index) = turn_last_assistant
+            && let Some(duration_ms) = payload.get("duration_ms").and_then(number_as_milliseconds)
+        {
+            messages[index].metrics.duration_ms = Some(duration_ms);
+        }
         let timestamp =
             string_at(&record, "/timestamp").or_else(|| string_at(&record, "/payload/timestamp"));
         let parsed = if payload_type == "message" {
@@ -1228,13 +1255,30 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
                     kind,
                     timestamp,
                     model: None,
+                    metrics: SessionMessageMetrics::default(),
                     content,
                 })
             })
             .into_iter()
             .collect()
         };
+        let start = messages.len();
         messages.extend(parsed);
+        if messages[start..]
+            .iter()
+            .any(|message| message.kind == SessionMessageKind::User)
+        {
+            pending_assistant = None;
+            turn_last_assistant = None;
+        }
+        if let Some(relative_index) = messages[start..]
+            .iter()
+            .rposition(|message| message.kind == SessionMessageKind::Assistant)
+        {
+            let index = start + relative_index;
+            pending_assistant = Some(index);
+            turn_last_assistant = Some(index);
+        }
     })?;
     if skipped {
         bail!(
@@ -1246,7 +1290,8 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
 }
 
 fn nested_jsonl_messages(path: &Path) -> Result<Vec<SessionMessage>> {
-    let mut messages = Vec::new();
+    let mut messages: Vec<SessionMessage> = Vec::new();
+    let mut metric_targets = BTreeMap::new();
     let skipped = visit_bounded_lines(path, |line| {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
@@ -1260,12 +1305,30 @@ fn nested_jsonl_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         let timestamp =
             string_at(&record, "/timestamp").or_else(|| string_at(&record, "/message/timestamp"));
         let model = record.pointer("/message").and_then(model_id);
-        messages.extend(messages_from_content(
+        let mut parsed = messages_from_content(
             SessionMessageKind::from_provider_role(role),
             timestamp,
             model,
             content,
-        ));
+        );
+        if let Some(index) = parsed
+            .iter()
+            .rposition(|message| message.kind == SessionMessageKind::Assistant)
+        {
+            let target = messages.len() + index;
+            if let Some(message_id) = string_at(&record, "/message/id")
+                && let Some(previous) = metric_targets.insert(message_id, target)
+            {
+                messages[previous].metrics = SessionMessageMetrics::default();
+            }
+            parsed[index].metrics.tokens = record
+                .pointer("/message/usage")
+                .and_then(message_usage_tokens);
+            parsed[index].metrics.duration_ms = record
+                .pointer("/message/duration")
+                .and_then(number_as_milliseconds);
+        }
+        messages.extend(parsed);
     })?;
     if skipped {
         bail!(
@@ -1283,24 +1346,42 @@ fn gemini_messages(path: &Path) -> Result<Vec<SessionMessage>> {
     let Some(values) = session.get("messages").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
-    Ok(values
-        .iter()
-        .flat_map(|message| {
-            let role = message
-                .get("type")
-                .or_else(|| message.get("role"))
-                .and_then(Value::as_str);
-            let content = message.get("content");
-            role.zip(content).map_or_else(Vec::new, |(role, content)| {
-                messages_from_content(
-                    SessionMessageKind::from_provider_role(role),
-                    string_at(message, "/timestamp"),
-                    model_id(message),
-                    content,
-                )
-            })
-        })
-        .collect())
+    let mut messages = Vec::new();
+    for message in values {
+        let role = message
+            .get("type")
+            .or_else(|| message.get("role"))
+            .and_then(Value::as_str);
+        let content = message.get("content");
+        let Some((role, content)) = role.zip(content) else {
+            continue;
+        };
+        let mut parsed = messages_from_content(
+            SessionMessageKind::from_provider_role(role),
+            string_at(message, "/timestamp"),
+            model_id(message),
+            content,
+        );
+        if let Some(index) = parsed
+            .iter()
+            .rposition(|message| message.kind == SessionMessageKind::Assistant)
+        {
+            parsed[index].metrics.tokens = message
+                .get("tokens")
+                .and_then(message_usage_tokens)
+                .or_else(|| message.get("usage").and_then(message_usage_tokens));
+            parsed[index].metrics.duration_ms = message
+                .get("durationMs")
+                .and_then(number_as_milliseconds)
+                .or_else(|| {
+                    message
+                        .pointer("/metrics/durationMs")
+                        .and_then(number_as_milliseconds)
+                });
+        }
+        messages.extend(parsed);
+    }
+    Ok(messages)
 }
 
 fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage>> {
@@ -1347,6 +1428,17 @@ fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage
                 model.clone(),
                 content,
             ));
+        }
+        if let Some(index) = parsed
+            .iter()
+            .rposition(|message| message.kind == SessionMessageKind::Assistant)
+        {
+            parsed[index].metrics.tokens = message.get("tokens").and_then(message_usage_tokens);
+            parsed[index].metrics.duration_ms = message
+                .pointer("/time/completed")
+                .and_then(Value::as_u64)
+                .zip(created)
+                .map(|(completed, created)| completed.saturating_sub(created));
         }
         for (part_index, parsed) in parsed.into_iter().enumerate() {
             messages.push((
@@ -1406,6 +1498,7 @@ fn messages_from_content(
                 model: (kind == SessionMessageKind::Assistant)
                     .then_some(model)
                     .flatten(),
+                metrics: SessionMessageMetrics::default(),
                 content,
             }]
         })
@@ -1445,6 +1538,7 @@ fn opencode_part_messages(
                 kind,
                 timestamp: timestamp.clone(),
                 model: None,
+                metrics: SessionMessageMetrics::default(),
                 content,
             });
         }
@@ -1456,6 +1550,7 @@ fn opencode_part_messages(
             kind: tool_call_kind(part),
             timestamp,
             model: None,
+            metrics: SessionMessageMetrics::default(),
             content,
         });
     }
@@ -1488,26 +1583,68 @@ fn model_id(value: &Value) -> Option<String> {
     .find_map(|pointer| string_at(value, pointer))
 }
 
+fn message_usage_tokens(usage: &Value) -> Option<u64> {
+    for pointer in ["/total_tokens", "/totalTokens", "/total"] {
+        if let Some(tokens) = usage.pointer(pointer).and_then(Value::as_u64) {
+            return Some(tokens);
+        }
+    }
+
+    let mut total = 0_u64;
+    let mut found = false;
+    for pointer in [
+        "/input_tokens",
+        "/output_tokens",
+        "/cache_read_input_tokens",
+        "/cache_creation_input_tokens",
+        "/input",
+        "/output",
+        "/reasoning",
+        "/reasoningTokens",
+        "/cache/read",
+        "/cache/write",
+        "/cacheRead",
+        "/cacheWrite",
+    ] {
+        if let Some(tokens) = usage.pointer(pointer).and_then(Value::as_u64) {
+            found = true;
+            total = total.saturating_add(tokens);
+        }
+    }
+    found.then_some(total)
+}
+
+fn number_as_milliseconds(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .and_then(|value| format!("{value:.0}").parse().ok())
+    })
+}
+
 fn claude_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
-    let mut tokens = 0_u64;
+    let mut anonymous_tokens = 0_u64;
+    let mut message_tokens = BTreeMap::new();
     let mut has_usage = false;
     let skipped = visit_bounded_lines(path, |line| {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
         };
-        if let Some(usage) = record.pointer("/message/usage") {
+        if let Some(usage) = record.pointer("/message/usage")
+            && let Some(tokens) = message_usage_tokens(usage)
+        {
             has_usage = true;
-            for field in [
-                "input_tokens",
-                "output_tokens",
-                "cache_read_input_tokens",
-                "cache_creation_input_tokens",
-            ] {
-                tokens = tokens
-                    .saturating_add(usage.get(field).and_then(Value::as_u64).unwrap_or_default());
+            if let Some(message_id) = string_at(&record, "/message/id") {
+                message_tokens.insert(message_id, tokens);
+            } else {
+                anonymous_tokens = anonymous_tokens.saturating_add(tokens);
             }
         }
     })?;
+    let tokens = message_tokens
+        .into_values()
+        .fold(anonymous_tokens, u64::saturating_add);
     Ok(((has_usage && !skipped).then_some(tokens), None))
 }
 
@@ -1782,6 +1919,39 @@ mod tests {
     }
 
     #[test]
+    fn attaches_codex_turn_duration_and_last_request_tokens_to_the_assistant() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp.path().join(".codex/sessions/2026/01/02/metrics.jsonl");
+        write(
+            &session_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-metrics\",\"cwd\":\"/work\"}}\n",
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"question\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"answer\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":123},\"total_token_usage\":{\"total_tokens\":999}}}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"duration_ms\":6543}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("codex"), "codex-metrics")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+        let assistant = detail
+            .messages
+            .iter()
+            .find(|message| message.kind == SessionMessageKind::Assistant)
+            .expect("assistant message");
+
+        assert_eq!(assistant.model.as_deref(), Some("gpt-5.6"));
+        assert_eq!(assistant.metrics.tokens, Some(123));
+        assert_eq!(assistant.metrics.duration_ms, Some(6_543));
+    }
+
+    #[test]
     fn classifies_codex_messages_tool_calls_results_and_errors() {
         let temp = tempdir().expect("temp home");
         let session_path = temp.path().join(".codex/sessions/2026/01/02/kinds.jsonl");
@@ -1837,9 +2007,9 @@ mod tests {
             &session_path,
             concat!(
                 "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"cwd\":\"/work/claude\",\"timestamp\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"user\",\"content\":\"first question\"}}\n",
-                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"id\":\"message-1\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40},\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
                 "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:07Z\",\"message\":{\"role\":\"user\",\"content\":\"second question\"}}\n",
-                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:08Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-6\",\"content\":\"second answer\"}}\n"
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:08Z\",\"message\":{\"id\":\"message-2\",\"role\":\"assistant\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":100,\"output_tokens\":50},\"content\":\"second answer\"}}\n"
             ),
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
@@ -1867,6 +2037,34 @@ mod tests {
             Some("claude-sonnet-4-6")
         );
         assert_eq!(detail.messages[3].model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(detail.messages[1].metrics.tokens, Some(100));
+        assert_eq!(detail.messages[3].metrics.tokens, Some(150));
+    }
+
+    #[test]
+    fn deduplicates_repeated_claude_usage_for_one_native_message() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".claude/projects/project/claude-repeated.jsonl");
+        write(
+            &session_path,
+            concat!(
+                "{\"type\":\"user\",\"sessionId\":\"claude-repeated\",\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-repeated\",\"message\":{\"id\":\"same-message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20},\"content\":\"partial\"}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-repeated\",\"message\":{\"id\":\"same-message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20},\"content\":\"complete\"}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("claude"), "claude-repeated")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(detail.session.tokens, Some(30));
+        assert_eq!(detail.messages[1].metrics.tokens, None);
+        assert_eq!(detail.messages[2].metrics.tokens, Some(30));
     }
 
     #[test]
@@ -1929,7 +2127,7 @@ mod tests {
             .join(".gemini/tmp/project/chats/gemini-detail.json");
         write(
             &session_path,
-            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","content":"second answer"}]}"#,
+            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","tokens":{"total":101},"durationMs":1234,"content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","tokens":{"total":202},"durationMs":2345,"content":"second answer"}]}"#,
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let session = catalog
@@ -1956,6 +2154,10 @@ mod tests {
             detail.messages[3].model.as_deref(),
             Some("gemini-3.1-flash")
         );
+        assert_eq!(detail.messages[1].metrics.tokens, Some(101));
+        assert_eq!(detail.messages[1].metrics.duration_ms, Some(1_234));
+        assert_eq!(detail.messages[3].metrics.tokens, Some(202));
+        assert_eq!(detail.messages[3].metrics.duration_ms, Some(2_345));
     }
 
     #[test]
@@ -2008,7 +2210,7 @@ mod tests {
                 &format!(
                     "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/work\"}}\n\
                      {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"question for {session_id}\"}}}}\n\
-                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"model\":\"model-for-{session_id}\",\"content\":\"answer for {session_id}\"}}}}\n"
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"model\":\"model-for-{session_id}\",\"duration\":3456.4,\"usage\":{{\"totalTokens\":789}},\"content\":\"answer for {session_id}\"}}}}\n"
                 ),
             );
         }
@@ -2032,6 +2234,8 @@ mod tests {
                 detail.messages[1].model,
                 Some(format!("model-for-{session_id}"))
             );
+            assert_eq!(detail.messages[1].metrics.tokens, Some(789));
+            assert_eq!(detail.messages[1].metrics.duration_ms, Some(3_456));
         }
     }
 
@@ -2045,7 +2249,7 @@ mod tests {
         );
         write(
             &storage.join("message/opencode-detail/message-2.json"),
-            r#"{"id":"message-2","role":"assistant","modelID":"big-pickle","time":{"created":3}}"#,
+            r#"{"id":"message-2","role":"assistant","modelID":"big-pickle","time":{"created":3000,"completed":6450},"tokens":{"input":100,"output":20,"reasoning":10,"cache":{"read":5,"write":2}}}"#,
         );
         write(
             &storage.join("part/message-2/part-2.json"),
@@ -2086,6 +2290,8 @@ mod tests {
         assert_eq!(detail.messages[4].kind, SessionMessageKind::Assistant);
         assert_eq!(detail.messages[4].content, "second answer");
         assert_eq!(detail.messages[4].model.as_deref(), Some("big-pickle"));
+        assert_eq!(detail.messages[4].metrics.tokens, Some(137));
+        assert_eq!(detail.messages[4].metrics.duration_ms, Some(3_450));
     }
 
     #[test]

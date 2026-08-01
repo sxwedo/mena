@@ -109,7 +109,12 @@ calls, tool results, system/meta, and errors use the same muted gray previously
 used by metadata keys. Detail metadata keys such as `Target`, `Agent`, and
 `Title` are light magenta. When a provider persists a model id, every assistant
 header displays its own value, so model switches inside one session remain
-visible. Markdown exports preserve those per-message model ids too.
+visible. Persisted per-response duration and total token usage follow the model,
+for example `ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens`. Missing metrics are
+omitted instead of estimated: Codex supplies the completed turn duration and
+last request usage, OpenCode and Pi/Oh My Pi persist both values per response,
+and Claude Code and Gemini values depend on the fields present in their native
+session records. Markdown exports preserve the same model and metric headers.
 
 Exports are created in the directory where `mena` was started and the popup
 shows the resulting absolute path. Names use

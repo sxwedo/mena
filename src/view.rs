@@ -233,6 +233,37 @@ pub fn format_duration(seconds: u64) -> String {
     }
 }
 
+pub fn format_duration_millis(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        return format!("{milliseconds}ms");
+    }
+    let total_tenths = milliseconds.saturating_add(50) / 100;
+    let total_seconds = total_tenths / 10;
+    let tenths = total_tenths % 10;
+    let hours = total_seconds / 3_600;
+    let minutes = total_seconds % 3_600 / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}.{tenths}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}.{tenths}s")
+    } else {
+        format!("{seconds}.{tenths}s")
+    }
+}
+
+pub fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1_024;
     const MIB: u64 = KIB * 1_024;
@@ -252,4 +283,18 @@ fn format_scaled(bytes: u64, unit: u64, suffix: &str) -> String {
     let whole = bytes / unit;
     let decimal = bytes % unit * 10 / unit;
     format!("{whole}.{decimal} {suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_count, format_duration_millis};
+
+    #[test]
+    fn formats_exact_counts_and_subsecond_response_durations() {
+        assert_eq!(format_count(123_456_789), "123,456,789");
+        assert_eq!(format_duration_millis(450), "450ms");
+        assert_eq!(format_duration_millis(12_345), "12.3s");
+        assert_eq!(format_duration_millis(125_450), "2m 05.5s");
+        assert_eq!(format_duration_millis(3_725_450), "1h 02m 05.5s");
+    }
 }

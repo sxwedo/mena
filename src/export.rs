@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::fs::atomic_create_private;
 use crate::session::{SessionDetail, SessionMessageKind};
+use crate::view::{format_count, format_duration_millis};
 
 /// Export a complete session detail document into `directory` as Markdown.
 ///
@@ -103,14 +104,26 @@ fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String
     );
     for message in &detail.messages {
         let timestamp = message.timestamp.as_deref().unwrap_or("-");
-        let model = (message.kind == SessionMessageKind::Assistant)
-            .then(|| message.model.as_deref().map(str::trim))
-            .flatten()
-            .filter(|model| !model.is_empty())
-            .map_or_else(String::new, |model| format!(" · {model}"));
+        let mut metrics = String::new();
+        if message.kind == SessionMessageKind::Assistant {
+            if let Some(model) = message
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                let _ = write!(metrics, " · {model}");
+            }
+            if let Some(duration_ms) = message.metrics.duration_ms {
+                let _ = write!(metrics, " · {}", format_duration_millis(duration_ms));
+            }
+            if let Some(tokens) = message.metrics.tokens {
+                let _ = write!(metrics, " · {} tokens", format_count(tokens));
+            }
+        }
         let _ = writeln!(
             markdown,
-            "### [{timestamp}] {}{model}\n",
+            "### [{timestamp}] {}{metrics}\n",
             message.kind.label()
         );
         if matches!(
@@ -201,7 +214,9 @@ mod tests {
 
     use super::export_session_detail_at;
     use crate::AgentKind;
-    use crate::session::{AgentSession, SessionDetail, SessionMessage, SessionMessageKind};
+    use crate::session::{
+        AgentSession, SessionDetail, SessionMessage, SessionMessageKind, SessionMessageMetrics,
+    };
 
     #[test]
     fn exports_complete_markdown_metadata_and_messages_to_unique_private_files() {
@@ -247,7 +262,7 @@ mod tests {
             "2026-01-01T00:04:05+00:00",
             "USER",
             "第一行\n第二行",
-            "ASSISTANT · gpt-5.5",
+            "ASSISTANT · gpt-5.5 · 12.3s · 67,890 tokens",
             "model-specific answer",
             "TOOL CALL",
             "README.md",
@@ -290,24 +305,31 @@ mod tests {
                     kind: SessionMessageKind::User,
                     timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
                     model: None,
+                    metrics: SessionMessageMetrics::default(),
                     content: "第一行\n第二行".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::Assistant,
                     timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
                     model: Some("gpt-5.5".to_owned()),
+                    metrics: SessionMessageMetrics {
+                        duration_ms: Some(12_345),
+                        tokens: Some(67_890),
+                    },
                     content: "model-specific answer".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::ToolCall,
                     timestamp: Some("2026-01-01T00:00:03Z".to_owned()),
                     model: None,
+                    metrics: SessionMessageMetrics::default(),
                     content: "{\n  \"name\": \"read\",\n  \"path\": \"README.md\",\n  \"literal\": \"```\"\n}".to_owned(),
                 },
                 SessionMessage {
                     kind: SessionMessageKind::ToolResult,
                     timestamp: None,
                     model: None,
+                    metrics: SessionMessageMetrics::default(),
                     content: "最后一条，完整保留".to_owned(),
                 },
             ],
