@@ -21,6 +21,10 @@ pub fn export_session_detail(detail: &SessionDetail, directory: &Path) -> Result
     export_session_detail_at(detail, directory, SystemTime::now())
 }
 
+pub fn render_session_detail_markdown(detail: &SessionDetail) -> String {
+    render_markdown(detail, SystemTime::now().into())
+}
+
 fn export_session_detail_at(
     detail: &SessionDetail,
     directory: &Path,

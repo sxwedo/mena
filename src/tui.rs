@@ -22,6 +22,7 @@ const METADATA_KEY: Color = Color::LightMagenta;
 type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
 type ExportCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<PathBuf>;
+type CopyCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<()>;
 
 pub fn run_top(
     interval: Duration,
@@ -72,6 +73,7 @@ pub fn manage_sessions(
     active_targets: BTreeSet<String>,
     mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
     mut export: impl FnMut(&SessionDetail) -> Result<PathBuf>,
+    mut copy: impl FnMut(&SessionDetail) -> Result<()>,
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
 ) -> Result<Option<AgentSession>> {
     run_session_browser(
@@ -80,6 +82,7 @@ pub fn manage_sessions(
         BrowserPurpose::Manage,
         Some(&mut load_detail),
         Some(&mut export),
+        Some(&mut copy),
         Some(&mut delete),
     )
 }
@@ -92,6 +95,7 @@ pub fn pick_session(sessions: Vec<AgentSession>) -> Result<Option<AgentSession>>
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -101,6 +105,7 @@ fn run_session_browser(
     purpose: BrowserPurpose,
     mut load_detail: Option<DetailCallback<'_>>,
     mut export: Option<ExportCallback<'_>>,
+    mut copy: Option<CopyCallback<'_>>,
     mut delete: Option<DeleteCallback<'_>>,
 ) -> Result<Option<AgentSession>> {
     let mut app = SessionsApp::new(sessions, active_targets, purpose);
@@ -113,9 +118,9 @@ fn run_session_browser(
         let input = event::read().context("failed to read terminal input")?;
         if app.mode == BrowserMode::Detail {
             for input in read_detail_event_batch(input)? {
-                match export.as_mut() {
-                    Some(export) => handle_detail_event(&mut app, &input, Some(&mut **export)),
-                    None => handle_detail_event(&mut app, &input, None),
+                let action = handle_detail_browser_event(&mut app, &input, &mut export, &mut copy);
+                if action == DetailAction::Resume {
+                    return Ok(app.selected_session().cloned());
                 }
                 if app.mode != BrowserMode::Detail {
                     break;
@@ -346,6 +351,12 @@ enum BrowserMode {
     ConfirmDelete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailAction {
+    Continue,
+    Resume,
+}
+
 #[derive(Debug)]
 struct SessionsApp {
     sessions: Vec<AgentSession>,
@@ -356,9 +367,10 @@ struct SessionsApp {
     mode: BrowserMode,
     purpose: BrowserPurpose,
     detail: Option<SessionDetail>,
-    detail_scroll: u16,
-    detail_max_scroll: u16,
-    detail_primary_offsets: Vec<u16>,
+    detail_scroll: usize,
+    detail_max_scroll: usize,
+    detail_primary_offsets: Vec<usize>,
+    detail_layout: Option<DetailLayoutCache>,
     detail_status: Option<StatusMessage>,
     status: Option<StatusMessage>,
 }
@@ -381,6 +393,7 @@ impl SessionsApp {
             detail_scroll: 0,
             detail_max_scroll: 0,
             detail_primary_offsets: Vec::new(),
+            detail_layout: None,
             detail_status: None,
             status: None,
         };
@@ -451,6 +464,7 @@ impl SessionsApp {
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
         self.detail_primary_offsets.clear();
+        self.detail_layout = None;
         self.detail_status = None;
         self.mode = BrowserMode::Detail;
     }
@@ -460,11 +474,12 @@ impl SessionsApp {
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
         self.detail_primary_offsets.clear();
+        self.detail_layout = None;
         self.detail_status = None;
         self.mode = BrowserMode::Browse;
     }
 
-    fn scroll_detail(&mut self, amount: i16) {
+    fn scroll_detail(&mut self, amount: isize) {
         self.detail_scroll = self
             .detail_scroll
             .saturating_add_signed(amount)
@@ -515,9 +530,32 @@ impl SessionsApp {
     }
 }
 
-fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent, export: Option<ExportCallback<'_>>) {
+fn handle_detail_key(
+    app: &mut SessionsApp,
+    key: KeyEvent,
+    export: Option<ExportCallback<'_>>,
+    copy: Option<CopyCallback<'_>>,
+) -> DetailAction {
+    if key.code == KeyCode::Char('r') {
+        return DetailAction::Resume;
+    }
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i' | 'q') => app.close_detail(),
+        KeyCode::Char('c') => {
+            let result = app
+                .detail
+                .as_ref()
+                .zip(copy)
+                .map(|(detail, copy)| copy(detail));
+            if let Some(result) = result {
+                app.detail_status = Some(match result {
+                    Ok(()) => {
+                        StatusMessage::success("Copied complete detail to clipboard".to_owned())
+                    }
+                    Err(error) => StatusMessage::error(format!("Copy failed: {error:#}")),
+                });
+            }
+        }
         KeyCode::Char('e') => {
             let result = app
                 .detail
@@ -545,19 +583,44 @@ fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent, export: Option<Export
         KeyCode::End => app.detail_scroll = app.detail_max_scroll,
         _ => {}
     }
+    DetailAction::Continue
 }
 
-fn handle_detail_event(app: &mut SessionsApp, input: &Event, export: Option<ExportCallback<'_>>) {
+fn handle_detail_event(
+    app: &mut SessionsApp,
+    input: &Event,
+    export: Option<ExportCallback<'_>>,
+    copy: Option<CopyCallback<'_>>,
+) -> DetailAction {
     match input {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            handle_detail_key(app, *key, export);
+            handle_detail_key(app, *key, export, copy)
         }
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => app.scroll_detail(-3),
-            MouseEventKind::ScrollDown => app.scroll_detail(3),
-            _ => {}
-        },
-        _ => {}
+        Event::Mouse(mouse) => {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => app.scroll_detail(-3),
+                MouseEventKind::ScrollDown => app.scroll_detail(3),
+                _ => {}
+            }
+            DetailAction::Continue
+        }
+        _ => DetailAction::Continue,
+    }
+}
+
+fn handle_detail_browser_event(
+    app: &mut SessionsApp,
+    input: &Event,
+    export: &mut Option<ExportCallback<'_>>,
+    copy: &mut Option<CopyCallback<'_>>,
+) -> DetailAction {
+    match (export.as_mut(), copy.as_mut()) {
+        (Some(export), Some(copy)) => {
+            handle_detail_event(app, input, Some(&mut **export), Some(&mut **copy))
+        }
+        (Some(export), None) => handle_detail_event(app, input, Some(&mut **export), None),
+        (None, Some(copy)) => handle_detail_event(app, input, None, Some(&mut **copy)),
+        (None, None) => handle_detail_event(app, input, None, None),
     }
 }
 
@@ -835,10 +898,9 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     if app.mode != BrowserMode::Detail {
         return;
     }
-    let Some(detail) = app.detail.as_ref() else {
+    if app.detail.is_none() {
         return;
-    };
-    let content = session_detail_content(detail);
+    }
 
     let popup = centered_rect(
         frame.area(),
@@ -863,27 +925,39 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     ])
     .split(inner);
     let content_width = areas[0].width.max(1);
-    let content_height = wrapped_lines_height(&content.lines, content_width);
+    if app
+        .detail_layout
+        .as_ref()
+        .is_none_or(|layout| layout.width != content_width)
+    {
+        let detail = app.detail.as_ref().expect("detail mode has detail data");
+        app.detail_layout = Some(DetailLayoutCache::new(detail, content_width));
+    }
+    let (content_height, primary_offsets) = {
+        let layout = app
+            .detail_layout
+            .as_ref()
+            .expect("detail layout was initialized");
+        (layout.total_height(), layout.primary_offsets.clone())
+    };
     let max_scroll = content_height.saturating_sub(usize::from(areas[0].height));
-    app.detail_max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
+    app.detail_max_scroll = max_scroll;
     app.detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
-    app.detail_primary_offsets = content
-        .primary_line_indices
-        .iter()
-        .map(|index| wrapped_lines_height(&content.lines[..*index], content_width))
-        .map(|offset| {
-            u16::try_from(offset)
-                .unwrap_or(u16::MAX)
-                .min(app.detail_max_scroll)
-        })
+    app.detail_primary_offsets = primary_offsets
+        .into_iter()
+        .map(|offset| offset.min(app.detail_max_scroll))
         .collect();
     app.detail_primary_offsets.dedup();
-    let text = Text::from(content.lines);
+    let (text, local_scroll) = app
+        .detail_layout
+        .as_ref()
+        .expect("detail layout was initialized")
+        .visible_text(app.detail_scroll, usize::from(areas[0].height));
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
-    frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), areas[0]);
+    frame.render_widget(paragraph.scroll((local_scroll, 0)), areas[0]);
     if let Some(status) = app.detail_status.as_ref() {
         frame.render_widget(
             Paragraph::new(Span::styled(status.text.clone(), status.style))
@@ -894,10 +968,9 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     }
     frame.render_widget(
         Paragraph::new(key_hints(&[
-            ("↑/↓", "scroll"),
-            ("PgUp/PgDn", "page"),
-            ("Home/End", "jump"),
             ("Shift+↑/↓", "message"),
+            ("c", "copy"),
+            ("r", "resume"),
             ("e", "export"),
             ("Enter/Esc", "close"),
         ]))
@@ -909,6 +982,138 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
 struct SessionDetailContent {
     lines: Vec<Line<'static>>,
     primary_line_indices: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct DetailLayoutCache {
+    width: u16,
+    lines: Vec<Line<'static>>,
+    line_offsets: Vec<usize>,
+    primary_offsets: Vec<usize>,
+}
+
+impl DetailLayoutCache {
+    fn new(detail: &SessionDetail, width: u16) -> Self {
+        let width = width.max(1);
+        let content = session_detail_content(detail);
+        let mut lines = Vec::with_capacity(content.lines.len());
+        let mut primary_line_indices = Vec::with_capacity(content.primary_line_indices.len());
+        let mut primary_indices = content.primary_line_indices.into_iter().peekable();
+
+        for (index, line) in content.lines.into_iter().enumerate() {
+            while primary_indices
+                .peek()
+                .is_some_and(|primary| *primary == index)
+            {
+                primary_line_indices.push(lines.len());
+                primary_indices.next();
+            }
+            lines.extend(fragment_detail_line(line));
+        }
+
+        let mut line_offsets = Vec::with_capacity(lines.len() + 1);
+        line_offsets.push(0usize);
+        for line in &lines {
+            let height = Paragraph::new(Text::from(line.clone()))
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                .max(1);
+            let next = line_offsets
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(height);
+            line_offsets.push(next);
+        }
+        let primary_offsets = primary_line_indices
+            .into_iter()
+            .filter_map(|index| line_offsets.get(index).copied())
+            .collect();
+
+        Self {
+            width,
+            lines,
+            line_offsets,
+            primary_offsets,
+        }
+    }
+
+    fn total_height(&self) -> usize {
+        self.line_offsets.last().copied().unwrap_or_default()
+    }
+
+    fn visible_text(&self, scroll: usize, viewport_height: usize) -> (Text<'static>, u16) {
+        if self.lines.is_empty() || scroll >= self.total_height() {
+            return (Text::default(), 0);
+        }
+
+        let start_index = self
+            .line_offsets
+            .partition_point(|offset| *offset <= scroll)
+            .saturating_sub(1)
+            .min(self.lines.len() - 1);
+        let local_scroll = scroll.saturating_sub(self.line_offsets[start_index]);
+        let end_offset = scroll.saturating_add(viewport_height.max(1));
+        let end_index = self
+            .line_offsets
+            .partition_point(|offset| *offset < end_offset)
+            .max(start_index + 1)
+            .min(self.lines.len());
+
+        (
+            Text::from(self.lines[start_index..end_index].to_vec()),
+            u16::try_from(local_scroll).unwrap_or(u16::MAX),
+        )
+    }
+}
+
+fn fragment_detail_line(line: Line<'static>) -> Vec<Line<'static>> {
+    // Paragraph::scroll accepts a u16 offset. Keeping each independently wrapped
+    // logical line below that range lets the global scroll position remain usize.
+    const MAX_CHARS_PER_LINE: usize = 8_192;
+
+    if line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>()
+        <= MAX_CHARS_PER_LINE
+    {
+        return vec![line];
+    }
+
+    let line_style = line.style;
+    let alignment = line.alignment;
+    let mut fragments = Vec::new();
+    let mut spans = Vec::<Span<'static>>::new();
+    let mut chars = 0usize;
+    for span in line.spans {
+        for character in span.content.chars() {
+            if chars == MAX_CHARS_PER_LINE {
+                fragments.push(Line {
+                    style: line_style,
+                    alignment,
+                    spans: std::mem::take(&mut spans),
+                });
+                chars = 0;
+            }
+            if let Some(previous) = spans
+                .last_mut()
+                .filter(|previous| previous.style == span.style)
+            {
+                previous.content.to_mut().push(character);
+            } else {
+                spans.push(Span::styled(character.to_string(), span.style));
+            }
+            chars += 1;
+        }
+    }
+    fragments.push(Line {
+        style: line_style,
+        alignment,
+        spans,
+    });
+    fragments
 }
 
 fn session_detail_content(detail: &SessionDetail) -> SessionDetailContent {
@@ -964,7 +1169,8 @@ fn session_detail_content(detail: &SessionDetail) -> SessionDetailContent {
         lines.extend(
             message
                 .content
-                .lines()
+                .split('\n')
+                .map(|line| line.strip_suffix('\r').unwrap_or(line))
                 .map(|line| Line::styled(line.to_owned(), message_body_style(message.kind))),
         );
         lines.push(Line::from(""));
@@ -1015,15 +1221,9 @@ const fn message_kind_color(kind: SessionMessageKind) -> Color {
 }
 
 fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
-    wrapped_lines_height(&text.lines, width)
-}
-
-fn wrapped_lines_height(lines: &[Line<'_>], width: u16) -> usize {
-    let width = usize::from(width.max(1));
-    lines
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(width))
-        .sum()
+    Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
 }
 
 fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
@@ -1358,8 +1558,9 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        BrowserMode, BrowserPurpose, SessionsApp, TopApp, coalesce_detail_events, draw_sessions,
-        draw_top, handle_detail_event, handle_detail_key, session_columns, session_target,
+        BrowserMode, BrowserPurpose, DetailAction, SessionsApp, TopApp, coalesce_detail_events,
+        draw_sessions, draw_top, handle_detail_event, handle_detail_key, session_columns,
+        session_target,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -1459,11 +1660,38 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             None,
+            None,
         );
 
         assert_eq!(app.table_state.selected(), selected);
         assert_eq!(app.detail_scroll, 1);
         assert_eq!(app.mode, BrowserMode::Detail);
+    }
+
+    #[test]
+    fn detail_resume_requests_the_same_selected_session_as_the_outer_list() {
+        let first = report().session.expect("first session");
+        let mut second = first.clone();
+        second.id = "second-session".to_owned();
+        let mut app = SessionsApp::new(
+            vec![first.clone(), second],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session: first.clone(),
+            messages: Vec::new(),
+        });
+
+        let action = handle_detail_event(
+            &mut app,
+            &Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            None,
+            None,
+        );
+
+        assert_eq!(action, DetailAction::Resume);
+        assert_eq!(app.selected_session(), Some(&first));
     }
 
     #[test]
@@ -1520,9 +1748,19 @@ mod tests {
             "complete first question",
             "complete first answer",
             "complete second answer",
-            "scroll",
+            "Shift+↑/↓ message",
+            "c copy",
+            "r resume",
+            "e export",
+            "Enter/Esc close",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
+        }
+        for redundant_hint in ["↑/↓ scroll", "PgUp/PgDn page", "Home/End jump"] {
+            assert!(
+                !screen.contains(redundant_hint),
+                "redundant detail hint remained: {redundant_hint:?}\n{screen}"
+            );
         }
     }
 
@@ -1639,6 +1877,7 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
             None,
+            None,
         );
         terminal
             .draw(|frame| draw_sessions(frame, &mut app))
@@ -1648,6 +1887,128 @@ mod tests {
         assert!(screen.contains("complete message number 39"));
         assert_eq!(app.table_state.selected(), selected);
         assert!(app.detail_scroll > 0);
+    }
+
+    #[test]
+    fn detail_end_reaches_content_after_word_wrapped_lines() {
+        let session = report().session.expect("fixture session");
+        let wrapped = "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc\n".repeat(20);
+        let messages = vec![SessionMessage {
+            kind: SessionMessageKind::Assistant,
+            timestamp: None,
+            model: Some("gpt-5.6".to_owned()),
+            content: format!("{wrapped}FINAL DETAIL CONTENT"),
+        }];
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        let mut terminal = Terminal::new(TestBackend::new(36, 18)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            None,
+            None,
+        );
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw end of details");
+
+        let screen = buffer_text(terminal.backend().buffer(), 36, 18);
+        assert!(
+            screen.contains("FINAL DETAIL CONTENT"),
+            "End must expose the actual final detail content\n{screen}"
+        );
+    }
+
+    #[test]
+    fn detail_reflows_and_keeps_the_end_reachable_after_terminal_resize() {
+        let session = report().session.expect("fixture session");
+        let wrapped = "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc\n".repeat(20);
+        let messages = vec![SessionMessage {
+            kind: SessionMessageKind::Assistant,
+            timestamp: None,
+            model: Some("gpt-5.6".to_owned()),
+            content: format!("{wrapped}FINAL CONTENT AFTER RESIZE"),
+        }];
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw wide details");
+        let wide_max_scroll = app.detail_max_scroll;
+
+        terminal.backend_mut().resize(36, 18);
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw narrow details");
+        assert!(app.detail_max_scroll > wide_max_scroll);
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            None,
+            None,
+        );
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw resized detail end");
+
+        let screen = buffer_text(terminal.backend().buffer(), 36, 18);
+        assert!(screen.contains("FINAL CONTENT AFTER RESIZE"));
+    }
+
+    #[test]
+    fn detail_scrolling_reaches_content_beyond_u16_scroll_range() {
+        let session = report().session.expect("fixture session");
+        let mut content = "complete detail line\n".repeat(66_000);
+        content.push_str("ABSOLUTE FINAL DETAIL LINE");
+        let messages = vec![SessionMessage {
+            kind: SessionMessageKind::Assistant,
+            timestamp: None,
+            model: Some("gpt-5.6".to_owned()),
+            content,
+        }];
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        for _ in 0..7_000 {
+            handle_detail_key(
+                &mut app,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                None,
+                None,
+            );
+        }
+        assert_eq!(app.detail_scroll, app.detail_max_scroll);
+        assert!(app.detail_scroll > usize::from(u16::MAX));
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw end of details");
+
+        let screen = buffer_text(terminal.backend().buffer(), 80, 24);
+        assert!(
+            screen.contains("ABSOLUTE FINAL DETAIL LINE"),
+            "details beyond the u16 range must remain reachable"
+        );
     }
 
     #[test]
@@ -1694,6 +2055,7 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
             None,
+            None,
         );
         let first_user_scroll = app.detail_scroll;
         assert!(first_user_scroll > 1, "should jump past metadata");
@@ -1701,6 +2063,7 @@ mod tests {
         handle_detail_key(
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            None,
             None,
         );
         let assistant_scroll = app.detail_scroll;
@@ -1712,6 +2075,7 @@ mod tests {
         handle_detail_key(
             &mut app,
             KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+            None,
             None,
         );
         assert_eq!(app.detail_scroll, first_user_scroll);
@@ -1752,7 +2116,7 @@ mod tests {
         }));
 
         for event in coalesce_detail_events(events) {
-            handle_detail_event(&mut app, &event, None);
+            handle_detail_event(&mut app, &event, None, None);
         }
 
         assert_eq!(
@@ -1784,6 +2148,7 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
             Some(&mut export),
+            None,
         );
 
         assert_eq!(app.mode, BrowserMode::Detail);
@@ -1793,6 +2158,88 @@ mod tests {
         assert!(app.detail_status.as_ref().is_some_and(|status| {
             status.text == "Exported: /tmp/session-export.md"
                 && status.style.fg == Some(Color::Green)
+        }));
+    }
+
+    #[test]
+    fn copying_from_detail_copies_the_complete_session_and_keeps_context() {
+        let session = report().session.expect("fixture session");
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: vec![SessionMessage {
+                kind: SessionMessageKind::Assistant,
+                timestamp: None,
+                model: Some("gpt-5.6".to_owned()),
+                content: "complete clipboard tail".to_owned(),
+            }],
+        });
+        app.detail_max_scroll = 20;
+        app.detail_scroll = 7;
+        let selected = app.table_state.selected();
+        let mut copied_tail = None;
+        let mut copy = |detail: &SessionDetail| {
+            copied_tail = detail
+                .messages
+                .last()
+                .map(|message| message.content.clone());
+            Ok(())
+        };
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            None,
+            Some(&mut copy),
+        );
+
+        assert_eq!(copied_tail.as_deref(), Some("complete clipboard tail"));
+        assert_eq!(app.mode, BrowserMode::Detail);
+        assert_eq!(app.table_state.selected(), selected);
+        assert_eq!(app.detail_scroll, 7);
+        assert!(app.detail.is_some());
+        assert!(app.detail_status.as_ref().is_some_and(|status| {
+            status.text == "Copied complete detail to clipboard"
+                && status.style.fg == Some(Color::Green)
+        }));
+    }
+
+    #[test]
+    fn failed_detail_copy_keeps_context_and_reports_a_red_error() {
+        let session = report().session.expect("fixture session");
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: Vec::new(),
+        });
+        app.detail_max_scroll = 20;
+        app.detail_scroll = 7;
+        let selected = app.table_state.selected();
+        let mut copy =
+            |_detail: &SessionDetail| -> Result<()> { anyhow::bail!("clipboard unavailable") };
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            None,
+            Some(&mut copy),
+        );
+
+        assert_eq!(app.mode, BrowserMode::Detail);
+        assert_eq!(app.table_state.selected(), selected);
+        assert_eq!(app.detail_scroll, 7);
+        assert!(app.detail.is_some());
+        assert!(app.detail_status.as_ref().is_some_and(|status| {
+            status.text.contains("Copy failed: clipboard unavailable")
+                && status.style.fg == Some(Color::Red)
         }));
     }
 
@@ -1818,6 +2265,7 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
             Some(&mut export),
+            None,
         );
 
         assert_eq!(app.mode, BrowserMode::Detail);

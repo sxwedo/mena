@@ -88,11 +88,18 @@ large session-detail popup, `r` resume, and `d` followed by `y` for permanent
 deletion. The detail popup shows complete session metadata and the full native
 chat transcript. While it is open, arrows or `j`/`k` scroll the transcript,
 `Shift`+`↑`/`↓` jumps between user and assistant messages while skipping tool
-traffic, `PgUp`/`PgDn` pages, `Home`/`End` jumps to the bounds, and `e` exports
-the complete detail as Markdown. `Enter` or `Esc` returns to the session list
-without changing its selection. Touchpad and mouse-wheel input is captured
-directly; queued same-direction wheel events are coalesced so inertial input
-cannot leave the detail view scrolling through a large backlog.
+traffic, `PgUp`/`PgDn` pages, and `Home`/`End` jumps to the bounds. Press `c` to
+copy the complete detail as Markdown to the system clipboard, `e` to export it
+as a Markdown file, or `r` to resume the current session through the same path
+as the outer list. `Enter` or `Esc` returns to the session list without changing
+its selection. The detail footer shows only these non-obvious actions and omits
+the standard scrolling keys. The scroll range follows the transcript's actual
+word-wrapped height and remains complete beyond 65,535 visual rows, so narrow
+terminals and exceptionally long sessions can still reach their final message.
+Touchpad and mouse-wheel input is captured directly; this can intercept native
+terminal drag selection, so `c` is the reliable copy path. Queued same-direction
+wheel events are coalesced so inertial input cannot leave the detail view
+scrolling through a large backlog.
 
 Message headers stay bold and message bodies use the same category color: user
 is light green, assistant is cyan, skill invocation is light yellow, and tool
@@ -109,6 +116,10 @@ the same second add `-2`, `-3`, and so on without replacing existing files.
 Writes are atomic and leave no partial output on failure. Exported files use
 mode `0600` on Unix; other platforms retain the atomic, no-overwrite behavior
 without promising Unix permission bits.
+
+Clipboard access is initialized only when `c` is pressed. Copy success or an
+actionable clipboard error is shown inside the detail popup without changing
+the selected session or its scroll position.
 
 ### Process control and resume
 

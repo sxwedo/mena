@@ -1,5 +1,6 @@
 //! Local-first process and session control for developer agents.
 
+mod clipboard;
 mod controller;
 mod export;
 mod fs;
