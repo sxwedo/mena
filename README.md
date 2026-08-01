@@ -96,10 +96,12 @@ its selection. The detail footer shows only these non-obvious actions and omits
 the standard scrolling keys. The scroll range follows the transcript's actual
 word-wrapped height and remains complete beyond 65,535 visual rows, so narrow
 terminals and exceptionally long sessions can still reach their final message.
-Touchpad and mouse-wheel input is captured directly; this can intercept native
-terminal drag selection, so `c` is the reliable copy path. Queued same-direction
-wheel events are coalesced so inertial input cannot leave the detail view
-scrolling through a large backlog.
+Mouse reporting remains disabled, so the terminal keeps native mouse drag
+selection and `Command+C` copying. Alternate-scroll mode converts touchpad and
+mouse-wheel gestures into detail navigation without taking ownership of clicks
+or drags. Queued same-direction scroll events are coalesced so inertial input
+cannot leave the detail view scrolling through a large backlog. The `c` shortcut
+remains available when the complete detail should be copied at once.
 
 Message headers stay bold and message bodies use the same category color: user
 is light green, assistant is cyan, skill invocation is light yellow, and tool

@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -109,7 +109,7 @@ fn run_session_browser(
     mut delete: Option<DeleteCallback<'_>>,
 ) -> Result<Option<AgentSession>> {
     let mut app = SessionsApp::new(sessions, active_targets, purpose);
-    let mut terminal = ManagedTerminal::enter_with_mouse_capture()?;
+    let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     loop {
         terminal
             .terminal
@@ -242,7 +242,7 @@ fn handle_search_key(app: &mut SessionsApp, key: KeyEvent) {
 
 struct ManagedTerminal {
     terminal: DefaultTerminal,
-    mouse_capture: bool,
+    alternate_scroll: bool,
 }
 
 impl ManagedTerminal {
@@ -250,37 +250,46 @@ impl ManagedTerminal {
         Self::enter_internal(false)
     }
 
-    fn enter_with_mouse_capture() -> Result<Self> {
+    fn enter_with_native_selection() -> Result<Self> {
         Self::enter_internal(true)
     }
 
-    fn enter_internal(mouse_capture: bool) -> Result<Self> {
+    fn enter_internal(alternate_scroll: bool) -> Result<Self> {
         let mut terminal = ratatui::try_init().context("failed to initialize terminal UI")?;
-        if mouse_capture
-            && let Err(error) = crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+        if alternate_scroll
+            && let Err(error) = configure_alternate_scroll(&mut std::io::stdout(), true)
         {
             let _ = ratatui::try_restore();
-            return Err(error).context("failed to enable terminal mouse capture");
+            return Err(error).context("failed to enable terminal alternate scrolling");
         }
         if let Err(error) = terminal.hide_cursor() {
-            if mouse_capture {
-                let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+            if alternate_scroll {
+                let _ = configure_alternate_scroll(&mut std::io::stdout(), false);
             }
             let _ = ratatui::try_restore();
             return Err(error).context("failed to hide terminal cursor");
         }
         Ok(Self {
             terminal,
-            mouse_capture,
+            alternate_scroll,
         })
     }
+}
+
+fn configure_alternate_scroll(writer: &mut impl Write, enabled: bool) -> io::Result<()> {
+    writer.write_all(if enabled {
+        b"\x1b[?1007h"
+    } else {
+        b"\x1b[?1007l"
+    })?;
+    writer.flush()
 }
 
 impl Drop for ManagedTerminal {
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
-        if self.mouse_capture {
-            let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        if self.alternate_scroll {
+            let _ = configure_alternate_scroll(&mut std::io::stdout(), false);
         }
         let _ = ratatui::try_restore();
     }
@@ -541,7 +550,15 @@ fn handle_detail_key(
     }
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i' | 'q') => app.close_detail(),
-        KeyCode::Char('c') => {
+        KeyCode::Char('c')
+            if !key.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::HYPER
+                    | KeyModifiers::META,
+            ) =>
+        {
             let result = app
                 .detail
                 .as_ref()
@@ -656,6 +673,16 @@ fn detail_scroll_direction(input: &Event) -> Option<bool> {
     match input {
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => Some(false),
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => Some(true),
+        Event::Key(KeyEvent {
+            code: KeyCode::Up,
+            kind: KeyEventKind::Press,
+            ..
+        }) => Some(false),
+        Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            kind: KeyEventKind::Press,
+            ..
+        }) => Some(true),
         _ => None,
     }
 }
@@ -1559,8 +1586,8 @@ mod tests {
 
     use super::{
         BrowserMode, BrowserPurpose, DetailAction, SessionsApp, TopApp, coalesce_detail_events,
-        draw_sessions, draw_top, handle_detail_event, handle_detail_key, session_columns,
-        session_target,
+        configure_alternate_scroll, draw_sessions, draw_top, handle_detail_event,
+        handle_detail_key, session_columns, session_target,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -1584,6 +1611,24 @@ mod tests {
         assert!(screen.contains("Details"));
         assert!(screen.contains("q quit"));
         assert!(screen.lines().all(|line| line.chars().count() == 80));
+    }
+
+    #[test]
+    fn session_terminal_protocol_preserves_native_selection_and_enables_alternate_scroll() {
+        let mut output = Vec::new();
+
+        configure_alternate_scroll(&mut output, true).expect("enable alternate scroll");
+        configure_alternate_scroll(&mut output, false).expect("disable alternate scroll");
+
+        assert_eq!(output, b"\x1b[?1007h\x1b[?1007l");
+        for mouse_capture_mode in [b"?1000".as_slice(), b"?1002", b"?1003", b"?1006"] {
+            assert!(
+                !output
+                    .windows(mouse_capture_mode.len())
+                    .any(|window| window == mouse_capture_mode),
+                "session input protocol must leave mouse selection to the terminal"
+            );
+        }
     }
 
     #[test]
@@ -2126,6 +2171,23 @@ mod tests {
     }
 
     #[test]
+    fn alternate_scroll_arrow_bursts_are_coalesced() {
+        let events = (0..64).map(|_| Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+
+        let coalesced = coalesce_detail_events(events);
+
+        assert_eq!(coalesced.len(), 1);
+        assert!(matches!(
+            coalesced.first(),
+            Some(Event::Key(KeyEvent {
+                code: KeyCode::Down,
+                kind: KeyEventKind::Press,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn exporting_from_detail_keeps_selection_scroll_and_popup_open() {
         let first = report().session.expect("first session");
         let mut second = first.clone();
@@ -2206,6 +2268,35 @@ mod tests {
             status.text == "Copied complete detail to clipboard"
                 && status.style.fg == Some(Color::Green)
         }));
+    }
+
+    #[test]
+    fn command_c_is_left_to_the_terminal_native_selection() {
+        let session = report().session.expect("fixture session");
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: Vec::new(),
+        });
+        let mut copy_called = false;
+        let mut copy = |_detail: &SessionDetail| {
+            copy_called = true;
+            Ok(())
+        };
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            None,
+            Some(&mut copy),
+        );
+
+        assert!(!copy_called, "Command+C must remain a terminal shortcut");
+        assert!(app.detail_status.is_none());
     }
 
     #[test]
