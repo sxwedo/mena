@@ -181,12 +181,17 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&values)?);
     } else if !args.plain && io::stdin().is_terminal() && io::stdout().is_terminal() {
         let active_targets = active_session_targets(&catalog, settings)?;
-        let selected = tui::manage_sessions(sessions.to_vec(), active_targets, |session| {
-            if active_session_targets(&catalog, settings)?.contains(&session_target(session)) {
-                bail!("cannot delete a session that is attached to a running agent");
-            }
-            catalog.delete_session(session)
-        })?;
+        let selected = tui::manage_sessions(
+            sessions.to_vec(),
+            active_targets,
+            |session| catalog.detail(session),
+            |session| {
+                if active_session_targets(&catalog, settings)?.contains(&session_target(session)) {
+                    bail!("cannot delete a session that is attached to a running agent");
+                }
+                catalog.delete_session(session)
+            },
+        )?;
         if let Some(session) = selected {
             resume_target(&session_target(&session), settings)?;
         }

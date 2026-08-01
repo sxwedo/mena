@@ -83,8 +83,12 @@ mena logs claude:session-id -n 100
 mena logs claude:session-id -n 20 --raw
 ```
 
-The interactive session manager supports `/` search, `Enter`/`i` details, `r`
-resume, and `d` followed by `y` for permanent deletion.
+The interactive session manager supports `/` search, `Enter`/`i` to open a
+large session-detail popup, `r` resume, and `d` followed by `y` for permanent
+deletion. The detail popup shows complete session metadata and the full native
+chat transcript. While it is open, arrows or `j`/`k` scroll the transcript,
+`PgUp`/`PgDn` page, `Home`/`End` jump, and `Enter` or `Esc` returns to the
+session list without changing its selection.
 
 ### Process control and resume
 

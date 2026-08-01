@@ -27,6 +27,19 @@ pub struct AgentSession {
     pub cost_usd: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMessage {
+    pub role: String,
+    pub timestamp: Option<String>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionDetail {
+    pub session: AgentSession,
+    pub messages: Vec<SessionMessage>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeletionSummary {
     pub files: usize,
@@ -178,6 +191,20 @@ impl SessionCatalog {
         enriched.tokens = tokens;
         enriched.cost_usd = cost_usd;
         Ok(enriched)
+    }
+
+    pub fn detail(&self, selected: &AgentSession) -> Result<SessionDetail> {
+        let session = self.with_usage(selected)?;
+        let messages = match session.kind {
+            AgentKind::Codex => codex_messages(&session.path)?,
+            AgentKind::ClaudeCode | AgentKind::Pi | AgentKind::OhMyPi => {
+                nested_jsonl_messages(&session.path)?
+            }
+            AgentKind::GeminiCli => gemini_messages(&session.path)?,
+            AgentKind::OpenCode => opencode_messages(&self.home, &session.id)?,
+            AgentKind::Cursor | AgentKind::Custom(_) => Vec::new(),
+        };
+        Ok(SessionDetail { session, messages })
     }
 
     pub fn delete_session(&self, selected: &AgentSession) -> Result<DeletionSummary> {
@@ -920,6 +947,33 @@ fn collect_content_text(value: &Value, parts: &mut Vec<String>) {
     }
 }
 
+fn content_text_full(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => (!text.is_empty()).then(|| text.clone()),
+        Value::Array(values) => {
+            let parts: Vec<_> = values.iter().filter_map(content_text_full).collect();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Object(object) => {
+            let kind = object.get("type").and_then(Value::as_str);
+            if matches!(kind, Some("text" | "input_text" | "output_text")) {
+                return object
+                    .get("text")
+                    .or_else(|| object.get("content"))
+                    .and_then(content_text_full);
+            }
+            if object.len() == 1
+                && let Some(content) = object.get("text").or_else(|| object.get("content"))
+            {
+                return content_text_full(content);
+            }
+            serde_json::to_string_pretty(value).ok()
+        }
+        Value::Bool(_) | Value::Number(_) => Some(value.to_string()),
+        Value::Null => None,
+    }
+}
+
 fn normalize_preview(value: &str) -> Option<String> {
     const MAX_CHARS: usize = 120;
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1084,6 +1138,146 @@ fn codex_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
         }
     })?;
     Ok(((!skipped).then_some(tokens).flatten(), None))
+}
+
+fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
+    let mut messages = Vec::new();
+    let skipped = visit_bounded_lines(path, |line| {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            return;
+        };
+        if record.pointer("/payload/type").and_then(Value::as_str) != Some("message") {
+            return;
+        }
+        let Some(role) = record.pointer("/payload/role").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(content) = record
+            .pointer("/payload/content")
+            .and_then(content_text_full)
+        else {
+            return;
+        };
+        messages.push(SessionMessage {
+            role: role.to_owned(),
+            timestamp: string_at(&record, "/timestamp")
+                .or_else(|| string_at(&record, "/payload/timestamp")),
+            content,
+        });
+    })?;
+    if skipped {
+        bail!(
+            "cannot show the complete transcript because {} contains a record larger than {MAX_RECORD_BYTES} bytes",
+            path.display()
+        );
+    }
+    Ok(messages)
+}
+
+fn nested_jsonl_messages(path: &Path) -> Result<Vec<SessionMessage>> {
+    let mut messages = Vec::new();
+    let skipped = visit_bounded_lines(path, |line| {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            return;
+        };
+        let Some(role) = record.pointer("/message/role").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(content) = record
+            .pointer("/message/content")
+            .and_then(content_text_full)
+        else {
+            return;
+        };
+        messages.push(SessionMessage {
+            role: role.to_owned(),
+            timestamp: string_at(&record, "/timestamp")
+                .or_else(|| string_at(&record, "/message/timestamp")),
+            content,
+        });
+    })?;
+    if skipped {
+        bail!(
+            "cannot show the complete transcript because {} contains a record larger than {MAX_RECORD_BYTES} bytes",
+            path.display()
+        );
+    }
+    Ok(messages)
+}
+
+fn gemini_messages(path: &Path) -> Result<Vec<SessionMessage>> {
+    let Some(session) = read_json_file(path)? else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = session.get("messages").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    Ok(values
+        .iter()
+        .filter_map(|message| {
+            let role = message
+                .get("type")
+                .or_else(|| message.get("role"))
+                .and_then(Value::as_str)?;
+            let content = message.get("content").and_then(content_text_full)?;
+            Some(SessionMessage {
+                role: role.to_owned(),
+                timestamp: string_at(message, "/timestamp"),
+                content,
+            })
+        })
+        .collect())
+}
+
+fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage>> {
+    let storage = home.join(".local/share/opencode/storage");
+    let mut messages = Vec::new();
+    for message_path in files_with_extension(&storage.join("message").join(session_id), "json")? {
+        let Some(message) = read_json_file(&message_path)? else {
+            continue;
+        };
+        let Some(role) = message.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(message_id) = string_at(&message, "/id").or_else(|| file_stem(&message_path))
+        else {
+            continue;
+        };
+        let parts: Vec<_> = files_with_extension(&storage.join("part").join(&message_id), "json")?
+            .into_iter()
+            .filter_map(|path| read_json_file(&path).transpose())
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|part| content_text_full(&part))
+            .collect();
+        let content = if parts.is_empty() {
+            message.get("content").and_then(content_text_full)
+        } else {
+            Some(parts.join("\n"))
+        };
+        let Some(content) = content else {
+            continue;
+        };
+        let created = message.pointer("/time/created").and_then(Value::as_u64);
+        let timestamp = message
+            .pointer("/time/created")
+            .map(Value::to_string)
+            .or_else(|| string_at(&message, "/timestamp"));
+        messages.push((
+            created.unwrap_or_default(),
+            message_path,
+            SessionMessage {
+                role: role.to_owned(),
+                timestamp,
+                content,
+            },
+        ));
+    }
+    messages.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(messages
+        .into_iter()
+        .map(|(_, _, message)| message)
+        .collect())
 }
 
 fn claude_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
@@ -1345,6 +1539,178 @@ mod tests {
             88,
             Some(0.75),
         );
+    }
+
+    #[test]
+    fn loads_every_codex_chat_message_without_truncating_content() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp.path().join(".codex/sessions/2026/01/02/codex.jsonl");
+        let long_reply = "complete assistant response ".repeat(20);
+        write(
+            &session_path,
+            &format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-detail\",\"cwd\":\"/work/codex\",\"timestamp\":\"2026-01-02T03:04:05Z\"}}}}\n\
+                 {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"first question\"}}]}}}}\n\
+                 {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":{long_reply:?}}}]}}}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("codex"), "codex-detail")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].role, "user");
+        assert_eq!(detail.messages[0].content, "first question");
+        assert_eq!(detail.messages[1].role, "assistant");
+        assert_eq!(detail.messages[1].content, long_reply);
+    }
+
+    #[test]
+    fn loads_every_claude_chat_message_in_file_order() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".claude/projects/project/claude-detail.jsonl");
+        write(
+            &session_path,
+            concat!(
+                "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"cwd\":\"/work/claude\",\"timestamp\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"user\",\"content\":\"first question\"}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
+                "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:07Z\",\"message\":{\"role\":\"user\",\"content\":\"second question\"}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("claude"), "claude-detail")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("user", "first question"),
+                ("assistant", "first answer"),
+                ("user", "second question")
+            ]
+        );
+    }
+
+    #[test]
+    fn loads_every_gemini_chat_message_from_the_session_document() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".gemini/tmp/project/chats/gemini-detail.json");
+        write(
+            &session_path,
+            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","content":"first answer"},{"type":"user","content":"second question"}]}"#,
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("gemini"), "gemini-detail")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("user", "first question"),
+                ("gemini", "first answer"),
+                ("user", "second question")
+            ]
+        );
+    }
+
+    #[test]
+    fn loads_pi_and_oh_my_pi_chat_messages_from_jsonl() {
+        let temp = tempdir().expect("temp home");
+        for (root, session_id) in [
+            (".pi/agent/sessions", "pi-detail"),
+            (".omp/agent/sessions", "omp-detail"),
+        ] {
+            write(
+                &temp.path().join(root).join(format!("{session_id}.jsonl")),
+                &format!(
+                    "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/work\"}}\n\
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"question for {session_id}\"}}}}\n\
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":\"answer for {session_id}\"}}}}\n"
+                ),
+            );
+        }
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+
+        for (provider, session_id) in [("pi", "pi-detail"), ("omp", "omp-detail")] {
+            let session = catalog
+                .resolve(Some(provider), session_id)
+                .expect("fixture session");
+            let detail = catalog.detail(session).expect("load complete detail");
+            assert_eq!(detail.messages.len(), 2);
+            assert_eq!(
+                detail.messages[0].content,
+                format!("question for {session_id}")
+            );
+            assert_eq!(
+                detail.messages[1].content,
+                format!("answer for {session_id}")
+            );
+        }
+    }
+
+    #[test]
+    fn loads_opencode_messages_and_all_of_their_parts_in_time_order() {
+        let temp = tempdir().expect("temp home");
+        let storage = temp.path().join(".local/share/opencode/storage");
+        write(
+            &storage.join("session/project/opencode-detail.json"),
+            r#"{"id":"opencode-detail","directory":"/work/opencode","title":"Detail","time":{"created":1,"updated":4}}"#,
+        );
+        write(
+            &storage.join("message/opencode-detail/message-2.json"),
+            r#"{"id":"message-2","role":"assistant","time":{"created":3}}"#,
+        );
+        write(
+            &storage.join("part/message-2/part-2.json"),
+            r#"{"type":"text","text":"second answer"}"#,
+        );
+        write(
+            &storage.join("message/opencode-detail/message-1.json"),
+            r#"{"id":"message-1","role":"user","time":{"created":2}}"#,
+        );
+        write(
+            &storage.join("part/message-1/part-1.json"),
+            r#"{"type":"text","text":"first question"}"#,
+        );
+        write(
+            &storage.join("part/message-1/part-tool.json"),
+            r#"{"type":"tool","tool":"read","state":{"input":{"path":"README.md"},"output":"file contents"}}"#,
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("opencode"), "opencode-detail")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].role, "user");
+        assert!(detail.messages[0].content.contains("first question"));
+        assert!(detail.messages[0].content.contains("README.md"));
+        assert!(detail.messages[0].content.contains("file contents"));
+        assert_eq!(detail.messages[1].role, "assistant");
+        assert_eq!(detail.messages[1].content, "second answer");
     }
 
     #[test]

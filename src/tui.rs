@@ -9,12 +9,13 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::session::{AgentSession, DeletionSummary};
+use crate::session::{AgentSession, DeletionSummary, SessionDetail};
 use crate::view::{AgentReport, format_bytes, format_duration};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
+type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
 
 pub fn run_top(
     interval: Duration,
@@ -63,24 +64,27 @@ pub fn run_top(
 pub fn manage_sessions(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
+    mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
 ) -> Result<Option<AgentSession>> {
     run_session_browser(
         sessions,
         active_targets,
         BrowserPurpose::Manage,
+        Some(&mut load_detail),
         Some(&mut delete),
     )
 }
 
 pub fn pick_session(sessions: Vec<AgentSession>) -> Result<Option<AgentSession>> {
-    run_session_browser(sessions, BTreeSet::new(), BrowserPurpose::Pick, None)
+    run_session_browser(sessions, BTreeSet::new(), BrowserPurpose::Pick, None, None)
 }
 
 fn run_session_browser(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
     purpose: BrowserPurpose,
+    mut load_detail: Option<DetailCallback<'_>>,
     mut delete: Option<DeleteCallback<'_>>,
 ) -> Result<Option<AgentSession>> {
     let mut app = SessionsApp::new(sessions, active_targets, purpose);
@@ -94,6 +98,10 @@ fn run_session_browser(
             Event::Key(key) if is_key_press(&key) => {
                 if app.mode == BrowserMode::Search {
                     handle_search_key(&mut app, key);
+                    continue;
+                }
+                if app.mode == BrowserMode::Detail {
+                    handle_detail_key(&mut app, key);
                     continue;
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
@@ -139,8 +147,21 @@ fn run_session_browser(
                     KeyCode::Char('r') if app.purpose == BrowserPurpose::Manage => {
                         return Ok(app.selected_session().cloned());
                     }
-                    KeyCode::Enter | KeyCode::Char('i') => {
-                        app.show_details = !app.show_details;
+                    KeyCode::Enter | KeyCode::Char('i')
+                        if app.purpose == BrowserPurpose::Manage =>
+                    {
+                        if let Some(session) = app.selected_session().cloned()
+                            && let Some(load_detail) = load_detail.as_deref_mut()
+                        {
+                            match load_detail(&session) {
+                                Ok(detail) => app.open_detail(detail),
+                                Err(error) => {
+                                    app.status = Some(StatusMessage::error(format!(
+                                        "Failed to load session details: {error:#}"
+                                    )));
+                                }
+                            }
+                        }
                     }
                     KeyCode::Char('d') if app.purpose == BrowserPurpose::Manage => {
                         app.request_delete();
@@ -264,6 +285,7 @@ enum BrowserPurpose {
 enum BrowserMode {
     Browse,
     Search,
+    Detail,
     ConfirmDelete,
 }
 
@@ -276,7 +298,9 @@ struct SessionsApp {
     query: String,
     mode: BrowserMode,
     purpose: BrowserPurpose,
-    show_details: bool,
+    detail: Option<SessionDetail>,
+    detail_scroll: u16,
+    detail_max_scroll: u16,
     status: Option<StatusMessage>,
 }
 
@@ -294,7 +318,9 @@ impl SessionsApp {
             query: String::new(),
             mode: BrowserMode::Browse,
             purpose,
-            show_details: false,
+            detail: None,
+            detail_scroll: 0,
+            detail_max_scroll: 0,
             status: None,
         };
         app.recompute_filter();
@@ -354,6 +380,27 @@ impl SessionsApp {
         self.table_state.select(self.filtered.len().checked_sub(1));
     }
 
+    fn open_detail(&mut self, detail: SessionDetail) {
+        self.detail = Some(detail);
+        self.detail_scroll = 0;
+        self.detail_max_scroll = 0;
+        self.mode = BrowserMode::Detail;
+    }
+
+    fn close_detail(&mut self) {
+        self.detail = None;
+        self.detail_scroll = 0;
+        self.detail_max_scroll = 0;
+        self.mode = BrowserMode::Browse;
+    }
+
+    fn scroll_detail(&mut self, amount: i16) {
+        self.detail_scroll = self
+            .detail_scroll
+            .saturating_add_signed(amount)
+            .min(self.detail_max_scroll);
+    }
+
     fn request_delete(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
@@ -377,6 +424,19 @@ impl SessionsApp {
         )));
         self.mode = BrowserMode::Browse;
         self.recompute_filter();
+    }
+}
+
+fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i' | 'q') => app.close_detail(),
+        KeyCode::Up | KeyCode::Char('k') => app.scroll_detail(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.scroll_detail(1),
+        KeyCode::PageUp => app.scroll_detail(-10),
+        KeyCode::PageDown => app.scroll_detail(10),
+        KeyCode::Home => app.detail_scroll = 0,
+        KeyCode::End => app.detail_scroll = app.detail_max_scroll,
+        _ => {}
     }
 }
 
@@ -541,21 +601,17 @@ fn render_top_footer(frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp) {
-    let details_height = u16::from(app.show_details && frame.area().height >= 16) * 7;
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
-        Constraint::Length(details_height),
         Constraint::Length(1),
     ])
     .split(frame.area());
 
     render_session_search(frame, areas[0], app);
     render_session_table_widget(frame, areas[1], app);
-    if details_height > 0 {
-        render_session_details(frame, areas[2], app.selected_session());
-    }
-    render_session_footer(frame, areas[3], app);
+    render_session_footer(frame, areas[2], app);
+    render_session_detail_popup(frame, app);
     render_delete_confirmation(frame, app);
 }
 
@@ -618,26 +674,114 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-fn render_session_details(frame: &mut Frame<'_>, area: Rect, session: Option<&AgentSession>) {
-    let Some(session) = session else {
+fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
+    if app.mode != BrowserMode::Detail {
+        return;
+    }
+    let Some(detail) = app.detail.as_ref() else {
         return;
     };
-    let details = Text::from(vec![
+    let session = &detail.session;
+    let mut lines = vec![
         detail_line("Target", session_target(session)),
+        detail_line("Agent", session.kind.to_string()),
         detail_line(
             "Title",
             session.title.as_deref().unwrap_or("(untitled)").to_owned(),
         ),
         detail_line("Project", display_path(session.project.as_deref())),
-        detail_line("Updated", format_age(session.updated_at)),
-        detail_line("File", session.path.display().to_string()),
-    ]);
-    frame.render_widget(
-        Paragraph::new(details)
-            .block(Block::new().borders(Borders::ALL).title(" Details "))
-            .wrap(Wrap { trim: true }),
-        area,
+        detail_line(
+            "Started",
+            session.started_at.as_deref().unwrap_or("-").to_owned(),
+        ),
+        detail_line(
+            "Updated",
+            format!(
+                "{} ({})",
+                format_unix_timestamp(session.updated_at),
+                format_age(session.updated_at)
+            ),
+        ),
+        detail_line(
+            "Tokens",
+            session
+                .tokens
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        ),
+        detail_line("Cost", format_cost(session.cost_usd)),
+        detail_line("Log file", session.path.display().to_string()),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Conversation ({} messages)", detail.messages.len()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for message in &detail.messages {
+        let timestamp = message.timestamp.as_deref().unwrap_or("-");
+        let color = if message.role.eq_ignore_ascii_case("user") {
+            Color::Green
+        } else {
+            Color::Cyan
+        };
+        lines.push(Line::from(Span::styled(
+            format!("[{timestamp}] {}", message.role.to_ascii_uppercase()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(
+            message
+                .content
+                .lines()
+                .map(|line| Line::from(line.to_owned())),
+        );
+        lines.push(Line::from(""));
+    }
+    if detail.messages.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No persisted chat messages were found for this session.",
+            Style::default().fg(MUTED),
+        )));
+    }
+
+    let popup = centered_rect(
+        frame.area(),
+        frame.area().width.saturating_sub(4).min(140),
+        frame.area().height.saturating_sub(2),
     );
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(" Session details ");
+    let inner = block.inner(popup);
+    let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let text = Text::from(lines);
+    let content_height = wrapped_text_height(&text, areas[0].width.max(1));
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let max_scroll = content_height.saturating_sub(usize::from(areas[0].height));
+    app.detail_max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
+    app.detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), areas[0]);
+    frame.render_widget(
+        Paragraph::new(key_hints(&[
+            ("↑/↓", "scroll"),
+            ("PgUp/PgDn", "page"),
+            ("Home/End", "jump"),
+            ("Enter/Esc", "close"),
+        ]))
+        .alignment(Alignment::Center),
+        areas[1],
+    );
+}
+
+fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
+    let width = usize::from(width.max(1));
+    text.lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum()
 }
 
 fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
@@ -791,37 +935,34 @@ fn top_value(report: &AgentReport, column: TopColumn) -> String {
 
 #[derive(Debug, Clone, Copy)]
 enum SessionColumn {
+    Target,
     Active,
     Agent,
     Project,
     Title,
     Updated,
-    Target,
 }
 
 fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     if width >= 120 {
         vec![
+            column(SessionColumn::Target, "TARGET", Constraint::Length(46)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Agent, "AGENT", Constraint::Length(12)),
-            column(SessionColumn::Project, "PROJECT", Constraint::Length(20)),
-            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(24)),
-            column(SessionColumn::Updated, "UPDATED", Constraint::Length(12)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(24)),
+            column(SessionColumn::Agent, "AGENT", Constraint::Length(11)),
+            column(SessionColumn::Project, "PROJECT", Constraint::Length(14)),
+            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
+            column(SessionColumn::Updated, "UPDATED", Constraint::Length(11)),
         ]
     } else if width >= 80 {
         vec![
+            column(SessionColumn::Target, "TARGET", Constraint::Length(46)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Agent, "AGENT", Constraint::Length(11)),
-            column(SessionColumn::Project, "PROJECT", Constraint::Length(16)),
-            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(22)),
-            column(SessionColumn::Updated, "UPDATED", Constraint::Length(11)),
+            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
         ]
     } else {
         vec![
+            column(SessionColumn::Target, "TARGET", Constraint::Length(46)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Agent, "AGENT", Constraint::Length(10)),
-            column(SessionColumn::Project, "PROJECT", Constraint::Length(14)),
             column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(12)),
         ]
     }
@@ -829,6 +970,7 @@ fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
 
 fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsApp) -> String {
     match column {
+        SessionColumn::Target => session_target(session),
         SessionColumn::Active => {
             if app.active_targets.contains(&session_target(session)) {
                 "●".to_owned()
@@ -843,7 +985,6 @@ fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsAp
             .clone()
             .unwrap_or_else(|| "(untitled)".to_owned()),
         SessionColumn::Updated => format_age(session.updated_at),
-        SessionColumn::Target => session_target(session),
     }
 }
 
@@ -912,6 +1053,13 @@ fn format_age(updated_at: u64) -> String {
     format_duration(now.saturating_sub(updated_at))
 }
 
+fn format_unix_timestamp(timestamp: u64) -> String {
+    i64::try_from(timestamp)
+        .ok()
+        .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+        .map_or_else(|| timestamp.to_string(), |value| value.to_rfc3339())
+}
+
 fn status_style(status: &str) -> Style {
     match status {
         "running" => Style::default().fg(Color::Green),
@@ -959,15 +1107,17 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::{
-        BrowserMode, BrowserPurpose, SessionsApp, TopApp, draw_sessions, draw_top, session_target,
+        BrowserMode, BrowserPurpose, SessionsApp, TopApp, draw_sessions, draw_top,
+        handle_detail_key, session_columns, session_target,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
-    use crate::session::{AgentSession, DeletionSummary};
+    use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessage};
     use crate::view::AgentReport;
 
     #[test]
@@ -1013,6 +1163,136 @@ mod tests {
         assert!(screen.contains("Fix terminal rendering"));
         assert!(screen.contains("d delete"));
         assert!(screen.lines().all(|line| line.chars().count() == 80));
+    }
+
+    #[test]
+    fn session_target_is_first_and_visible_at_eighty_columns() {
+        let mut session = report().session.expect("fixture session");
+        session.id = "019fbd66-e95f-7dd2-b9b4-37a27a61c272".to_owned();
+        let target = session_target(&session);
+        let mut app = SessionsApp::new(vec![session], BTreeSet::default(), BrowserPurpose::Manage);
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw sessions");
+
+        let screen = buffer_text(terminal.backend().buffer(), 80, 18);
+        assert!(screen.contains(&target));
+        assert_eq!(
+            session_columns(80).first().map(|column| column.label),
+            Some("TARGET")
+        );
+    }
+
+    #[test]
+    fn detail_navigation_scrolls_without_changing_the_selected_session() {
+        let first = report().session.expect("first session");
+        let mut second = first.clone();
+        second.id = "second-session".to_owned();
+        let mut app = SessionsApp::new(
+            vec![first.clone(), second],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session: first,
+            messages: vec![SessionMessage {
+                role: "user".to_owned(),
+                timestamp: None,
+                content: "line\n".repeat(40),
+            }],
+        });
+        app.detail_max_scroll = 20;
+        let selected = app.table_state.selected();
+
+        handle_detail_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert_eq!(app.table_state.selected(), selected);
+        assert_eq!(app.detail_scroll, 1);
+        assert_eq!(app.mode, BrowserMode::Detail);
+    }
+
+    #[test]
+    fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
+        let mut session = report().session.expect("fixture session");
+        session.started_at = Some("2026-08-01T01:02:03Z".to_owned());
+        session.cost_usd = Some(1.25);
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: vec![
+                SessionMessage {
+                    role: "user".to_owned(),
+                    timestamp: Some("2026-08-01T01:02:04Z".to_owned()),
+                    content: "complete first question".to_owned(),
+                },
+                SessionMessage {
+                    role: "assistant".to_owned(),
+                    timestamp: Some("2026-08-01T01:02:05Z".to_owned()),
+                    content: "complete first answer".to_owned(),
+                },
+            ],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        for expected in [
+            "Session details",
+            "Started",
+            "2026-08-01T01:02:03Z",
+            "Tokens",
+            "125500000",
+            "Cost",
+            "$1.2500",
+            "Conversation (2 messages)",
+            "complete first question",
+            "complete first answer",
+            "scroll",
+        ] {
+            assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
+        }
+    }
+
+    #[test]
+    fn detail_mode_can_scroll_to_the_last_chat_message() {
+        let session = report().session.expect("fixture session");
+        let messages = (0..40)
+            .map(|index| SessionMessage {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                timestamp: None,
+                content: format!("complete message number {index}"),
+            })
+            .collect();
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        let selected = app.table_state.selected();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        handle_detail_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw scrolled details");
+
+        let screen = buffer_text(terminal.backend().buffer(), 80, 24);
+        assert!(screen.contains("complete message number 39"));
+        assert_eq!(app.table_state.selected(), selected);
+        assert!(app.detail_scroll > 0);
     }
 
     #[test]
