@@ -184,6 +184,49 @@ command_contains = ["--agent-mode"]
 resume = ["my-agent", "resume", "{session}"]
 ```
 
+### Session detail colors
+
+Every color in the session detail popup can be overridden independently in the
+same `~/.config/mena/config.toml` file. All keys are optional; omitted keys keep
+the current defaults:
+
+```toml
+[ui.session_detail.colors]
+border = "cyan"
+popup_title = "reset"
+metadata_key = "light-magenta"
+metadata_value = "reset"
+conversation_header = "cyan"
+empty_text = "dark-gray"
+status_success = "green"
+status_error = "red"
+footer_key = "cyan"
+footer_text = "reset"
+footer_separator = "dark-gray"
+
+user_header = "light-green"
+user_content = "light-green"
+assistant_header = "cyan"
+assistant_content = "cyan"
+skill_header = "light-yellow"
+skill_content = "light-yellow"
+tool_call_header = "dark-gray"
+tool_call_content = "dark-gray"
+tool_result_header = "dark-gray"
+tool_result_content = "dark-gray"
+system_header = "dark-gray"
+system_content = "dark-gray"
+error_header = "dark-gray"
+error_content = "dark-gray"
+```
+
+Colors accept `reset`, the standard ANSI names (`black`, `red`, `green`,
+`yellow`, `blue`, `magenta`, `cyan`, `gray`, `dark-gray`, `light-red`,
+`light-green`, `light-yellow`, `light-blue`, `light-magenta`, `light-cyan`, and
+`white`), an indexed color such as `ansi:45`, or a true-color value such as
+`#a1b2c3`. Invalid values fail at startup with the affected config path instead
+of silently falling back. Restart `mena` after editing the file.
+
 Then use the same stable selectors:
 
 ```sh

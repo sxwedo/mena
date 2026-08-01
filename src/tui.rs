@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessageKind};
+use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::view::{
     AgentReport, format_bytes, format_count, format_duration, format_duration_millis,
 };
@@ -22,10 +23,109 @@ use crate::view::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const METADATA_KEY: Color = Color::LightMagenta;
+
+#[derive(Debug, Clone, Copy)]
+struct SessionDetailTheme {
+    border: Color,
+    popup_title: Color,
+    metadata_key: Color,
+    metadata_value: Color,
+    conversation_header: Color,
+    empty_text: Color,
+    status_success: Color,
+    status_error: Color,
+    footer_key: Color,
+    footer_text: Color,
+    footer_separator: Color,
+    user_header: Color,
+    user_content: Color,
+    assistant_header: Color,
+    assistant_content: Color,
+    skill_header: Color,
+    skill_content: Color,
+    tool_call_header: Color,
+    tool_call_content: Color,
+    tool_result_header: Color,
+    tool_result_content: Color,
+    system_header: Color,
+    system_content: Color,
+    error_header: Color,
+    error_content: Color,
+}
+
+impl From<&SessionDetailColorSettings> for SessionDetailTheme {
+    fn from(colors: &SessionDetailColorSettings) -> Self {
+        Self {
+            border: configured_color(colors.border),
+            popup_title: configured_color(colors.popup_title),
+            metadata_key: configured_color(colors.metadata_key),
+            metadata_value: configured_color(colors.metadata_value),
+            conversation_header: configured_color(colors.conversation_header),
+            empty_text: configured_color(colors.empty_text),
+            status_success: configured_color(colors.status_success),
+            status_error: configured_color(colors.status_error),
+            footer_key: configured_color(colors.footer_key),
+            footer_text: configured_color(colors.footer_text),
+            footer_separator: configured_color(colors.footer_separator),
+            user_header: configured_color(colors.user_header),
+            user_content: configured_color(colors.user_content),
+            assistant_header: configured_color(colors.assistant_header),
+            assistant_content: configured_color(colors.assistant_content),
+            skill_header: configured_color(colors.skill_header),
+            skill_content: configured_color(colors.skill_content),
+            tool_call_header: configured_color(colors.tool_call_header),
+            tool_call_content: configured_color(colors.tool_call_content),
+            tool_result_header: configured_color(colors.tool_result_header),
+            tool_result_content: configured_color(colors.tool_result_content),
+            system_header: configured_color(colors.system_header),
+            system_content: configured_color(colors.system_content),
+            error_header: configured_color(colors.error_header),
+            error_content: configured_color(colors.error_content),
+        }
+    }
+}
+
+impl Default for SessionDetailTheme {
+    fn default() -> Self {
+        Self::from(&SessionDetailColorSettings::default())
+    }
+}
+
+const fn configured_color(color: ConfigColor) -> Color {
+    match color {
+        ConfigColor::Reset => Color::Reset,
+        ConfigColor::Black => Color::Black,
+        ConfigColor::Red => Color::Red,
+        ConfigColor::Green => Color::Green,
+        ConfigColor::Yellow => Color::Yellow,
+        ConfigColor::Blue => Color::Blue,
+        ConfigColor::Magenta => Color::Magenta,
+        ConfigColor::Cyan => Color::Cyan,
+        ConfigColor::Gray => Color::Gray,
+        ConfigColor::DarkGray => Color::DarkGray,
+        ConfigColor::LightRed => Color::LightRed,
+        ConfigColor::LightGreen => Color::LightGreen,
+        ConfigColor::LightYellow => Color::LightYellow,
+        ConfigColor::LightBlue => Color::LightBlue,
+        ConfigColor::LightMagenta => Color::LightMagenta,
+        ConfigColor::LightCyan => Color::LightCyan,
+        ConfigColor::White => Color::White,
+        ConfigColor::Indexed(index) => Color::Indexed(index),
+        ConfigColor::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
+    }
+}
 type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
 type ExportCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<PathBuf>;
 type CopyCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<()>;
+
+#[derive(Default)]
+struct SessionBrowserCallbacks<'a> {
+    load_detail: Option<DetailCallback<'a>>,
+    export: Option<ExportCallback<'a>>,
+    copy: Option<CopyCallback<'a>>,
+    delete: Option<DeleteCallback<'a>>,
+}
 
 pub fn run_top(
     interval: Duration,
@@ -74,6 +174,7 @@ pub fn run_top(
 pub fn manage_sessions(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
+    detail_colors: &SessionDetailColorSettings,
     mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
     mut export: impl FnMut(&SessionDetail) -> Result<PathBuf>,
     mut copy: impl FnMut(&SessionDetail) -> Result<()>,
@@ -83,10 +184,13 @@ pub fn manage_sessions(
         sessions,
         active_targets,
         BrowserPurpose::Manage,
-        Some(&mut load_detail),
-        Some(&mut export),
-        Some(&mut copy),
-        Some(&mut delete),
+        SessionDetailTheme::from(detail_colors),
+        SessionBrowserCallbacks {
+            load_detail: Some(&mut load_detail),
+            export: Some(&mut export),
+            copy: Some(&mut copy),
+            delete: Some(&mut delete),
+        },
     )
 }
 
@@ -95,10 +199,8 @@ pub fn pick_session(sessions: Vec<AgentSession>) -> Result<Option<AgentSession>>
         sessions,
         BTreeSet::new(),
         BrowserPurpose::Pick,
-        None,
-        None,
-        None,
-        None,
+        SessionDetailTheme::default(),
+        SessionBrowserCallbacks::default(),
     )
 }
 
@@ -106,12 +208,11 @@ fn run_session_browser(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
     purpose: BrowserPurpose,
-    mut load_detail: Option<DetailCallback<'_>>,
-    mut export: Option<ExportCallback<'_>>,
-    mut copy: Option<CopyCallback<'_>>,
-    mut delete: Option<DeleteCallback<'_>>,
+    detail_theme: SessionDetailTheme,
+    mut callbacks: SessionBrowserCallbacks<'_>,
 ) -> Result<Option<AgentSession>> {
-    let mut app = SessionsApp::new(sessions, active_targets, purpose);
+    let mut app =
+        SessionsApp::new_with_detail_theme(sessions, active_targets, purpose, detail_theme);
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     loop {
         terminal
@@ -121,7 +222,12 @@ fn run_session_browser(
         let input = event::read().context("failed to read terminal input")?;
         if app.mode == BrowserMode::Detail {
             for input in read_detail_event_batch(input)? {
-                let action = handle_detail_browser_event(&mut app, &input, &mut export, &mut copy);
+                let action = handle_detail_browser_event(
+                    &mut app,
+                    &input,
+                    &mut callbacks.export,
+                    &mut callbacks.copy,
+                );
                 if action == DetailAction::Resume {
                     return Ok(app.selected_session().cloned());
                 }
@@ -138,27 +244,7 @@ fn run_session_browser(
                     continue;
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
-                    match key.code {
-                        KeyCode::Char('y') => {
-                            if let Some(session) = app.selected_session().cloned()
-                                && let Some(delete) = delete.as_deref_mut()
-                            {
-                                match delete(&session) {
-                                    Ok(summary) => app.deleted(&session, summary),
-                                    Err(error) => {
-                                        app.status = Some(StatusMessage::error(format!(
-                                            "Delete failed: {error:#}"
-                                        )));
-                                        app.mode = BrowserMode::Browse;
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Char('n') | KeyCode::Esc => {
-                            app.mode = BrowserMode::Browse;
-                        }
-                        _ => {}
-                    }
+                    handle_confirm_delete_key(&mut app, key, &mut callbacks.delete);
                     continue;
                 }
                 app.status = None;
@@ -184,7 +270,7 @@ fn run_session_browser(
                         if app.purpose == BrowserPurpose::Manage =>
                     {
                         if let Some(session) = app.selected_session().cloned()
-                            && let Some(load_detail) = load_detail.as_deref_mut()
+                            && let Some(load_detail) = callbacks.load_detail.as_deref_mut()
                         {
                             match load_detail(&session) {
                                 Ok(detail) => app.open_detail(detail),
@@ -208,6 +294,31 @@ fn run_session_browser(
             }
             _ => {}
         }
+    }
+}
+
+fn handle_confirm_delete_key(
+    app: &mut SessionsApp,
+    key: KeyEvent,
+    delete: &mut Option<DeleteCallback<'_>>,
+) {
+    match key.code {
+        KeyCode::Char('y') => {
+            if let Some(session) = app.selected_session().cloned()
+                && let Some(delete) = delete.as_deref_mut()
+            {
+                match delete(&session) {
+                    Ok(summary) => app.deleted(&session, summary),
+                    Err(error) => {
+                        app.status =
+                            Some(StatusMessage::error(format!("Delete failed: {error:#}")));
+                        app.mode = BrowserMode::Browse;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Esc => app.mode = BrowserMode::Browse,
+        _ => {}
     }
 }
 
@@ -378,6 +489,7 @@ struct SessionsApp {
     query: String,
     mode: BrowserMode,
     purpose: BrowserPurpose,
+    detail_theme: SessionDetailTheme,
     detail: Option<SessionDetail>,
     detail_scroll: usize,
     detail_max_scroll: usize,
@@ -388,10 +500,25 @@ struct SessionsApp {
 }
 
 impl SessionsApp {
+    #[cfg(test)]
     fn new(
         sessions: Vec<AgentSession>,
         active_targets: BTreeSet<String>,
         purpose: BrowserPurpose,
+    ) -> Self {
+        Self::new_with_detail_theme(
+            sessions,
+            active_targets,
+            purpose,
+            SessionDetailTheme::default(),
+        )
+    }
+
+    fn new_with_detail_theme(
+        sessions: Vec<AgentSession>,
+        active_targets: BTreeSet<String>,
+        purpose: BrowserPurpose,
+        detail_theme: SessionDetailTheme,
     ) -> Self {
         let mut app = Self {
             sessions,
@@ -401,6 +528,7 @@ impl SessionsApp {
             query: String::new(),
             mode: BrowserMode::Browse,
             purpose,
+            detail_theme,
             detail: None,
             detail_scroll: 0,
             detail_max_scroll: 0,
@@ -694,6 +822,7 @@ fn detail_scroll_direction(input: &Event) -> Option<bool> {
 struct StatusMessage {
     text: String,
     style: Style,
+    is_error: bool,
 }
 
 impl StatusMessage {
@@ -701,6 +830,7 @@ impl StatusMessage {
         Self {
             text,
             style: Style::default().fg(Color::Green),
+            is_error: false,
         }
     }
 
@@ -708,6 +838,7 @@ impl StatusMessage {
         Self {
             text,
             style: Style::default().fg(Color::Red),
+            is_error: true,
         }
     }
 }
@@ -937,9 +1068,11 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         frame.area().width.saturating_sub(4).min(140),
         frame.area().height.saturating_sub(2),
     );
+    let theme = app.detail_theme;
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
+        .border_style(Style::default().fg(theme.border))
+        .title_style(Style::default().fg(theme.popup_title))
         .title(" Session details ");
     let inner = block.inner(popup);
     let detail_status_height = app.detail_status.as_ref().map_or(0, |status| {
@@ -961,7 +1094,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         .is_none_or(|layout| layout.width != content_width)
     {
         let detail = app.detail.as_ref().expect("detail mode has detail data");
-        app.detail_layout = Some(DetailLayoutCache::new(detail, content_width));
+        app.detail_layout = Some(DetailLayoutCache::new(detail, content_width, theme));
     }
     let (content_height, primary_offsets) = {
         let layout = app
@@ -989,21 +1122,34 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     frame.render_widget(block, popup);
     frame.render_widget(paragraph.scroll((local_scroll, 0)), areas[0]);
     if let Some(status) = app.detail_status.as_ref() {
+        let color = if status.is_error {
+            theme.status_error
+        } else {
+            theme.status_success
+        };
         frame.render_widget(
-            Paragraph::new(Span::styled(status.text.clone(), status.style))
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(Span::styled(
+                status.text.clone(),
+                Style::default().fg(color),
+            ))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
             areas[1],
         );
     }
     frame.render_widget(
-        Paragraph::new(key_hints(&[
-            ("Shift+↑/↓", "message"),
-            ("c", "copy"),
-            ("r", "resume"),
-            ("e", "export"),
-            ("Enter/Esc", "close"),
-        ]))
+        Paragraph::new(themed_key_hints(
+            &[
+                ("Shift+↑/↓", "message"),
+                ("c", "copy"),
+                ("r", "resume"),
+                ("e", "export"),
+                ("Enter/Esc", "close"),
+            ],
+            theme.footer_key,
+            theme.footer_text,
+            theme.footer_separator,
+        ))
         .alignment(Alignment::Center),
         areas[2],
     );
@@ -1023,9 +1169,9 @@ struct DetailLayoutCache {
 }
 
 impl DetailLayoutCache {
-    fn new(detail: &SessionDetail, width: u16) -> Self {
+    fn new(detail: &SessionDetail, width: u16, theme: SessionDetailTheme) -> Self {
         let width = width.max(1);
-        let content = session_detail_content(detail);
+        let content = session_detail_content(detail, theme);
         let mut lines = Vec::with_capacity(content.lines.len());
         let mut primary_line_indices = Vec::with_capacity(content.primary_line_indices.len());
         let mut primary_indices = content.primary_line_indices.into_iter().peekable();
@@ -1146,40 +1292,49 @@ fn fragment_detail_line(line: Line<'static>) -> Vec<Line<'static>> {
     fragments
 }
 
-fn session_detail_content(detail: &SessionDetail) -> SessionDetailContent {
+fn session_detail_content(
+    detail: &SessionDetail,
+    theme: SessionDetailTheme,
+) -> SessionDetailContent {
     let session = &detail.session;
     let mut lines = vec![
-        detail_line("Target", session_target(session)),
-        detail_line("Agent", session.kind.to_string()),
-        detail_line(
+        session_detail_line("Target", session_target(session), theme),
+        session_detail_line("Agent", session.kind.to_string(), theme),
+        session_detail_line(
             "Title",
             session.title.as_deref().unwrap_or("(untitled)").to_owned(),
+            theme,
         ),
-        detail_line("Project", display_path(session.project.as_deref())),
-        detail_line(
+        session_detail_line("Project", display_path(session.project.as_deref()), theme),
+        session_detail_line(
             "Started",
             session.started_at.as_deref().unwrap_or("-").to_owned(),
+            theme,
         ),
-        detail_line(
+        session_detail_line(
             "Updated",
             format!(
                 "{} ({})",
                 format_unix_timestamp(session.updated_at),
                 format_age(session.updated_at)
             ),
+            theme,
         ),
-        detail_line(
+        session_detail_line(
             "Tokens",
             session
                 .tokens
                 .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            theme,
         ),
-        detail_line("Cost", format_cost(session.cost_usd)),
-        detail_line("Log file", session.path.display().to_string()),
+        session_detail_line("Cost", format_cost(session.cost_usd), theme),
+        session_detail_line("Log file", session.path.display().to_string(), theme),
         Line::from(""),
         Line::from(Span::styled(
             format!("Conversation ({} messages)", detail.messages.len()),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.conversation_header)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -1194,21 +1349,21 @@ fn session_detail_content(detail: &SessionDetail) -> SessionDetailContent {
         let timestamp = message.timestamp.as_deref().unwrap_or("-");
         lines.push(Line::from(Span::styled(
             message_header(message, timestamp),
-            message_kind_style(message.kind),
+            message_kind_style(message.kind, theme),
         )));
         lines.extend(
             message
                 .content
                 .split('\n')
                 .map(|line| line.strip_suffix('\r').unwrap_or(line))
-                .map(|line| Line::styled(line.to_owned(), message_body_style(message.kind))),
+                .map(|line| Line::styled(line.to_owned(), message_body_style(message.kind, theme))),
         );
         lines.push(Line::from(""));
     }
     if detail.messages.is_empty() {
         lines.push(Line::from(Span::styled(
             "No persisted chat messages were found for this session.",
-            Style::default().fg(MUTED),
+            Style::default().fg(theme.empty_text),
         )));
     }
     SessionDetailContent {
@@ -1242,25 +1397,36 @@ fn message_header(message: &crate::session::SessionMessage, timestamp: &str) -> 
     header
 }
 
-fn message_kind_style(kind: SessionMessageKind) -> Style {
+fn message_kind_style(kind: SessionMessageKind, theme: SessionDetailTheme) -> Style {
     Style::default()
-        .fg(message_kind_color(kind))
+        .fg(message_kind_color(kind, theme, true))
         .add_modifier(Modifier::BOLD)
 }
 
-fn message_body_style(kind: SessionMessageKind) -> Style {
-    Style::default().fg(message_kind_color(kind))
+fn message_body_style(kind: SessionMessageKind, theme: SessionDetailTheme) -> Style {
+    Style::default().fg(message_kind_color(kind, theme, false))
 }
 
-const fn message_kind_color(kind: SessionMessageKind) -> Color {
-    match kind {
-        SessionMessageKind::User => Color::LightGreen,
-        SessionMessageKind::Assistant => Color::Cyan,
-        SessionMessageKind::Skill => Color::LightYellow,
-        SessionMessageKind::ToolCall
-        | SessionMessageKind::ToolResult
-        | SessionMessageKind::System
-        | SessionMessageKind::Error => Color::DarkGray,
+const fn message_kind_color(
+    kind: SessionMessageKind,
+    theme: SessionDetailTheme,
+    header: bool,
+) -> Color {
+    match (kind, header) {
+        (SessionMessageKind::User, true) => theme.user_header,
+        (SessionMessageKind::User, false) => theme.user_content,
+        (SessionMessageKind::Assistant, true) => theme.assistant_header,
+        (SessionMessageKind::Assistant, false) => theme.assistant_content,
+        (SessionMessageKind::Skill, true) => theme.skill_header,
+        (SessionMessageKind::Skill, false) => theme.skill_content,
+        (SessionMessageKind::ToolCall, true) => theme.tool_call_header,
+        (SessionMessageKind::ToolCall, false) => theme.tool_call_content,
+        (SessionMessageKind::ToolResult, true) => theme.tool_result_header,
+        (SessionMessageKind::ToolResult, false) => theme.tool_result_content,
+        (SessionMessageKind::System, true) => theme.system_header,
+        (SessionMessageKind::System, false) => theme.system_content,
+        (SessionMessageKind::Error, true) => theme.error_header,
+        (SessionMessageKind::Error, false) => theme.error_content,
     }
 }
 
@@ -1562,17 +1728,43 @@ fn detail_line(label: &'static str, value: String) -> Line<'static> {
     ])
 }
 
+fn session_detail_line(
+    label: &'static str,
+    value: String,
+    theme: SessionDetailTheme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<8}"),
+            Style::default().fg(theme.metadata_key),
+        ),
+        Span::styled(value, Style::default().fg(theme.metadata_value)),
+    ])
+}
+
 fn key_hints(hints: &[(&str, &str)]) -> Line<'static> {
+    themed_key_hints(hints, ACCENT, Color::Reset, MUTED)
+}
+
+fn themed_key_hints(
+    hints: &[(&str, &str)],
+    key_color: Color,
+    text_color: Color,
+    separator_color: Color,
+) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (key, action)) in hints.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  •  ", Style::default().fg(MUTED)));
+            spans.push(Span::styled("  •  ", Style::default().fg(separator_color)));
         }
         spans.push(Span::styled(
             (*key).to_owned(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(key_color).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::raw(format!(" {action}")));
+        spans.push(Span::styled(
+            format!(" {action}"),
+            Style::default().fg(text_color),
+        ));
     }
     Line::from(spans)
 }
@@ -1602,9 +1794,9 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        BrowserMode, BrowserPurpose, DetailAction, SessionsApp, TopApp, coalesce_detail_events,
-        configure_alternate_scroll, draw_sessions, draw_top, handle_detail_event,
-        handle_detail_key, session_columns, session_target,
+        BrowserMode, BrowserPurpose, DetailAction, SessionDetailTheme, SessionsApp, StatusMessage,
+        TopApp, coalesce_detail_events, configure_alternate_scroll, draw_sessions, draw_top,
+        handle_detail_event, handle_detail_key, session_columns, session_target,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -1612,6 +1804,7 @@ mod tests {
         AgentSession, DeletionSummary, SessionDetail, SessionMessage, SessionMessageKind,
         SessionMessageMetrics,
     };
+    use crate::settings::{ConfigColor, SessionDetailColorSettings};
     use crate::view::AgentReport;
 
     #[test]
@@ -1886,6 +2079,63 @@ mod tests {
             assert_eq!(body_cell.fg, *expected_color, "{body} foreground");
             assert!(!body_cell.modifier.contains(Modifier::BOLD), "{body} bold");
         }
+    }
+
+    #[test]
+    fn detail_theme_can_customize_every_text_surface_independently() {
+        let session = report().session.expect("fixture session");
+        let colors = SessionDetailColorSettings {
+            border: ConfigColor::Red,
+            popup_title: ConfigColor::Blue,
+            metadata_key: ConfigColor::Magenta,
+            metadata_value: ConfigColor::Yellow,
+            conversation_header: ConfigColor::LightBlue,
+            status_success: ConfigColor::LightCyan,
+            footer_key: ConfigColor::White,
+            footer_text: ConfigColor::Gray,
+            user_header: ConfigColor::Rgb(1, 2, 3),
+            user_content: ConfigColor::Indexed(123),
+            ..SessionDetailColorSettings::default()
+        };
+        let mut app = SessionsApp::new_with_detail_theme(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+            SessionDetailTheme::from(&colors),
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: vec![SessionMessage {
+                kind: SessionMessageKind::User,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "custom user content".to_owned(),
+            }],
+        });
+        app.detail_status = Some(StatusMessage::success("custom status".to_owned()));
+        let mut terminal = Terminal::new(TestBackend::new(100, 35)).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw custom details");
+
+        let buffer = terminal.backend().buffer();
+        for (text, expected) in [
+            ("Session details", Color::Blue),
+            ("Target", Color::Magenta),
+            ("codex:session-id", Color::Yellow),
+            ("Conversation (1 messages)", Color::LightBlue),
+            ("USER", Color::Rgb(1, 2, 3)),
+            ("custom user content", Color::Indexed(123)),
+            ("custom status", Color::LightCyan),
+            ("Shift+↑/↓", Color::White),
+            ("copy", Color::Gray),
+        ] {
+            let position = find_text(buffer, 100, 35, text).expect("configured text");
+            assert_eq!(buffer.cell(position).expect("configured cell").fg, expected);
+        }
+        assert_eq!(buffer.cell((2, 1)).expect("popup border").fg, Color::Red);
     }
 
     #[test]

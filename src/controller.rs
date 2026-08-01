@@ -187,6 +187,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         let selected = tui::manage_sessions(
             sessions.to_vec(),
             active_targets,
+            &settings.ui.session_detail.colors,
             |session| catalog.detail(session),
             |detail| crate::export::export_session_detail(detail, &export_directory),
             |detail| clipboard.copy_detail(detail),
