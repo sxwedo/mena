@@ -27,9 +27,44 @@ pub struct AgentSession {
     pub cost_usd: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMessageKind {
+    User,
+    Assistant,
+    ToolCall,
+    ToolResult,
+    System,
+    Error,
+}
+
+impl SessionMessageKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::User => "USER",
+            Self::Assistant => "ASSISTANT",
+            Self::ToolCall => "TOOL CALL",
+            Self::ToolResult => "TOOL RESULT",
+            Self::System => "SYSTEM / META",
+            Self::Error => "ERROR",
+        }
+    }
+
+    fn from_provider_role(role: &str) -> Self {
+        match role.to_ascii_lowercase().as_str() {
+            "user" | "human" => Self::User,
+            "assistant" | "gemini" | "model" => Self::Assistant,
+            "tool_call" | "tool_use" | "function_call" => Self::ToolCall,
+            "tool_result" | "function_call_output" => Self::ToolResult,
+            "error" => Self::Error,
+            _ => Self::System,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMessage {
-    pub role: String,
+    pub kind: SessionMessageKind,
     pub timestamp: Option<String>,
     pub content: String,
 }
@@ -1146,24 +1181,50 @@ fn codex_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
         };
-        if record.pointer("/payload/type").and_then(Value::as_str) != Some("message") {
-            return;
-        }
-        let Some(role) = record.pointer("/payload/role").and_then(Value::as_str) else {
+        let Some(payload) = record.get("payload") else {
             return;
         };
-        let Some(content) = record
-            .pointer("/payload/content")
-            .and_then(content_text_full)
-        else {
+        let Some(payload_type) = payload.get("type").and_then(Value::as_str) else {
             return;
         };
-        messages.push(SessionMessage {
-            role: role.to_owned(),
-            timestamp: string_at(&record, "/timestamp")
-                .or_else(|| string_at(&record, "/payload/timestamp")),
-            content,
-        });
+        let timestamp =
+            string_at(&record, "/timestamp").or_else(|| string_at(&record, "/payload/timestamp"));
+        let parsed = if payload_type == "message" {
+            let role = payload
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("system");
+            payload
+                .get("content")
+                .map(|content| {
+                    messages_from_content(
+                        SessionMessageKind::from_provider_role(role),
+                        timestamp,
+                        content,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            let kind = if payload_type == "error" {
+                Some(SessionMessageKind::Error)
+            } else if payload_type.contains("call_output") || payload_type.ends_with("_result") {
+                Some(SessionMessageKind::ToolResult)
+            } else if payload_type.ends_with("_call") {
+                Some(SessionMessageKind::ToolCall)
+            } else {
+                Some(SessionMessageKind::System)
+            };
+            kind.and_then(|kind| {
+                content_text_full(payload).map(|content| SessionMessage {
+                    kind,
+                    timestamp,
+                    content,
+                })
+            })
+            .into_iter()
+            .collect()
+        };
+        messages.extend(parsed);
     })?;
     if skipped {
         bail!(
@@ -1183,18 +1244,16 @@ fn nested_jsonl_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         let Some(role) = record.pointer("/message/role").and_then(Value::as_str) else {
             return;
         };
-        let Some(content) = record
-            .pointer("/message/content")
-            .and_then(content_text_full)
-        else {
+        let Some(content) = record.pointer("/message/content") else {
             return;
         };
-        messages.push(SessionMessage {
-            role: role.to_owned(),
-            timestamp: string_at(&record, "/timestamp")
-                .or_else(|| string_at(&record, "/message/timestamp")),
+        let timestamp =
+            string_at(&record, "/timestamp").or_else(|| string_at(&record, "/message/timestamp"));
+        messages.extend(messages_from_content(
+            SessionMessageKind::from_provider_role(role),
+            timestamp,
             content,
-        });
+        ));
     })?;
     if skipped {
         bail!(
@@ -1214,16 +1273,18 @@ fn gemini_messages(path: &Path) -> Result<Vec<SessionMessage>> {
     };
     Ok(values
         .iter()
-        .filter_map(|message| {
+        .flat_map(|message| {
             let role = message
                 .get("type")
                 .or_else(|| message.get("role"))
-                .and_then(Value::as_str)?;
-            let content = message.get("content").and_then(content_text_full)?;
-            Some(SessionMessage {
-                role: role.to_owned(),
-                timestamp: string_at(message, "/timestamp"),
-                content,
+                .and_then(Value::as_str);
+            let content = message.get("content");
+            role.zip(content).map_or_else(Vec::new, |(role, content)| {
+                messages_from_content(
+                    SessionMessageKind::from_provider_role(role),
+                    string_at(message, "/timestamp"),
+                    content,
+                )
             })
         })
         .collect())
@@ -1243,41 +1304,137 @@ fn opencode_messages(home: &Path, session_id: &str) -> Result<Vec<SessionMessage
         else {
             continue;
         };
-        let parts: Vec<_> = files_with_extension(&storage.join("part").join(&message_id), "json")?
-            .into_iter()
-            .filter_map(|path| read_json_file(&path).transpose())
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .filter_map(|part| content_text_full(&part))
-            .collect();
-        let content = if parts.is_empty() {
-            message.get("content").and_then(content_text_full)
-        } else {
-            Some(parts.join("\n"))
-        };
-        let Some(content) = content else {
-            continue;
-        };
         let created = message.pointer("/time/created").and_then(Value::as_u64);
         let timestamp = message
             .pointer("/time/created")
             .map(Value::to_string)
             .or_else(|| string_at(&message, "/timestamp"));
-        messages.push((
-            created.unwrap_or_default(),
-            message_path,
-            SessionMessage {
-                role: role.to_owned(),
-                timestamp,
+        let parent_kind = SessionMessageKind::from_provider_role(role);
+        let mut part_paths = files_with_extension(&storage.join("part").join(&message_id), "json")?;
+        part_paths.sort();
+        let mut parsed = Vec::new();
+        for part_path in part_paths {
+            let Some(part) = read_json_file(&part_path)? else {
+                continue;
+            };
+            parsed.extend(opencode_part_messages(
+                parent_kind,
+                timestamp.clone(),
+                &part,
+            ));
+        }
+        if parsed.is_empty()
+            && let Some(content) = message.get("content")
+        {
+            parsed.extend(messages_from_content(
+                parent_kind,
+                timestamp.clone(),
                 content,
-            },
-        ));
+            ));
+        }
+        for (part_index, parsed) in parsed.into_iter().enumerate() {
+            messages.push((
+                created.unwrap_or_default(),
+                message_path.clone(),
+                part_index,
+                parsed,
+            ));
+        }
     }
-    messages.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    messages.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
     Ok(messages
         .into_iter()
-        .map(|(_, _, message)| message)
+        .map(|(_, _, _, message)| message)
         .collect())
+}
+
+fn messages_from_content(
+    parent_kind: SessionMessageKind,
+    timestamp: Option<String>,
+    content: &Value,
+) -> Vec<SessionMessage> {
+    if let Value::Array(parts) = content {
+        return parts
+            .iter()
+            .flat_map(|part| messages_from_content(parent_kind, timestamp.clone(), part))
+            .collect();
+    }
+
+    let kind =
+        content
+            .get("type")
+            .and_then(Value::as_str)
+            .map_or(parent_kind, |value| match value {
+                "text" | "input_text" | "output_text" => parent_kind,
+                "tool_use" | "tool_call" | "function_call" => SessionMessageKind::ToolCall,
+                "tool_result" | "function_call_output" => SessionMessageKind::ToolResult,
+                "error" => SessionMessageKind::Error,
+                "thinking" | "reasoning" | "system" | "meta" | "developer_message" => {
+                    SessionMessageKind::System
+                }
+                _ => SessionMessageKind::System,
+            });
+    content_text_full(content)
+        .map(|content| {
+            vec![SessionMessage {
+                kind,
+                timestamp,
+                content,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn opencode_part_messages(
+    parent_kind: SessionMessageKind,
+    timestamp: Option<String>,
+    part: &Value,
+) -> Vec<SessionMessage> {
+    if part.get("type").and_then(Value::as_str) != Some("tool") {
+        return messages_from_content(parent_kind, timestamp, part);
+    }
+
+    let mut messages = Vec::new();
+    for (pointer, kind) in [
+        ("/state/input", SessionMessageKind::ToolCall),
+        ("/state/output", SessionMessageKind::ToolResult),
+        ("/state/error", SessionMessageKind::Error),
+    ] {
+        let Some(value) = part.pointer(pointer) else {
+            continue;
+        };
+        let mut object = serde_json::Map::new();
+        if let Some(tool) = part.get("tool").or_else(|| part.get("name")) {
+            object.insert("tool".to_owned(), tool.clone());
+        }
+        object.insert(
+            pointer.rsplit('/').next().unwrap_or("value").to_owned(),
+            value.clone(),
+        );
+        let content = Value::Object(object);
+        if let Some(content) = content_text_full(&content) {
+            messages.push(SessionMessage {
+                kind,
+                timestamp: timestamp.clone(),
+                content,
+            });
+        }
+    }
+    if messages.is_empty()
+        && let Some(content) = content_text_full(part)
+    {
+        messages.push(SessionMessage {
+            kind: SessionMessageKind::ToolCall,
+            timestamp,
+            content,
+        });
+    }
+    messages
 }
 
 fn claude_usage(path: &Path) -> Result<(Option<u64>, Option<f64>)> {
@@ -1427,7 +1584,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::SessionCatalog;
+    use super::{SessionCatalog, SessionMessageKind};
     use crate::AgentKind;
 
     #[test]
@@ -1562,10 +1719,53 @@ mod tests {
         let detail = catalog.detail(session).expect("load complete detail");
 
         assert_eq!(detail.messages.len(), 2);
-        assert_eq!(detail.messages[0].role, "user");
+        assert_eq!(detail.messages[0].kind, SessionMessageKind::User);
         assert_eq!(detail.messages[0].content, "first question");
-        assert_eq!(detail.messages[1].role, "assistant");
+        assert_eq!(detail.messages[1].kind, SessionMessageKind::Assistant);
         assert_eq!(detail.messages[1].content, long_reply);
+    }
+
+    #[test]
+    fn classifies_codex_messages_tool_calls_results_and_errors() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp.path().join(".codex/sessions/2026/01/02/kinds.jsonl");
+        write(
+            &session_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-kinds\",\"cwd\":\"/work\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"file contents\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"unknown_event\",\"value\":\"meta value\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"error\",\"message\":\"network failed\"}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("codex"), "codex-kinds")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|message| message.kind)
+                .collect::<Vec<_>>(),
+            [
+                SessionMessageKind::User,
+                SessionMessageKind::ToolCall,
+                SessionMessageKind::ToolResult,
+                SessionMessageKind::Assistant,
+                SessionMessageKind::System,
+                SessionMessageKind::Error,
+            ]
+        );
+        assert!(detail.messages[1].content.contains("read_file"));
+        assert!(detail.messages[2].content.contains("file contents"));
+        assert!(detail.messages[4].content.contains("meta value"));
     }
 
     #[test]
@@ -1593,14 +1793,64 @@ mod tests {
             detail
                 .messages
                 .iter()
-                .map(|message| (message.role.as_str(), message.content.as_str()))
+                .map(|message| (message.kind, message.content.as_str()))
                 .collect::<Vec<_>>(),
             [
-                ("user", "first question"),
-                ("assistant", "first answer"),
-                ("user", "second question")
+                (SessionMessageKind::User, "first question"),
+                (SessionMessageKind::Assistant, "first answer"),
+                (SessionMessageKind::User, "second question")
             ]
         );
+    }
+
+    #[test]
+    fn classifies_structured_claude_pi_and_omp_content_in_original_order() {
+        let temp = tempdir().expect("temp home");
+        for (root, session_id) in [
+            (".claude/projects/project", "claude-structured"),
+            (".pi/agent/sessions", "pi-structured"),
+            (".omp/agent/sessions", "omp-structured"),
+        ] {
+            write(
+                &temp.path().join(root).join(format!("{session_id}.jsonl")),
+                &format!(
+                    "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/work\"}}\n\
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"before\"}},{{\"type\":\"tool_use\",\"name\":\"read\",\"input\":{{\"path\":\"README.md\"}}}},{{\"type\":\"tool_result\",\"content\":\"file contents\"}},{{\"type\":\"thinking\",\"thinking\":\"private note\"}},{{\"type\":\"error\",\"message\":\"tool failed\"}},{{\"type\":\"text\",\"text\":\"after\"}}]}}}}\n"
+                ),
+            );
+        }
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+
+        for (provider, session_id) in [
+            ("claude", "claude-structured"),
+            ("pi", "pi-structured"),
+            ("omp", "omp-structured"),
+        ] {
+            let session = catalog
+                .resolve(Some(provider), session_id)
+                .expect("fixture session");
+            let detail = catalog.detail(session).expect("load complete detail");
+            assert_eq!(
+                detail
+                    .messages
+                    .iter()
+                    .map(|message| message.kind)
+                    .collect::<Vec<_>>(),
+                [
+                    SessionMessageKind::Assistant,
+                    SessionMessageKind::ToolCall,
+                    SessionMessageKind::ToolResult,
+                    SessionMessageKind::System,
+                    SessionMessageKind::Error,
+                    SessionMessageKind::Assistant,
+                ],
+                "provider {provider}"
+            );
+            assert!(detail.messages[1].content.contains("README.md"));
+            assert!(detail.messages[2].content.contains("file contents"));
+            assert!(detail.messages[3].content.contains("private note"));
+            assert!(detail.messages[4].content.contains("tool failed"));
+        }
     }
 
     #[test]
@@ -1624,14 +1874,50 @@ mod tests {
             detail
                 .messages
                 .iter()
-                .map(|message| (message.role.as_str(), message.content.as_str()))
+                .map(|message| (message.kind, message.content.as_str()))
                 .collect::<Vec<_>>(),
             [
-                ("user", "first question"),
-                ("gemini", "first answer"),
-                ("user", "second question")
+                (SessionMessageKind::User, "first question"),
+                (SessionMessageKind::Assistant, "first answer"),
+                (SessionMessageKind::User, "second question")
             ]
         );
+    }
+
+    #[test]
+    fn classifies_structured_gemini_parts_without_collapsing_them() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".gemini/tmp/project/chats/gemini-structured.json");
+        write(
+            &session_path,
+            r#"{"sessionId":"gemini-structured","messages":[{"type":"gemini","content":[{"type":"text","text":"before"},{"type":"function_call","name":"read","args":{"path":"README.md"}},{"type":"function_call_output","output":"file contents"},{"type":"mystery","value":"meta"},{"type":"text","text":"after"}]}]}"#,
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("gemini"), "gemini-structured")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|message| message.kind)
+                .collect::<Vec<_>>(),
+            [
+                SessionMessageKind::Assistant,
+                SessionMessageKind::ToolCall,
+                SessionMessageKind::ToolResult,
+                SessionMessageKind::System,
+                SessionMessageKind::Assistant,
+            ]
+        );
+        assert!(detail.messages[1].content.contains("README.md"));
+        assert!(detail.messages[2].content.contains("file contents"));
+        assert!(detail.messages[3].content.contains("meta"));
     }
 
     #[test]
@@ -1704,13 +1990,15 @@ mod tests {
 
         let detail = catalog.detail(session).expect("load complete detail");
 
-        assert_eq!(detail.messages.len(), 2);
-        assert_eq!(detail.messages[0].role, "user");
-        assert!(detail.messages[0].content.contains("first question"));
-        assert!(detail.messages[0].content.contains("README.md"));
-        assert!(detail.messages[0].content.contains("file contents"));
-        assert_eq!(detail.messages[1].role, "assistant");
-        assert_eq!(detail.messages[1].content, "second answer");
+        assert_eq!(detail.messages.len(), 4);
+        assert_eq!(detail.messages[0].kind, SessionMessageKind::User);
+        assert_eq!(detail.messages[0].content, "first question");
+        assert_eq!(detail.messages[1].kind, SessionMessageKind::ToolCall);
+        assert!(detail.messages[1].content.contains("README.md"));
+        assert_eq!(detail.messages[2].kind, SessionMessageKind::ToolResult);
+        assert!(detail.messages[2].content.contains("file contents"));
+        assert_eq!(detail.messages[3].kind, SessionMessageKind::Assistant);
+        assert_eq!(detail.messages[3].content, "second answer");
     }
 
     #[test]

@@ -87,8 +87,19 @@ The interactive session manager supports `/` search, `Enter`/`i` to open a
 large session-detail popup, `r` resume, and `d` followed by `y` for permanent
 deletion. The detail popup shows complete session metadata and the full native
 chat transcript. While it is open, arrows or `j`/`k` scroll the transcript,
-`PgUp`/`PgDn` page, `Home`/`End` jump, and `Enter` or `Esc` returns to the
-session list without changing its selection.
+`PgUp`/`PgDn` page, `Home`/`End` jump, `e` exports the complete detail as
+Markdown, and `Enter` or `Esc` returns to the session list without changing its
+selection. Message headers are bold and color-coded: user green, assistant
+cyan, tool call yellow, tool result magenta, system/meta dark gray, and error
+red. Message bodies keep the terminal's default foreground color.
+
+Exports are created in the directory where `mena` was started and the popup
+shows the resulting absolute path. Names use
+`mena-session-{provider}-{safe-id}-{YYYYMMDD-HHMMSS}.md`; repeated exports in
+the same second add `-2`, `-3`, and so on without replacing existing files.
+Writes are atomic and leave no partial output on failure. Exported files use
+mode `0600` on Unix; other platforms retain the atomic, no-overwrite behavior
+without promising Unix permission bits.
 
 ### Process control and resume
 
@@ -190,12 +201,13 @@ src/
 ├── main.rs        # `mena` CLI entrypoint and exit handling
 ├── lib.rs         # command definitions and dispatch
 ├── controller.rs  # command orchestration, targeting, JSON, resume argv
+├── export.rs      # complete Markdown rendering and collision-safe export
 ├── process.rs     # process discovery, recognition, identity-safe stop
 ├── session.rs     # provider catalogs, usage parsing, logs, safe deletion
 ├── tui.rs         # responsive process and session interfaces
 ├── view.rs        # stable plain-text tables and formatting
 ├── settings.rs    # ~/.config/mena config and clix custom-agent import
-├── fs.rs          # atomic, permission-preserving persistence
+├── fs.rs          # atomic replacement and private no-overwrite creation
 └── ui.rs          # terminal status and error presentation
 ```
 

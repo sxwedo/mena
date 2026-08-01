@@ -1,6 +1,7 @@
 //! Local-first process and session control for developer agents.
 
 mod controller;
+mod export;
 mod fs;
 mod process;
 mod session;

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -9,13 +10,14 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::session::{AgentSession, DeletionSummary, SessionDetail};
+use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessageKind};
 use crate::view::{AgentReport, format_bytes, format_duration};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
+type ExportCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<PathBuf>;
 
 pub fn run_top(
     interval: Duration,
@@ -65,6 +67,7 @@ pub fn manage_sessions(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
     mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
+    mut export: impl FnMut(&SessionDetail) -> Result<PathBuf>,
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
 ) -> Result<Option<AgentSession>> {
     run_session_browser(
@@ -72,12 +75,20 @@ pub fn manage_sessions(
         active_targets,
         BrowserPurpose::Manage,
         Some(&mut load_detail),
+        Some(&mut export),
         Some(&mut delete),
     )
 }
 
 pub fn pick_session(sessions: Vec<AgentSession>) -> Result<Option<AgentSession>> {
-    run_session_browser(sessions, BTreeSet::new(), BrowserPurpose::Pick, None, None)
+    run_session_browser(
+        sessions,
+        BTreeSet::new(),
+        BrowserPurpose::Pick,
+        None,
+        None,
+        None,
+    )
 }
 
 fn run_session_browser(
@@ -85,6 +96,7 @@ fn run_session_browser(
     active_targets: BTreeSet<String>,
     purpose: BrowserPurpose,
     mut load_detail: Option<DetailCallback<'_>>,
+    mut export: Option<ExportCallback<'_>>,
     mut delete: Option<DeleteCallback<'_>>,
 ) -> Result<Option<AgentSession>> {
     let mut app = SessionsApp::new(sessions, active_targets, purpose);
@@ -101,7 +113,10 @@ fn run_session_browser(
                     continue;
                 }
                 if app.mode == BrowserMode::Detail {
-                    handle_detail_key(&mut app, key);
+                    match export.as_mut() {
+                        Some(export) => handle_detail_key(&mut app, key, Some(&mut **export)),
+                        None => handle_detail_key(&mut app, key, None),
+                    }
                     continue;
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
@@ -301,6 +316,7 @@ struct SessionsApp {
     detail: Option<SessionDetail>,
     detail_scroll: u16,
     detail_max_scroll: u16,
+    detail_status: Option<StatusMessage>,
     status: Option<StatusMessage>,
 }
 
@@ -321,6 +337,7 @@ impl SessionsApp {
             detail: None,
             detail_scroll: 0,
             detail_max_scroll: 0,
+            detail_status: None,
             status: None,
         };
         app.recompute_filter();
@@ -384,6 +401,7 @@ impl SessionsApp {
         self.detail = Some(detail);
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
+        self.detail_status = None;
         self.mode = BrowserMode::Detail;
     }
 
@@ -391,6 +409,7 @@ impl SessionsApp {
         self.detail = None;
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
+        self.detail_status = None;
         self.mode = BrowserMode::Browse;
     }
 
@@ -427,9 +446,22 @@ impl SessionsApp {
     }
 }
 
-fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent) {
+fn handle_detail_key(app: &mut SessionsApp, key: KeyEvent, export: Option<ExportCallback<'_>>) {
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i' | 'q') => app.close_detail(),
+        KeyCode::Char('e') => {
+            let result = app
+                .detail
+                .as_ref()
+                .zip(export)
+                .map(|(detail, export)| export(detail));
+            if let Some(result) = result {
+                app.detail_status = Some(match result {
+                    Ok(path) => StatusMessage::success(format!("Exported: {}", path.display())),
+                    Err(error) => StatusMessage::error(format!("Export failed: {error:#}")),
+                });
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => app.scroll_detail(-1),
         KeyCode::Down | KeyCode::Char('j') => app.scroll_detail(1),
         KeyCode::PageUp => app.scroll_detail(-10),
@@ -681,6 +713,62 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     let Some(detail) = app.detail.as_ref() else {
         return;
     };
+    let lines = session_detail_lines(detail);
+
+    let popup = centered_rect(
+        frame.area(),
+        frame.area().width.saturating_sub(4).min(140),
+        frame.area().height.saturating_sub(2),
+    );
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(" Session details ");
+    let inner = block.inner(popup);
+    let detail_status_height = app.detail_status.as_ref().map_or(0, |status| {
+        let desired = wrapped_text_height(&Text::from(status.text.as_str()), inner.width.max(1));
+        u16::try_from(desired)
+            .unwrap_or(u16::MAX)
+            .min(inner.height.saturating_sub(2))
+    });
+    let areas = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(detail_status_height),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let text = Text::from(lines);
+    let content_height = wrapped_text_height(&text, areas[0].width.max(1));
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let max_scroll = content_height.saturating_sub(usize::from(areas[0].height));
+    app.detail_max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
+    app.detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), areas[0]);
+    if let Some(status) = app.detail_status.as_ref() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(status.text.clone(), status.style))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false }),
+            areas[1],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(key_hints(&[
+            ("↑/↓", "scroll"),
+            ("PgUp/PgDn", "page"),
+            ("Home/End", "jump"),
+            ("e", "export"),
+            ("Enter/Esc", "close"),
+        ]))
+        .alignment(Alignment::Center),
+        areas[2],
+    );
+}
+
+fn session_detail_lines(detail: &SessionDetail) -> Vec<Line<'static>> {
     let session = &detail.session;
     let mut lines = vec![
         detail_line("Target", session_target(session)),
@@ -719,14 +807,9 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     ];
     for message in &detail.messages {
         let timestamp = message.timestamp.as_deref().unwrap_or("-");
-        let color = if message.role.eq_ignore_ascii_case("user") {
-            Color::Green
-        } else {
-            Color::Cyan
-        };
         lines.push(Line::from(Span::styled(
-            format!("[{timestamp}] {}", message.role.to_ascii_uppercase()),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            format!("[{timestamp}] {}", message.kind.label()),
+            message_kind_style(message.kind),
         )));
         lines.extend(
             message
@@ -742,38 +825,19 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
             Style::default().fg(MUTED),
         )));
     }
+    lines
+}
 
-    let popup = centered_rect(
-        frame.area(),
-        frame.area().width.saturating_sub(4).min(140),
-        frame.area().height.saturating_sub(2),
-    );
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(" Session details ");
-    let inner = block.inner(popup);
-    let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-    let text = Text::from(lines);
-    let content_height = wrapped_text_height(&text, areas[0].width.max(1));
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let max_scroll = content_height.saturating_sub(usize::from(areas[0].height));
-    app.detail_max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
-    app.detail_scroll = app.detail_scroll.min(app.detail_max_scroll);
-
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(paragraph.scroll((app.detail_scroll, 0)), areas[0]);
-    frame.render_widget(
-        Paragraph::new(key_hints(&[
-            ("↑/↓", "scroll"),
-            ("PgUp/PgDn", "page"),
-            ("Home/End", "jump"),
-            ("Enter/Esc", "close"),
-        ]))
-        .alignment(Alignment::Center),
-        areas[1],
-    );
+fn message_kind_style(kind: SessionMessageKind) -> Style {
+    let color = match kind {
+        SessionMessageKind::User => Color::Green,
+        SessionMessageKind::Assistant => Color::Cyan,
+        SessionMessageKind::ToolCall => Color::Yellow,
+        SessionMessageKind::ToolResult => Color::Magenta,
+        SessionMessageKind::System => Color::DarkGray,
+        SessionMessageKind::Error => Color::Red,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
 fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
@@ -1107,9 +1171,11 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    use anyhow::Result;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
 
     use super::{
         BrowserMode, BrowserPurpose, SessionsApp, TopApp, draw_sessions, draw_top,
@@ -1117,7 +1183,9 @@ mod tests {
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
-    use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessage};
+    use crate::session::{
+        AgentSession, DeletionSummary, SessionDetail, SessionMessage, SessionMessageKind,
+    };
     use crate::view::AgentReport;
 
     #[test]
@@ -1198,7 +1266,7 @@ mod tests {
         app.open_detail(SessionDetail {
             session: first,
             messages: vec![SessionMessage {
-                role: "user".to_owned(),
+                kind: SessionMessageKind::User,
                 timestamp: None,
                 content: "line\n".repeat(40),
             }],
@@ -1206,7 +1274,11 @@ mod tests {
         app.detail_max_scroll = 20;
         let selected = app.table_state.selected();
 
-        handle_detail_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            None,
+        );
 
         assert_eq!(app.table_state.selected(), selected);
         assert_eq!(app.detail_scroll, 1);
@@ -1227,12 +1299,12 @@ mod tests {
             session,
             messages: vec![
                 SessionMessage {
-                    role: "user".to_owned(),
+                    kind: SessionMessageKind::User,
                     timestamp: Some("2026-08-01T01:02:04Z".to_owned()),
                     content: "complete first question".to_owned(),
                 },
                 SessionMessage {
-                    role: "assistant".to_owned(),
+                    kind: SessionMessageKind::Assistant,
                     timestamp: Some("2026-08-01T01:02:05Z".to_owned()),
                     content: "complete first answer".to_owned(),
                 },
@@ -1263,11 +1335,66 @@ mod tests {
     }
 
     #[test]
+    fn detail_message_headers_use_kind_colors_while_bodies_keep_default_style() {
+        let session = report().session.expect("fixture session");
+        let kinds = [
+            (SessionMessageKind::User, Color::Green),
+            (SessionMessageKind::Assistant, Color::Cyan),
+            (SessionMessageKind::ToolCall, Color::Yellow),
+            (SessionMessageKind::ToolResult, Color::Magenta),
+            (SessionMessageKind::System, Color::DarkGray),
+            (SessionMessageKind::Error, Color::Red),
+        ];
+        let messages = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, _))| SessionMessage {
+                kind: *kind,
+                timestamp: None,
+                content: format!("plain-body-{index}"),
+            })
+            .collect();
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        let mut terminal = Terminal::new(TestBackend::new(100, 42)).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw details");
+
+        let buffer = terminal.backend().buffer();
+        for (index, (kind, expected_color)) in kinds.iter().enumerate() {
+            let header_position = find_text(buffer, 100, 42, kind.label()).expect("message header");
+            let header = buffer.cell(header_position).expect("header cell");
+            assert_eq!(header.fg, *expected_color, "{} header color", kind.label());
+            assert!(
+                header.modifier.contains(Modifier::BOLD),
+                "{} header should be bold",
+                kind.label()
+            );
+
+            let body = format!("plain-body-{index}");
+            let body_position = find_text(buffer, 100, 42, &body).expect("message body");
+            let body_cell = buffer.cell(body_position).expect("body cell");
+            assert_eq!(body_cell.fg, Color::Reset, "{body} foreground");
+            assert!(!body_cell.modifier.contains(Modifier::BOLD), "{body} bold");
+        }
+    }
+
+    #[test]
     fn detail_mode_can_scroll_to_the_last_chat_message() {
         let session = report().session.expect("fixture session");
         let messages = (0..40)
             .map(|index| SessionMessage {
-                role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                kind: if index % 2 == 0 {
+                    SessionMessageKind::User
+                } else {
+                    SessionMessageKind::Assistant
+                },
                 timestamp: None,
                 content: format!("complete message number {index}"),
             })
@@ -1284,7 +1411,11 @@ mod tests {
             .draw(|frame| draw_sessions(frame, &mut app))
             .expect("draw details");
 
-        handle_detail_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            None,
+        );
         terminal
             .draw(|frame| draw_sessions(frame, &mut app))
             .expect("draw scrolled details");
@@ -1293,6 +1424,75 @@ mod tests {
         assert!(screen.contains("complete message number 39"));
         assert_eq!(app.table_state.selected(), selected);
         assert!(app.detail_scroll > 0);
+    }
+
+    #[test]
+    fn exporting_from_detail_keeps_selection_scroll_and_popup_open() {
+        let first = report().session.expect("first session");
+        let mut second = first.clone();
+        second.id = "second-session".to_owned();
+        let mut app = SessionsApp::new(
+            vec![first.clone(), second],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session: first,
+            messages: Vec::new(),
+        });
+        app.detail_max_scroll = 20;
+        app.detail_scroll = 7;
+        let selected = app.table_state.selected();
+        let mut export = |_detail: &SessionDetail| Ok(PathBuf::from("/tmp/session-export.md"));
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            Some(&mut export),
+        );
+
+        assert_eq!(app.mode, BrowserMode::Detail);
+        assert_eq!(app.table_state.selected(), selected);
+        assert_eq!(app.detail_scroll, 7);
+        assert!(app.detail.is_some());
+        assert!(app.detail_status.as_ref().is_some_and(|status| {
+            status.text == "Exported: /tmp/session-export.md"
+                && status.style.fg == Some(Color::Green)
+        }));
+    }
+
+    #[test]
+    fn failed_detail_export_keeps_context_and_reports_a_red_error() {
+        let session = report().session.expect("fixture session");
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail {
+            session,
+            messages: Vec::new(),
+        });
+        app.detail_max_scroll = 20;
+        app.detail_scroll = 7;
+        let selected = app.table_state.selected();
+        let mut export =
+            |_detail: &SessionDetail| -> Result<PathBuf> { anyhow::bail!("permission denied") };
+
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            Some(&mut export),
+        );
+
+        assert_eq!(app.mode, BrowserMode::Detail);
+        assert_eq!(app.table_state.selected(), selected);
+        assert_eq!(app.detail_scroll, 7);
+        assert!(app.detail.is_some());
+        assert!(app.detail_status.as_ref().is_some_and(|status| {
+            status.text.contains("Export failed: permission denied")
+                && status.style.fg == Some(Color::Red)
+        }));
     }
 
     #[test]
@@ -1386,5 +1586,24 @@ mod tests {
             output.push('\n');
         }
         output
+    }
+
+    fn find_text(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        for y in 0..height {
+            let row = (0..width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            if let Some(byte_index) = row.find(needle) {
+                let x = row[..byte_index].chars().count();
+                return u16::try_from(x).ok().map(|x| (x, y));
+            }
+        }
+        None
     }
 }

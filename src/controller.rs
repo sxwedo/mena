@@ -181,10 +181,13 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&values)?);
     } else if !args.plain && io::stdin().is_terminal() && io::stdout().is_terminal() {
         let active_targets = active_session_targets(&catalog, settings)?;
+        let export_directory =
+            std::env::current_dir().context("failed to resolve the session export directory")?;
         let selected = tui::manage_sessions(
             sessions.to_vec(),
             active_targets,
             |session| catalog.detail(session),
+            |detail| crate::export::export_session_detail(detail, &export_directory),
             |session| {
                 if active_session_targets(&catalog, settings)?.contains(&session_target(session)) {
                     bail!("cannot delete a session that is attached to a running agent");
