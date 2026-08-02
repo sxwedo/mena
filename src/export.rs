@@ -58,7 +58,7 @@ fn export_session_detail_at(
 fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String {
     let session = &detail.session;
     let mut markdown = String::from("# Mena Session Export\n\n");
-    let target = format!("{}:{}", session.kind.slug(), session.id);
+    let target = session.target();
     let updated = format_unix_timestamp(session.updated_at);
     let tokens = session
         .tokens

@@ -1,150 +1,214 @@
 # mena
 
-`mena` is a fast, local-first control plane for developer-agent processes and
-native sessions. It discovers running agents, correlates them with persisted
-provider sessions, exposes exact recorded usage, and safely controls or resumes
-them without a daemon or remote service.
+[![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
+[![Rust 1.96.1](https://img.shields.io/badge/rust-1.96.1-f97316.svg)](.mise.toml)
+![Local first](https://img.shields.io/badge/data-local--first-10b981.svg)
 
-## Capabilities
+**One fast, local control plane for your developer agents.**
 
-- Discover Claude Code, Codex, Gemini CLI, OpenCode, Pi, Oh My Pi, Cursor Agent,
-  and configured custom agents.
-- Inspect live processes or archived sessions with stable selectors.
-- Watch CPU, memory, persisted token usage, and recorded cost in a responsive TUI.
-- List and search sessions even when their process is no longer running.
-- Read a bounded, redacted event tail or explicitly opt into raw JSONL records.
-- Resume sessions through each provider's native argv without invoking a shell.
-- Stop processes only after PID, start time, executable, and provider identity are
-  revalidated.
-- Permanently delete native session artifacts after explicit confirmation while
-  refusing to delete a session attached to a running process.
+<code>mena</code> discovers running coding agents, connects them to their native
+persisted sessions, shows exact recorded usage, and gives you a safe way to
+inspect, resume, stop, export, or delete them. There is no daemon, account, or
+remote service.
 
-All inspection happens on the local machine. `mena` never uploads process or
-conversation data and never estimates cost from public model prices.
+- **One view across providers.** Claude Code, Codex, Gemini CLI, OpenCode, Pi,
+  Oh My Pi, Cursor Agent, and custom process recognizers.
+- **Live and historical context.** CPU, memory, project, session, transcript,
+  persisted tokens, recorded cost, model, and per-response metrics.
+- **Native by design.** Reads provider-owned stores in place and resumes through
+  native argv without a shell.
+- **Private by default.** Conversation data stays on the machine; logs are
+  bounded and redacted unless raw output is explicitly requested.
+- **Safety at destructive boundaries.** Process identity is revalidated before
+  signaling, and session deletion fails closed on live, escaped, or ambiguous
+  targets.
 
-## Installation
+## Install
 
-```sh
+### From Git
+
+~~~sh
+cargo install --git https://github.com/sxwedo/mena --locked
+~~~
+
+### From source
+
+~~~sh
 git clone https://github.com/sxwedo/mena.git
 cd mena
 mise run build
 install -m 0755 target/release/mena /usr/local/bin/mena
-```
+~~~
 
-Rust 1.96.1 is pinned in `.mise.toml`.
+The repository pins Rust 1.96.1 in <code>.mise.toml</code>. The native provider
+CLIs and session stores are optional: mena exposes only the providers present on
+the current machine.
 
-## Migrating from clix
+## 60-second quick start
 
-The Agent command family now belongs exclusively to mena:
+~~~sh
+# See every recognized live agent.
+mena ps
 
-| Previous command | Mena command |
-|---|---|
-| `clix agent ps` / `clix-agent ps` | `mena ps` |
-| `clix agent top` / `clix-agent top` | `mena top` |
-| `clix agent inspect` / `clix-agent inspect` | `mena inspect` |
-| `clix agent logs` / `clix-agent logs` | `mena logs` |
-| `clix agent sessions` / `clix-agent sessions` | `mena sessions` |
-| `clix agent stop` / `clix-agent stop` | `mena stop` |
-| `clix agent resume` / `clix-agent resume` | `mena resume` |
+# Watch resource use in a responsive terminal UI.
+mena top
 
-The old commands have been removed from clix rather than retained as aliases.
-Native provider session files stay in place and require no conversion.
+# Search all saved native sessions, including inactive ones.
+mena sessions
 
-## Commands
+# Inspect or resume with a stable target.
+mena inspect codex:019abcde-session-id
+mena resume codex:019abcde-session-id
+~~~
 
-### Running processes
+Targets are stable and script-friendly:
 
-```sh
-# List recognized live agents. IDs can be passed to inspect, logs, and stop.
+- A running process uses <code>provider:PID</code>, such as
+  <code>claude:43120</code>.
+- A persisted session uses <code>provider:session-id</code>.
+- An unqualified ID is accepted only when it resolves unambiguously.
+
+## Core workflows
+
+### Monitor live agents
+
+~~~sh
 mena ps
 mena ps --json
 
-# Interactive CPU/memory view. j/k or arrows select, Enter/i opens details,
-# r refreshes, and q exits. Non-terminals render bounded snapshots.
 mena top
 mena top --interval 3 --iterations 5
-```
+~~~
 
-### Saved sessions
+The process view reports <code>ID</code>, <code>AGENT</code>,
+<code>PROJECT</code>, <code>STATUS</code>, <code>DURATION</code>,
+<code>TOKENS</code>, and <code>COST</code>. The live TUI adds CPU and memory.
 
-```sh
-# Interactive manager on a terminal; use --plain or --json for stable output.
+| Key | Action |
+|---|---|
+| <code>↑</code>/<code>↓</code> or <code>j</code>/<code>k</code> | Select a process |
+| <code>Enter</code> or <code>i</code> | Open details |
+| <code>r</code> | Refresh |
+| <code>q</code> | Quit |
+
+### Find and inspect saved sessions
+
+~~~sh
 mena sessions
 mena sessions --provider claude --limit 20
 mena sessions --plain
 mena sessions --json
 
-# Inspect a process or archived session.
-mena inspect codex:12345
 mena inspect codex:019abcde-session-id
-
-# Read a bounded event tail; --raw exposes the selected original records.
 mena logs claude:session-id -n 100
 mena logs claude:session-id -n 20 --raw
-```
+~~~
 
-The interactive session manager supports `/` search, `Enter`/`i` to open a
-large session-detail popup, `r` resume, and `d` followed by `y` for permanent
-deletion. The detail popup shows complete session metadata and the full native
-chat transcript. While it is open, arrows or `j`/`k` scroll the transcript,
-`Shift`+`↑`/`↓` jumps between user and assistant messages while skipping tool
-traffic, `PgUp`/`PgDn` pages, and `Home`/`End` jumps to the bounds. Press `c` to
-copy the complete detail as Markdown to the system clipboard, `e` to export it
-as a Markdown file, or `r` to resume the current session through the same path
-as the outer list. `Enter` or `Esc` returns to the session list without changing
-its selection. The detail footer shows only these non-obvious actions and omits
-the standard scrolling keys. The scroll range follows the transcript's actual
-word-wrapped height and remains complete beyond 65,535 visual rows, so narrow
-terminals and exceptionally long sessions can still reach their final message.
-Mouse reporting remains disabled, so the terminal keeps native mouse drag
-selection and `Command+C` copying. Alternate-scroll mode converts touchpad and
-mouse-wheel gestures into detail navigation without taking ownership of clicks
-or drags. Queued same-direction scroll events are coalesced so inertial input
-cannot leave the detail view scrolling through a large backlog. The `c` shortcut
-remains available when the complete detail should be copied at once.
+<code>mena sessions</code> keeps <code>TARGET</code> as the first and widest
+fixed column so the complete selector remains visible. Wider terminals add
+agent, project, title/summary, and updated time; narrow layouts retain target and
+title.
 
-Message headers stay bold and message bodies use the same category color: user
-is light green, assistant is cyan, skill invocation is light yellow, and tool
-calls, tool results, system/meta, and errors use the same muted gray previously
-used by metadata keys. Detail metadata keys such as `Target`, `Agent`, and
-`Title` are light magenta. When a provider persists a model id, every assistant
-header displays its own value, so model switches inside one session remain
-visible. Persisted per-response duration and total token usage follow the model,
-for example `ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens`. Missing metrics are
-omitted instead of estimated: Codex supplies the completed turn duration and
-last request usage, OpenCode and Pi/Oh My Pi persist both values per response,
-and Claude Code and Gemini values depend on the fields present in their native
-session records. Markdown exports preserve the same model and metric headers.
+| Session list key | Action |
+|---|---|
+| <code>/</code> | Search target, provider, project, or title |
+| <code>Enter</code> or <code>i</code> | Open the complete detail |
+| <code>r</code> | Resume through the provider CLI |
+| <code>d</code>, then lowercase <code>y</code> | Permanently delete |
+| <code>Esc</code> or <code>q</code> | Close or quit |
 
-Exports are created in the directory where `mena` was started and the popup
-shows the resulting absolute path. Names use
-`mena-session-{provider}-{safe-id}-{YYYYMMDD-HHMMSS}.md`; repeated exports in
-the same second add `-2`, `-3`, and so on without replacing existing files.
-Writes are atomic and leave no partial output on failure. Exported files use
-mode `0600` on Unix; other platforms retain the atomic, no-overwrite behavior
-without promising Unix permission bits.
+The detail popup preserves every parsed message in provider order. It does not
+truncate long content, and its scroll range uses the actual wrapped height
+instead of a 16-bit row limit.
 
-Clipboard access is initialized only when `c` is pressed. Copy success or an
-actionable clipboard error is shown inside the detail popup without changing
-the selected session or its scroll position.
+| Detail key | Action |
+|---|---|
+| <code>↑</code>/<code>↓</code> or <code>j</code>/<code>k</code> | Scroll |
+| <code>Shift+↑</code>/<code>Shift+↓</code> | Jump between user and assistant messages |
+| <code>PgUp</code>/<code>PgDn</code> | Move by page |
+| <code>Home</code>/<code>End</code> | Jump to the beginning or end |
+| <code>c</code> | Copy the complete detail as Markdown |
+| <code>e</code> | Export the complete detail as Markdown |
+| <code>r</code> | Resume the session |
+| <code>Enter</code> or <code>Esc</code> | Return without losing list selection |
 
-### Process control and resume
+Mouse reporting remains disabled, so native terminal drag selection and
+<code>Command+C</code> continue to work. Alternate-scroll mode maps touchpad and
+wheel gestures to navigation while leaving clicks and drags to the terminal.
+Same-direction inertial events are coalesced to prevent a queued scroll from
+continuing after input stops.
 
-```sh
-# Graceful termination after process identity revalidation; --force kills.
-mena stop claude:12345
-mena stop claude:12345 --force
+### Resume and control
 
-# Pick a session interactively, resume the newest, or list resumable sessions.
+~~~sh
+# Pick interactively, resume the newest, or list candidates.
 mena resume
 mena resume --last
 mena resume --list --limit 20
 
-# Resume directly through a provider's native CLI.
+# Resume directly.
 mena resume codex:session-id
 mena resume omp:session-id
 mena resume cursor:chat-id
-```
+
+# Graceful termination after identity revalidation; --force kills.
+mena stop claude:43120
+mena stop claude:43120 --force
+~~~
+
+Resume commands are constructed as program plus argv. mena never invokes a
+shell or interpolates arbitrary command text.
+
+## Session detail
+
+### Message styling
+
+The default palette keeps the transcript scannable without turning it into a
+rainbow:
+
+| Category | Default |
+|---|---|
+| User header and content | Light green |
+| Assistant header and content | Cyan |
+| Skill header and content | Light yellow |
+| Tool call, tool result, system/meta, and error | Muted dark gray |
+| Metadata keys | Light magenta |
+
+Every header and content color can be overridden independently. See
+[Configuration](#configuration).
+
+### Models, duration, and tokens
+
+When the provider persists a model ID, it appears on that assistant message.
+Persisted duration and request tokens follow it:
+
+~~~text
+[2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens
+~~~
+
+Missing fields are omitted rather than guessed. Codex supplies completed-turn
+duration and last-request usage; OpenCode and Pi-family records commonly persist
+both metrics; Claude Code and Gemini display whichever native fields exist.
+Session totals and cost also come only from provider-owned records—mena never
+estimates price from a public model table.
+
+### Markdown export
+
+Press <code>e</code> in detail view. The export contains complete metadata,
+ordered messages, model IDs, exact per-response metrics, and structured tool
+content.
+
+- Destination: the directory where mena was started.
+- Name:
+  <code>mena-session-{provider}-{safe-id}-{YYYYMMDD-HHMMSS}.md</code>.
+- Collision handling: <code>-2</code>, <code>-3</code>, and so on; existing
+  files are never replaced.
+- Durability: atomic creation with no partial file on failure.
+- Privacy: mode <code>0600</code> on Unix. Other platforms retain atomic,
+  no-overwrite behavior without promising Unix permission bits.
+
+The popup stays open after copy or export and shows either the absolute result
+path or an actionable error without moving the selection or scroll position.
 
 ## Provider support
 
@@ -159,38 +223,67 @@ mena resume cursor:chat-id
 | Cursor Agent | ✓ | — | ✓ | — |
 | Custom agent | ✓ | — | configurable | — |
 
-Cursor and custom agents do not expose a supported native local session catalog.
-Unsupported archived-session operations fail explicitly instead of guessing a
-path.
+Cursor Agent and custom recognizers have no generic supported local session
+catalog. Archived-session operations return an explicit unsupported error
+instead of guessing a storage path.
+
+## Command reference
+
+| Command | Purpose |
+|---|---|
+| <code>mena ps [--json]</code> | List recognized live processes |
+| <code>mena top</code> | Watch CPU, memory, status, and exact persisted usage |
+| <code>mena inspect &lt;target&gt; [--json]</code> | Inspect a live process or saved session |
+| <code>mena logs &lt;target&gt; [-n N] [--raw]</code> | Read a bounded event tail |
+| <code>mena sessions</code> | Search, inspect, resume, export, or delete sessions |
+| <code>mena stop &lt;pid-target&gt; [--force]</code> | Stop after process identity revalidation |
+| <code>mena resume [session-target]</code> | Resume through the native provider CLI |
+| <code>mena config init</code> | Create a private configuration file |
+
+Use <code>mena &lt;command&gt; --help</code> for every option.
+
+### Automation output
+
+<code>mena ps --json</code>, <code>mena inspect --json</code>, and
+<code>mena sessions --json</code> emit stable machine-readable fields.
+
+~~~sh
+mena ps --json | jq '.[] | {id, project, tokens, cost_usd}'
+mena sessions --json | jq '.[] | select(.agent == "codex") | .target'
+~~~
+
+A dash in human-readable process output means no native session was associated.
+<code>n/a</code> means a session exists but does not contain an exact recorded
+cost.
 
 ## Configuration
 
-Create a private config file:
+Create <code>~/.config/mena/config.toml</code> with private permissions:
 
-```sh
+~~~sh
 mena config init
-```
+~~~
 
-This creates `~/.config/mena/config.toml` with mode `0600` on Unix. The base
-directory honors `XDG_CONFIG_HOME`.
+The file uses mode <code>0600</code> on Unix. Its base directory honors
+<code>XDG_CONFIG_HOME</code>.
 
-Custom agents use exact executable basenames plus optional argv markers. Resume
-commands are argv arrays with a required `{session}` placeholder:
+### Custom process recognizers
 
-```toml
+~~~toml
 [agent.custom.my_agent]
 executables = ["my-agent", "my-agent.exe"]
 command_contains = ["--agent-mode"]
 resume = ["my-agent", "resume", "{session}"]
-```
+~~~
 
-### Session detail colors
+Executable basenames are matched exactly. Every configured resume command is an
+argv array and must contain the <code>{session}</code> placeholder.
 
-Every color in the session detail popup can be overridden independently in the
-same `~/.config/mena/config.toml` file. All keys are optional; omitted keys keep
-the current defaults:
+### Detail colors
 
-```toml
+All keys are optional; omitted keys keep the defaults.
+
+~~~toml
 [ui.session_detail.colors]
 border = "cyan"
 popup_title = "reset"
@@ -218,81 +311,95 @@ system_header = "dark-gray"
 system_content = "dark-gray"
 error_header = "dark-gray"
 error_content = "dark-gray"
-```
+~~~
 
-Colors accept `reset`, the standard ANSI names (`black`, `red`, `green`,
-`yellow`, `blue`, `magenta`, `cyan`, `gray`, `dark-gray`, `light-red`,
-`light-green`, `light-yellow`, `light-blue`, `light-magenta`, `light-cyan`, and
-`white`), an indexed color such as `ansi:45`, or a true-color value such as
-`#a1b2c3`. Invalid values fail at startup with the affected config path instead
-of silently falling back. Restart `mena` after editing the file.
+Accepted values are <code>reset</code>, standard ANSI names, an indexed color
+such as <code>ansi:45</code>, or true color such as <code>#a1b2c3</code>.
+Invalid values fail at startup with the exact config path instead of silently
+falling back. Restart mena after editing the file.
 
-Then use the same stable selectors:
+## Performance and safety model
 
-```sh
-mena inspect my_agent:12345
-mena stop my_agent:12345
-mena resume my_agent:session-id
-```
+- Catalog discovery retains only the metadata needed to identify sessions;
+  usage and complete transcripts stay lazy.
+- Exact usage is loaded lazily and cached until the backing file changes.
+- Opening a detail performs one provider-native traversal that produces both
+  aggregate usage and the complete ordered transcript. It does not reread the
+  session solely for totals.
+- JSON documents, individual JSONL records, log tails, and catalog scans have
+  explicit bounds.
+- Secrets in common process arguments are redacted in default output.
+  <code>--raw</code> is an explicit opt-in to original records.
+- Stop revalidates PID, start time, executable, and provider immediately before
+  signaling.
+- Delete validates storage IDs and canonical roots, rejects symlink or traversal
+  escapes, removes known provider sidecars/indexes, and refuses sessions
+  attached to a running process.
+- Destructive confirmation accepts lowercase <code>y</code> only.
 
-### Migrating custom agents from clix
+## Troubleshooting
 
-If custom recognizers still live in `~/.config/clix/config.toml`, import only its
-`[agent.custom]` section into the new mena config:
+**No saved sessions appear for Cursor Agent or a custom recognizer.** Their
+processes can be discovered and resumed, but mena deliberately does not guess a
+native archive path.
 
-```sh
-mena config init --import-clix
-```
+**Tokens or cost are missing.** mena reports only exact values present in the
+native record. It does not infer usage or price.
 
-Provider sessions do not need to be copied. They remain in each provider's
-native store and mena reads them in place.
+**Terminal drag selection does not copy.** Use the terminal's normal selection
+gesture and platform copy shortcut. Press <code>c</code> when you want the
+entire detail serialized to Markdown in one operation.
 
-## Output and safety contracts
+**A transcript cannot be opened completely.** A native JSONL record exceeded
+the safety bound. mena fails with the affected path rather than silently showing
+a partial conversation.
 
-The process table exposes `ID`, `AGENT`, `PROJECT`, `STATUS`, `DURATION`,
-`TOKENS`, and `COST`; `top` adds CPU and memory. A `-` means no native session
-could be associated. `n/a` means a session was found but the provider did not
-persist an exact cost.
-
-Session titles use native metadata when available and otherwise fall back to the
-first user message. Usage is parsed only for the selected or associated session
-and cached until its backing file changes. Log reads bound both individual
-record size and retained tail size.
-
-Deletion is provider-aware. It removes duplicate catalog paths plus known
-sidecars and native indexes, validates every storage identifier, rejects paths
-that escape provider-owned roots, and refuses deletion for a live session. The
-operation is permanent and requires an explicit lowercase `y` confirmation.
+**Resume fails.** Confirm that the selected provider CLI is installed and
+available on <code>PATH</code>, then retry with the full provider-qualified
+target.
 
 ## Architecture
 
-```text
+~~~text
 src/
-├── main.rs        # `mena` CLI entrypoint and exit handling
-├── lib.rs         # command definitions and dispatch
-├── controller.rs  # command orchestration, targeting, JSON, resume argv
-├── export.rs      # complete Markdown rendering and collision-safe export
-├── process.rs     # process discovery, recognition, identity-safe stop
-├── session.rs     # provider catalogs, usage parsing, logs, safe deletion
-├── tui.rs         # responsive process and session interfaces
-├── view.rs        # stable plain-text tables and formatting
-├── settings.rs    # ~/.config/mena config and clix custom-agent import
-├── fs.rs          # atomic replacement and private no-overwrite creation
-└── ui.rs          # terminal status and error presentation
-```
+├── main.rs           CLI entrypoint and exit handling
+├── lib.rs            command definitions and dispatch
+├── controller.rs     orchestration, target resolution, JSON, native resume
+├── process.rs        discovery, recognition, resource sampling, safe stop
+├── session.rs        catalog discovery, bounded I/O, deletion safety
+├── session/
+│   └── detail.rs     single-pass provider usage and transcript adapters
+├── export.rs         complete Markdown rendering and collision-safe export
+├── tui.rs            responsive process and session interfaces
+├── view.rs           stable plain-text tables and formatting
+├── settings.rs       private mena configuration and UI preferences
+├── fs.rs             atomic replacement and private no-overwrite creation
+└── ui.rs             terminal status and error presentation
+~~~
 
-## Development
+The public modules stay deliberately small. Provider-specific persisted schemas
+are hidden behind the session detail adapter; filesystem mutation remains
+centralized behind validated deletion and atomic-write interfaces.
 
-```sh
-mise run verify  # fmt + check + test + strict clippy + rustdoc
-mise run build   # release binary
-```
+## Development and contributing
 
-Run one test with:
+~~~sh
+mise run verify  # fmt + check + tests + strict Clippy + rustdoc
+mise run build   # optimized release binary
+~~~
 
-```sh
-cargo test <name_substring> -- --nocapture
-```
+Changes should preserve stable selectors and JSON fields, include provider
+fixtures for native-store behavior, and keep destructive operations fail-closed.
+Before opening a pull request:
+
+1. Add or update focused tests.
+2. Run <code>mise run verify</code>.
+3. Run <code>mise run build</code> for release-impacting changes.
+4. Update this README when user-facing behavior changes.
+
+Issues and focused pull requests are welcome. For security-sensitive findings,
+avoid posting native session content, process arguments, or filesystem paths in
+public reports.
 
 ## License
 

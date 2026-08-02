@@ -192,14 +192,14 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             |detail| crate::export::export_session_detail(detail, &export_directory),
             |detail| clipboard.copy_detail(detail),
             |session| {
-                if active_session_targets(&catalog, settings)?.contains(&session_target(session)) {
+                if active_session_targets(&catalog, settings)?.contains(&session.target()) {
                     bail!("cannot delete a session that is attached to a running agent");
                 }
                 catalog.delete_session(session)
             },
         )?;
         if let Some(session) = selected {
-            resume_target(&session_target(&session), settings)?;
+            resume_target(&session.target(), settings)?;
         }
     } else {
         print!("{}", render_session_table(sessions, None));
@@ -260,7 +260,7 @@ pub fn run_resume(args: &ResumeArgs, settings: &Settings) -> Result<()> {
         let Some(session) = selected else {
             return Ok(());
         };
-        format!("{}:{}", session.kind.slug(), session.id)
+        session.target()
     };
     resume_target(&target, settings)
 }
@@ -401,13 +401,9 @@ fn active_session_targets(
                     agent.process.cwd.as_deref(),
                     agent.process.started_at,
                 )
-                .map(session_target)
+                .map(AgentSession::target)
         })
         .collect())
-}
-
-fn session_target(session: &AgentSession) -> String {
-    format!("{}:{}", session.kind.slug(), session.id)
 }
 
 fn resolve_live<'a>(
@@ -495,7 +491,7 @@ fn session_json(session: &AgentSession) -> Value {
 
 fn session_list_json(session: &AgentSession) -> Value {
     serde_json::json!({
-        "target": format!("{}:{}", session.kind.slug(), session.id),
+        "target": session.target(),
         "agent": session.kind.slug(),
         "session_id": session.id,
         "title": session.title,

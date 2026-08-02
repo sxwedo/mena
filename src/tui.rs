@@ -648,7 +648,7 @@ impl SessionsApp {
         let Some(session) = self.selected_session() else {
             return;
         };
-        if self.active_targets.contains(&session_target(session)) {
+        if self.active_targets.contains(&session.target()) {
             self.status = Some(StatusMessage::error(
                 "Cannot delete a session that is attached to a running agent".to_owned(),
             ));
@@ -658,7 +658,7 @@ impl SessionsApp {
     }
 
     fn deleted(&mut self, deleted: &AgentSession, summary: DeletionSummary) {
-        let target = session_target(deleted);
+        let target = deleted.target();
         self.sessions
             .retain(|session| session.kind != deleted.kind || session.id != deleted.id);
         self.status = Some(StatusMessage::success(format!(
@@ -930,7 +930,7 @@ fn render_top_details(frame: &mut Frame<'_>, area: Rect, report: Option<&AgentRe
     let session = report
         .session
         .as_ref()
-        .map_or_else(|| "-".to_owned(), session_target);
+        .map_or_else(|| "-".to_owned(), AgentSession::target);
     let details = Text::from(vec![
         detail_line(
             "Process",
@@ -1298,7 +1298,7 @@ fn session_detail_content(
 ) -> SessionDetailContent {
     let session = &detail.session;
     let mut lines = vec![
-        session_detail_line("Target", session_target(session), theme),
+        session_detail_line("Target", session.target(), theme),
         session_detail_line("Agent", session.kind.to_string(), theme),
         session_detail_line(
             "Title",
@@ -1479,7 +1479,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(session_target(session)),
+        Line::from(session.target()),
         Line::from(session.title.as_deref().unwrap_or("(untitled)")),
         Line::from(""),
         Line::from(Span::styled(
@@ -1622,9 +1622,9 @@ fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
 
 fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsApp) -> String {
     match column {
-        SessionColumn::Target => session_target(session),
+        SessionColumn::Target => session.target(),
         SessionColumn::Active => {
-            if app.active_targets.contains(&session_target(session)) {
+            if app.active_targets.contains(&session.target()) {
                 "●".to_owned()
             } else {
                 String::new()
@@ -1652,10 +1652,6 @@ fn selected_report(app: &TopApp) -> Option<&AgentReport> {
     app.table_state
         .selected()
         .and_then(|selected| app.reports.get(selected))
-}
-
-fn session_target(session: &AgentSession) -> String {
-    format!("{}:{}", session.kind.slug(), session.id)
 }
 
 fn project_label(project: Option<&std::path::Path>) -> String {
@@ -1796,7 +1792,7 @@ mod tests {
     use super::{
         BrowserMode, BrowserPurpose, DetailAction, SessionDetailTheme, SessionsApp, StatusMessage,
         TopApp, coalesce_detail_events, configure_alternate_scroll, draw_sessions, draw_top,
-        handle_detail_event, handle_detail_key, session_columns, session_target,
+        handle_detail_event, handle_detail_key, session_columns,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -1874,7 +1870,7 @@ mod tests {
     fn session_target_is_first_and_visible_at_eighty_columns() {
         let mut session = report().session.expect("fixture session");
         session.id = "019fbd66-e95f-7dd2-b9b4-37a27a61c272".to_owned();
-        let target = session_target(&session);
+        let target = session.target();
         let mut app = SessionsApp::new(vec![session], BTreeSet::default(), BrowserPurpose::Manage);
         let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("test terminal");
 
@@ -2657,7 +2653,7 @@ mod tests {
     #[test]
     fn running_sessions_cannot_enter_delete_confirmation() {
         let session = report().session.expect("fixture session");
-        let target = session_target(&session);
+        let target = session.target();
         let mut app = SessionsApp::new(
             vec![session],
             BTreeSet::from([target]),

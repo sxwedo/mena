@@ -102,7 +102,7 @@ pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) 
         .enumerate()
         .map(|(index, session)| {
             let mut row = vec![
-                format!("{}:{}", session.kind.slug(), session.id),
+                session.target(),
                 session.kind.to_string(),
                 session
                     .project
