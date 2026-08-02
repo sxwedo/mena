@@ -10,6 +10,10 @@
 
 <p align="center"><strong>One fast, local control plane for your developer agents.</strong></p>
 
+<p align="center">
+  English | <a href="README_CN.md">简体中文</a>
+</p>
+
 <code>mena</code> discovers running coding agents, connects them to their native
 persisted sessions, shows exact recorded usage, and gives you a safe way to
 inspect, resume, stop, export, or delete them. There is no daemon, account, or
