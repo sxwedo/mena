@@ -1,4 +1,5 @@
 # mena
+<img width="1254" height="1254" alt="20260802-120518" src="https://github.com/user-attachments/assets/7800b24f-dc09-47f1-8d17-e9ee3a943d04" />
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 [![Rust 1.96.1](https://img.shields.io/badge/rust-1.96.1-f97316.svg)](.mise.toml)
