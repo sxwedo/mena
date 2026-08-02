@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::{
     AgentSession, MAX_RECORD_BYTES, SessionDetail, SessionMessage, SessionMessageKind,
-    SessionMessageMetrics, content_text_full, file_stem, files_with_extension, read_json_file,
-    string_at, visit_bounded_lines,
+    SessionMessageMetrics, TokenUsage, content_text_full, file_stem, files_with_extension,
+    read_json_file, string_at, visit_bounded_lines,
 };
 use crate::AgentKind;
 
@@ -98,7 +98,7 @@ impl JsonlUsage {
                 has_usage,
             } => {
                 if let Some(usage) = record.pointer("/message/usage")
-                    && let Some(tokens) = message_usage_tokens(usage)
+                    && let Some(tokens) = token_usage_with_component_total(usage).total
                 {
                     *has_usage = true;
                     if let Some(message_id) = string_at(record, "/message/id") {
@@ -224,11 +224,9 @@ fn codex_detail(path: &Path) -> Result<LoadedSession> {
             turn_last_assistant = None;
         } else if payload_type == "token_count" {
             if let Some(index) = pending_assistant.take()
-                && let Some(tokens) = payload
-                    .pointer("/info/last_token_usage")
-                    .and_then(message_usage_tokens)
+                && let Some(usage) = payload.pointer("/info/last_token_usage")
             {
-                messages[index].metrics.tokens = Some(tokens);
+                messages[index].metrics.tokens = token_usage(usage);
             }
         } else if payload_type == "task_complete"
             && let Some(index) = turn_last_assistant
@@ -346,7 +344,7 @@ fn nested_jsonl_detail(path: &Path, kind: &AgentKind) -> Result<LoadedSession> {
             }
             parsed[index].metrics.tokens = record
                 .pointer("/message/usage")
-                .and_then(message_usage_tokens);
+                .map_or_else(TokenUsage::default, token_usage_with_component_total);
             parsed[index].metrics.duration_ms = record
                 .pointer("/message/duration")
                 .and_then(number_as_milliseconds);
@@ -419,8 +417,8 @@ fn gemini_messages(session: &Value) -> Vec<SessionMessage> {
         {
             parsed[index].metrics.tokens = message
                 .get("tokens")
-                .and_then(message_usage_tokens)
-                .or_else(|| message.get("usage").and_then(message_usage_tokens));
+                .or_else(|| message.get("usage"))
+                .map_or_else(TokenUsage::default, token_usage_with_component_total);
             parsed[index].metrics.duration_ms = message
                 .get("durationMs")
                 .and_then(number_as_milliseconds)
@@ -491,7 +489,9 @@ fn opencode_detail(home: &Path, session_id: &str) -> Result<LoadedSession> {
             .iter()
             .rposition(|message| message.kind == SessionMessageKind::Assistant)
         {
-            parsed[index].metrics.tokens = message.get("tokens").and_then(message_usage_tokens);
+            parsed[index].metrics.tokens = message
+                .get("tokens")
+                .map_or_else(TokenUsage::default, token_usage_with_component_total);
             parsed[index].metrics.duration_ms = message
                 .pointer("/time/completed")
                 .and_then(Value::as_u64)
@@ -662,35 +662,66 @@ fn model_id(value: &Value) -> Option<String> {
     .find_map(|pointer| string_at(value, pointer))
 }
 
-fn message_usage_tokens(usage: &Value) -> Option<u64> {
-    for pointer in ["/total_tokens", "/totalTokens", "/total"] {
-        if let Some(tokens) = usage.pointer(pointer).and_then(Value::as_u64) {
-            return Some(tokens);
-        }
+fn token_usage(usage: &Value) -> TokenUsage {
+    TokenUsage {
+        total: u64_at(usage, &["/total_tokens", "/totalTokens", "/total"]),
+        input: u64_at(usage, &["/input_tokens", "/input"]),
+        output: u64_at(usage, &["/output_tokens", "/output"]),
+        cache_read: u64_at(
+            usage,
+            &[
+                "/cached_input_tokens",
+                "/cache_read_input_tokens",
+                "/cache/read",
+                "/cacheRead",
+                "/cached",
+            ],
+        ),
+        cache_write: u64_at(
+            usage,
+            &[
+                "/cache_creation_input_tokens",
+                "/cache/write",
+                "/cacheWrite",
+            ],
+        ),
+        reasoning: u64_at(
+            usage,
+            &[
+                "/reasoning_output_tokens",
+                "/reasoning",
+                "/reasoningTokens",
+                "/thoughts",
+            ],
+        ),
     }
+}
 
-    let mut total = 0_u64;
-    let mut found = false;
-    for pointer in [
-        "/input_tokens",
-        "/output_tokens",
-        "/cache_read_input_tokens",
-        "/cache_creation_input_tokens",
-        "/input",
-        "/output",
-        "/reasoning",
-        "/reasoningTokens",
-        "/cache/read",
-        "/cache/write",
-        "/cacheRead",
-        "/cacheWrite",
-    ] {
-        if let Some(tokens) = usage.pointer(pointer).and_then(Value::as_u64) {
-            found = true;
-            total = total.saturating_add(tokens);
-        }
+fn token_usage_with_component_total(usage: &Value) -> TokenUsage {
+    let mut usage = token_usage(usage);
+    if usage.total.is_none() {
+        let components = [
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            usage.reasoning,
+        ];
+        let found = components.iter().any(Option::is_some);
+        usage.total = found.then(|| {
+            components
+                .into_iter()
+                .flatten()
+                .fold(0_u64, u64::saturating_add)
+        });
     }
-    found.then_some(total)
+    usage
+}
+
+fn u64_at(value: &Value, pointers: &[&str]) -> Option<u64> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_u64))
 }
 
 fn number_as_milliseconds(value: &Value) -> Option<u64> {

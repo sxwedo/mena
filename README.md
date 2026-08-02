@@ -192,19 +192,25 @@ Persisted duration and request tokens follow it:
 
 ~~~text
 [2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens
+Tokens: input 50,000 · output 10,000 · cache read 7,000 · cache write 500 · reasoning 390
 ~~~
 
-Missing fields are omitted rather than guessed. Codex supplies completed-turn
-duration and last-request usage; OpenCode and Pi-family records commonly persist
-both metrics; Claude Code and Gemini display whichever native fields exist.
-Session totals and cost also come only from provider-owned records—mena never
-estimates price from a public model table.
+The second line shows the exact input, output, cache-read, cache-write, and
+reasoning fields available in that provider's native record. Missing fields are
+omitted rather than guessed. A provider may count cached input inside input, so
+mena preserves the provider's total instead of recomputing it when an explicit
+total exists. Codex supplies completed-turn duration and last-request usage;
+OpenCode and Pi-family records commonly persist both metrics; Claude Code and
+Gemini display whichever native fields exist. Session totals and cost also come
+only from provider-owned records—mena never estimates price from a public model
+table.
 
 ### Markdown export
 
 Press <code>e</code> in detail view. The export contains complete metadata,
 ordered messages, model IDs, exact per-response metrics, and structured tool
-content.
+content. Assistant token breakdowns use the same available-field rules as the
+detail popup.
 
 - Destination: the directory where mena was started.
 - Name:

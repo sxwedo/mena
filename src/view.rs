@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 use crate::process::LiveAgent;
-use crate::session::AgentSession;
+use crate::session::{AgentSession, TokenUsage};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReport {
@@ -264,6 +264,22 @@ pub fn format_count(value: u64) -> String {
     formatted
 }
 
+pub fn format_token_breakdown(usage: TokenUsage) -> Option<String> {
+    let mut parts = Vec::new();
+    for (label, value) in [
+        ("input", usage.input),
+        ("output", usage.output),
+        ("cache read", usage.cache_read),
+        ("cache write", usage.cache_write),
+        ("reasoning", usage.reasoning),
+    ] {
+        if let Some(value) = value {
+            parts.push(format!("{label} {}", format_count(value)));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1_024;
     const MIB: u64 = KIB * 1_024;
@@ -287,7 +303,8 @@ fn format_scaled(bytes: u64, unit: u64, suffix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_count, format_duration_millis};
+    use super::{format_count, format_duration_millis, format_token_breakdown};
+    use crate::session::TokenUsage;
 
     #[test]
     fn formats_exact_counts_and_subsecond_response_durations() {
@@ -296,5 +313,28 @@ mod tests {
         assert_eq!(format_duration_millis(12_345), "12.3s");
         assert_eq!(format_duration_millis(125_450), "2m 05.5s");
         assert_eq!(format_duration_millis(3_725_450), "1h 02m 05.5s");
+    }
+
+    #[test]
+    fn formats_only_persisted_token_breakdown_fields() {
+        assert_eq!(
+            format_token_breakdown(TokenUsage {
+                total: Some(100),
+                input: Some(70),
+                output: Some(30),
+                cache_read: Some(0),
+                cache_write: None,
+                reasoning: None,
+            })
+            .as_deref(),
+            Some("input 70 · output 30 · cache read 0")
+        );
+        assert_eq!(
+            format_token_breakdown(TokenUsage {
+                total: Some(100),
+                ..TokenUsage::default()
+            }),
+            None
+        );
     }
 }

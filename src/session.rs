@@ -86,7 +86,18 @@ pub struct SessionMessage {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionMessageMetrics {
     pub duration_ms: Option<u64>,
-    pub tokens: Option<u64>,
+    pub tokens: TokenUsage,
+}
+
+/// Exact token usage persisted for one provider response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub total: Option<u64>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    pub reasoning: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1419,7 +1430,7 @@ mod tests {
                 "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"question\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"answer\"}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":123},\"total_token_usage\":{\"total_tokens\":999}}}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":23,\"reasoning_output_tokens\":5,\"total_tokens\":123},\"total_token_usage\":{\"total_tokens\":999}}}}\n",
                 "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"duration_ms\":6543}}\n"
             ),
         );
@@ -1437,7 +1448,12 @@ mod tests {
 
         assert_eq!(detail.session.tokens, Some(999));
         assert_eq!(assistant.model.as_deref(), Some("gpt-5.6"));
-        assert_eq!(assistant.metrics.tokens, Some(123));
+        assert_eq!(assistant.metrics.tokens.total, Some(123));
+        assert_eq!(assistant.metrics.tokens.input, Some(100));
+        assert_eq!(assistant.metrics.tokens.output, Some(23));
+        assert_eq!(assistant.metrics.tokens.cache_read, Some(80));
+        assert_eq!(assistant.metrics.tokens.cache_write, None);
+        assert_eq!(assistant.metrics.tokens.reasoning, Some(5));
         assert_eq!(assistant.metrics.duration_ms, Some(6_543));
     }
 
@@ -1527,8 +1543,15 @@ mod tests {
             Some("claude-sonnet-4-6")
         );
         assert_eq!(detail.messages[3].model.as_deref(), Some("claude-opus-4-6"));
-        assert_eq!(detail.messages[1].metrics.tokens, Some(100));
-        assert_eq!(detail.messages[3].metrics.tokens, Some(150));
+        assert_eq!(detail.messages[1].metrics.tokens.total, Some(100));
+        assert_eq!(detail.messages[1].metrics.tokens.input, Some(10));
+        assert_eq!(detail.messages[1].metrics.tokens.output, Some(20));
+        assert_eq!(detail.messages[1].metrics.tokens.cache_read, Some(30));
+        assert_eq!(detail.messages[1].metrics.tokens.cache_write, Some(40));
+        assert_eq!(detail.messages[1].metrics.tokens.reasoning, None);
+        assert_eq!(detail.messages[3].metrics.tokens.total, Some(150));
+        assert_eq!(detail.messages[3].metrics.tokens.input, Some(100));
+        assert_eq!(detail.messages[3].metrics.tokens.output, Some(50));
     }
 
     #[test]
@@ -1553,8 +1576,8 @@ mod tests {
         let detail = catalog.detail(session).expect("load complete detail");
 
         assert_eq!(detail.session.tokens, Some(30));
-        assert_eq!(detail.messages[1].metrics.tokens, None);
-        assert_eq!(detail.messages[2].metrics.tokens, Some(30));
+        assert_eq!(detail.messages[1].metrics.tokens.total, None);
+        assert_eq!(detail.messages[2].metrics.tokens.total, Some(30));
     }
 
     #[test]
@@ -1617,7 +1640,7 @@ mod tests {
             .join(".gemini/tmp/project/chats/gemini-detail.json");
         write(
             &session_path,
-            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","tokens":{"total":101},"durationMs":1234,"content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","tokens":{"total":202},"durationMs":2345,"content":"second answer"}]}"#,
+            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","tokens":{"input":70,"output":15,"cached":11,"thoughts":5,"total":101},"durationMs":1234,"content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","tokens":{"input":150,"output":35,"cached":12,"thoughts":5,"total":202},"durationMs":2345,"content":"second answer"}]}"#,
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let session = catalog
@@ -1644,9 +1667,17 @@ mod tests {
             detail.messages[3].model.as_deref(),
             Some("gemini-3.1-flash")
         );
-        assert_eq!(detail.messages[1].metrics.tokens, Some(101));
+        assert_eq!(detail.messages[1].metrics.tokens.total, Some(101));
+        assert_eq!(detail.messages[1].metrics.tokens.input, Some(70));
+        assert_eq!(detail.messages[1].metrics.tokens.output, Some(15));
+        assert_eq!(detail.messages[1].metrics.tokens.cache_read, Some(11));
+        assert_eq!(detail.messages[1].metrics.tokens.reasoning, Some(5));
         assert_eq!(detail.messages[1].metrics.duration_ms, Some(1_234));
-        assert_eq!(detail.messages[3].metrics.tokens, Some(202));
+        assert_eq!(detail.messages[3].metrics.tokens.total, Some(202));
+        assert_eq!(detail.messages[3].metrics.tokens.input, Some(150));
+        assert_eq!(detail.messages[3].metrics.tokens.output, Some(35));
+        assert_eq!(detail.messages[3].metrics.tokens.cache_read, Some(12));
+        assert_eq!(detail.messages[3].metrics.tokens.reasoning, Some(5));
         assert_eq!(detail.messages[3].metrics.duration_ms, Some(2_345));
         assert_eq!(detail.session.tokens, Some(303));
     }
@@ -1701,7 +1732,7 @@ mod tests {
                 &format!(
                     "{{\"type\":\"session\",\"id\":\"{session_id}\",\"cwd\":\"/work\"}}\n\
                      {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"question for {session_id}\"}}}}\n\
-                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"model\":\"model-for-{session_id}\",\"duration\":3456.4,\"usage\":{{\"totalTokens\":789,\"cost\":{{\"total\":0.125}}}},\"content\":\"answer for {session_id}\"}}}}\n"
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"model\":\"model-for-{session_id}\",\"duration\":3456.4,\"usage\":{{\"input\":100,\"output\":89,\"cacheRead\":600,\"cacheWrite\":0,\"reasoningTokens\":12,\"totalTokens\":789,\"cost\":{{\"total\":0.125}}}},\"content\":\"answer for {session_id}\"}}}}\n"
                 ),
             );
         }
@@ -1725,7 +1756,12 @@ mod tests {
                 detail.messages[1].model,
                 Some(format!("model-for-{session_id}"))
             );
-            assert_eq!(detail.messages[1].metrics.tokens, Some(789));
+            assert_eq!(detail.messages[1].metrics.tokens.total, Some(789));
+            assert_eq!(detail.messages[1].metrics.tokens.input, Some(100));
+            assert_eq!(detail.messages[1].metrics.tokens.output, Some(89));
+            assert_eq!(detail.messages[1].metrics.tokens.cache_read, Some(600));
+            assert_eq!(detail.messages[1].metrics.tokens.cache_write, Some(0));
+            assert_eq!(detail.messages[1].metrics.tokens.reasoning, Some(12));
             assert_eq!(detail.messages[1].metrics.duration_ms, Some(3_456));
             assert_eq!(detail.session.tokens, Some(789));
             assert_eq!(detail.session.cost_usd, Some(0.125));
@@ -1783,7 +1819,12 @@ mod tests {
         assert_eq!(detail.messages[4].kind, SessionMessageKind::Assistant);
         assert_eq!(detail.messages[4].content, "second answer");
         assert_eq!(detail.messages[4].model.as_deref(), Some("big-pickle"));
-        assert_eq!(detail.messages[4].metrics.tokens, Some(137));
+        assert_eq!(detail.messages[4].metrics.tokens.total, Some(137));
+        assert_eq!(detail.messages[4].metrics.tokens.input, Some(100));
+        assert_eq!(detail.messages[4].metrics.tokens.output, Some(20));
+        assert_eq!(detail.messages[4].metrics.tokens.cache_read, Some(5));
+        assert_eq!(detail.messages[4].metrics.tokens.cache_write, Some(2));
+        assert_eq!(detail.messages[4].metrics.tokens.reasoning, Some(10));
         assert_eq!(detail.messages[4].metrics.duration_ms, Some(3_450));
         assert_eq!(detail.session.tokens, Some(137));
         assert_eq!(detail.session.cost_usd, Some(0.42));

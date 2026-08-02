@@ -18,6 +18,7 @@ use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessag
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::view::{
     AgentReport, format_bytes, format_count, format_duration, format_duration_millis,
+    format_token_breakdown,
 };
 
 const ACCENT: Color = Color::Cyan;
@@ -1351,6 +1352,14 @@ fn session_detail_content(
             message_header(message, timestamp),
             message_kind_style(message.kind, theme),
         )));
+        if message.kind == SessionMessageKind::Assistant
+            && let Some(tokens) = format_token_breakdown(message.metrics.tokens)
+        {
+            lines.push(Line::from(Span::styled(
+                format!("Tokens: {tokens}"),
+                message_body_style(message.kind, theme),
+            )));
+        }
         lines.extend(
             message
                 .content
@@ -1390,7 +1399,7 @@ fn message_header(message: &crate::session::SessionMessage, timestamp: &str) -> 
         header.push_str(" · ");
         header.push_str(&format_duration_millis(duration_ms));
     }
-    if let Some(tokens) = message.metrics.tokens {
+    if let Some(tokens) = message.metrics.tokens.total {
         header.push_str(" · ");
         let _ = write!(header, "{} tokens", format_count(tokens));
     }
@@ -1798,7 +1807,7 @@ mod tests {
     use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
         AgentSession, DeletionSummary, SessionDetail, SessionMessage, SessionMessageKind,
-        SessionMessageMetrics,
+        SessionMessageMetrics, TokenUsage,
     };
     use crate::settings::{ConfigColor, SessionDetailColorSettings};
     use crate::view::AgentReport;
@@ -1980,7 +1989,14 @@ mod tests {
                     model: Some("gpt-5.6".to_owned()),
                     metrics: SessionMessageMetrics {
                         duration_ms: Some(125_450),
-                        tokens: Some(123_456),
+                        tokens: TokenUsage {
+                            total: Some(123_456),
+                            input: Some(100_000),
+                            output: Some(23_456),
+                            cache_read: Some(80_000),
+                            cache_write: Some(500),
+                            reasoning: Some(456),
+                        },
                     },
                     content: "complete second answer".to_owned(),
                 },
@@ -2004,6 +2020,7 @@ mod tests {
             "Conversation (3 messages)",
             "ASSISTANT · gpt-5.5",
             "ASSISTANT · gpt-5.6 · 2m 05.5s · 123,456 tokens",
+            "input 100,000 · output 23,456 · cache read 80,000 · cache write 500 · reasoning 456",
             "complete first question",
             "complete first answer",
             "complete second answer",

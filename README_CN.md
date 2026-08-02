@@ -183,17 +183,22 @@ mena stop claude:43120 --force
 
 ~~~text
 [2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens
+Tokens: input 50,000 · output 10,000 · cache read 7,000 · cache write 500 · reasoning 390
 ~~~
 
-缺失字段会直接省略，不会猜测。Codex 可以提供已完成 Turn 的耗时和最后一次请求
-用量；OpenCode 与 Pi 系列记录通常同时保存这两项指标；Claude Code 和 Gemini
-则展示其原生 Session 中实际存在的字段。Session 总 Token 和成本同样只来自
-Provider 自己的持久化记录，mena 绝不会根据公开模型价格进行估算。
+第二行会展示该 Provider 原生记录中实际存在的输入、输出、缓存读取、缓存写入和
+推理 Token；缺失字段直接省略，不会猜测。某些 Provider 会把缓存 Token 同时计入
+输入 Token，因此原生记录存在明确总数时，mena 会原样保留总数而不会重新计算。
+Codex 可以提供已完成 Turn 的耗时和最后一次请求用量；OpenCode 与 Pi 系列记录通常
+同时保存这两项指标；Claude Code 和 Gemini 则展示其原生 Session 中实际存在的
+字段。Session 总 Token 和成本同样只来自 Provider 自己的持久化记录，mena 绝不会
+根据公开模型价格进行估算。
 
 ### Markdown 导出
 
 在详情视图中按 <code>e</code>。导出文件包含完整元数据、按顺序排列的消息、
-模型 ID、准确的单次响应指标以及结构化 Tool 内容。
+模型 ID、准确的单次响应指标以及结构化 Tool 内容。Assistant Token 明细遵循与
+详情弹窗相同的可用字段规则。
 
 - 目标目录：启动 mena 时所在的当前目录。
 - 文件名：

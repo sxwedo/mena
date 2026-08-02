@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::fs::atomic_create_private;
 use crate::session::{SessionDetail, SessionMessageKind};
-use crate::view::{format_count, format_duration_millis};
+use crate::view::{format_count, format_duration_millis, format_token_breakdown};
 
 /// Export a complete session detail document into `directory` as Markdown.
 ///
@@ -117,7 +117,7 @@ fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String
             if let Some(duration_ms) = message.metrics.duration_ms {
                 let _ = write!(metrics, " · {}", format_duration_millis(duration_ms));
             }
-            if let Some(tokens) = message.metrics.tokens {
+            if let Some(tokens) = message.metrics.tokens.total {
                 let _ = write!(metrics, " · {} tokens", format_count(tokens));
             }
         }
@@ -126,6 +126,11 @@ fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String
             "### [{timestamp}] {}{metrics}\n",
             message.kind.label()
         );
+        if message.kind == SessionMessageKind::Assistant
+            && let Some(tokens) = format_token_breakdown(message.metrics.tokens)
+        {
+            let _ = writeln!(markdown, "**Token details:** {tokens}\n");
+        }
         if matches!(
             message.kind,
             SessionMessageKind::Skill
@@ -216,6 +221,7 @@ mod tests {
     use crate::AgentKind;
     use crate::session::{
         AgentSession, SessionDetail, SessionMessage, SessionMessageKind, SessionMessageMetrics,
+        TokenUsage,
     };
 
     #[test]
@@ -263,6 +269,7 @@ mod tests {
             "USER",
             "第一行\n第二行",
             "ASSISTANT · gpt-5.5 · 12.3s · 67,890 tokens",
+            "**Token details:** input 50,000 · output 10,000 · cache read 7,000 · cache write 500 · reasoning 390",
             "model-specific answer",
             "TOOL CALL",
             "README.md",
@@ -314,7 +321,14 @@ mod tests {
                     model: Some("gpt-5.5".to_owned()),
                     metrics: SessionMessageMetrics {
                         duration_ms: Some(12_345),
-                        tokens: Some(67_890),
+                        tokens: TokenUsage {
+                            total: Some(67_890),
+                            input: Some(50_000),
+                            output: Some(10_000),
+                            cache_read: Some(7_000),
+                            cache_write: Some(500),
+                            reasoning: Some(390),
+                        },
                     },
                     content: "model-specific answer".to_owned(),
                 },
