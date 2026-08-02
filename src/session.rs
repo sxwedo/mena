@@ -202,7 +202,7 @@ impl SessionCatalog {
             let prefix = provider.map_or_else(String::new, |name| format!("{name}:"));
             format!("agent session not found: {prefix}{session_id}")
         })?;
-        if matches.next().is_some() {
+        if matches.any(|candidate| candidate.kind != first.kind || candidate.id != first.id) {
             bail!(
                 "agent session selector is ambiguous: {session_id}; use provider:full-session-id"
             );
@@ -1210,6 +1210,59 @@ mod tests {
 
     use super::{SessionCatalog, SessionMessageKind};
     use crate::AgentKind;
+
+    #[test]
+    fn duplicate_native_records_resolve_to_one_logical_session() {
+        let temp = tempdir().expect("temp home");
+        let session_id = "019fb342-b647-78f3-9391-365724790c7e";
+        for date in ["2026/07/30", "2026/07/31"] {
+            write(
+                &temp
+                    .path()
+                    .join(format!(".codex/sessions/{date}/duplicate.jsonl")),
+                &format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/work/mena\"}}}}\n"
+                ),
+            );
+        }
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan duplicate records");
+        assert_eq!(catalog.sessions().len(), 2);
+        assert!(
+            catalog
+                .sessions()
+                .iter()
+                .all(|session| session.kind == AgentKind::Codex && session.id == session_id)
+        );
+
+        let resolved = catalog
+            .resolve(Some("codex"), session_id)
+            .expect("a provider-qualified full ID identifies one logical session");
+
+        assert_eq!(resolved.id, session_id);
+        assert_eq!(resolved.kind, AgentKind::Codex);
+    }
+
+    #[test]
+    fn distinct_logical_sessions_with_the_same_prefix_remain_ambiguous() {
+        let temp = tempdir().expect("temp home");
+        for session_id in ["codex-shared-prefix-a", "codex-shared-prefix-b"] {
+            write(
+                &temp
+                    .path()
+                    .join(format!(".codex/sessions/2026/07/31/{session_id}.jsonl")),
+                &format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/work/mena\"}}}}\n"
+                ),
+            );
+        }
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan distinct sessions");
+
+        let error = catalog
+            .resolve(Some("codex"), "codex-shared-prefix")
+            .expect_err("a prefix shared by distinct logical sessions must stay ambiguous");
+
+        assert!(format!("{error:#}").contains("selector is ambiguous"));
+    }
 
     #[test]
     fn indexes_supported_session_formats_and_real_usage_fields() {
