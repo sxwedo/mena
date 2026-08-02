@@ -2,8 +2,6 @@
   <img src="https://github.com/user-attachments/assets/b5d7500e-4d16-4e5f-a414-872718010a22" width="220" alt="mena logo">
 </p>
 
-<h1 align="center">mena</h1>
-
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb.svg" alt="License: MIT"></a>
   <a href=".mise.toml"><img src="https://img.shields.io/badge/rust-1.96.1-f97316.svg" alt="Rust 1.96.1"></a>
