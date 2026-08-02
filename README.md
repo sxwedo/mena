@@ -1,12 +1,16 @@
-<img width="1024" height="904" alt="B128B3C7-E629-4203-BB2E-64088B13E6E5" src="https://github.com/user-attachments/assets/b5d7500e-4d16-4e5f-a414-872718010a22" />
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/b5d7500e-4d16-4e5f-a414-872718010a22" width="220" alt="mena logo">
+</p>
 
+<h1 align="center">mena</h1>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb.svg" alt="License: MIT"></a>
+  <a href=".mise.toml"><img src="https://img.shields.io/badge/rust-1.96.1-f97316.svg" alt="Rust 1.96.1"></a>
+  <img src="https://img.shields.io/badge/data-local--first-10b981.svg" alt="Local first">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
-[![Rust 1.96.1](https://img.shields.io/badge/rust-1.96.1-f97316.svg)](.mise.toml)
-![Local first](https://img.shields.io/badge/data-local--first-10b981.svg)
-
-**One fast, local control plane for your developer agents.**
+<p align="center"><strong>One fast, local control plane for your developer agents.</strong></p>
 
 <code>mena</code> discovers running coding agents, connects them to their native
 persisted sessions, shows exact recorded usage, and gives you a safe way to
