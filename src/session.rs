@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags, params};
 use serde_json::Value;
 
 use crate::AgentKind;
 
-mod detail;
+mod adapter;
+
+pub use adapter::NativeResumeCommand;
 
 const MAX_SESSION_FILES: usize = 50_000;
 const MAX_JSON_BYTES: u64 = 64 * 1_024 * 1_024;
@@ -323,23 +324,10 @@ impl SessionCatalog {
 
     pub fn scan_provider(home: &Path, provider: Option<&AgentKind>) -> Result<Self> {
         let mut sessions = Vec::new();
-        if provider.is_none_or(|kind| kind == &AgentKind::Codex) {
-            scan_codex(home, &mut sessions)?;
-        }
-        if provider.is_none_or(|kind| kind == &AgentKind::ClaudeCode) {
-            scan_claude(home, &mut sessions)?;
-        }
-        if provider.is_none_or(|kind| kind == &AgentKind::GeminiCli) {
-            scan_gemini(home, &mut sessions)?;
-        }
-        if provider.is_none_or(|kind| kind == &AgentKind::OpenCode) {
-            scan_opencode(home, &mut sessions)?;
-        }
-        if provider.is_none_or(|kind| kind == &AgentKind::Pi) {
-            scan_pi(home, &mut sessions)?;
-        }
-        if provider.is_none_or(|kind| kind == &AgentKind::OhMyPi) {
-            scan_oh_my_pi(home, &mut sessions)?;
+        for adapter in adapter::ProviderAdapter::SESSION_CATALOG {
+            if provider.is_none_or(|kind| adapter.matches(kind)) {
+                adapter.discover(home, &mut sessions)?;
+            }
         }
         sessions.sort_by(|left, right| {
             right
@@ -400,14 +388,25 @@ impl SessionCatalog {
 
     pub fn with_usage(&self, session: &AgentSession) -> Result<AgentSession> {
         let mut enriched = session.clone();
-        let (tokens, cost_usd) = detail::usage(&self.home, session)?;
+        let (tokens, cost_usd) = adapter::ProviderAdapter::from_kind(&session.kind)
+            .map_or(Ok((None, None)), |adapter| {
+                adapter.usage(&self.home, session)
+            })?;
         enriched.tokens = tokens;
         enriched.cost_usd = cost_usd;
         Ok(enriched)
     }
 
     pub fn detail(&self, selected: &AgentSession) -> Result<SessionDetail> {
-        detail::load(&self.home, selected)
+        adapter::ProviderAdapter::from_kind(&selected.kind).map_or_else(
+            || {
+                Ok(SessionDetail {
+                    session: selected.clone(),
+                    messages: Vec::new(),
+                })
+            },
+            |adapter| adapter.load(&self.home, selected),
+        )
     }
 
     pub fn delete_session(&self, selected: &AgentSession) -> Result<DeletionSummary> {
@@ -418,452 +417,29 @@ impl SessionCatalog {
         }) {
             bail!("refusing to delete a session that is not in the current catalog");
         }
-        validate_storage_identifier(&selected.id, "session ID")?;
-
-        let mut files: BTreeSet<PathBuf> = self
+        let files: BTreeSet<PathBuf> = self
             .sessions
             .iter()
             .filter(|session| session.kind == selected.kind && session.id == selected.id)
             .map(|session| session.path.clone())
             .collect();
-        let mut directories = BTreeSet::new();
-        collect_provider_artifacts(&self.home, selected, &mut files, &mut directories)?;
-        validate_deletion_targets(&self.home, &selected.kind, &files, &directories)?;
-
-        let index_records = delete_provider_index_records(&self.home, selected)?;
-        let mut summary = DeletionSummary {
-            index_records,
-            ..DeletionSummary::default()
-        };
-        for file in files {
-            remove_file_if_present(&file, &mut summary)?;
-        }
-        let mut directories: Vec<_> = directories.into_iter().collect();
-        directories.sort_by_key(|directory| std::cmp::Reverse(directory.components().count()));
-        for directory in directories {
-            remove_tree_if_present(&directory, &mut summary)?;
-        }
-        Ok(summary)
+        let adapter = adapter::ProviderAdapter::from_kind(&selected.kind)
+            .with_context(|| format!("{} sessions do not support local deletion", selected.kind))?;
+        adapter.delete(&self.home, selected, files)
     }
 }
 
-fn load_codex_titles(home: &Path) -> BTreeMap<String, String> {
-    let mut titles = BTreeMap::new();
-    let Ok(entries) = fs::read_dir(home.join(".codex")) else {
-        return titles;
-    };
-    let mut databases: Vec<_> = entries
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("state_") && name.ends_with(".sqlite"))
-        })
-        .collect();
-    databases.sort();
-    for database in databases {
-        let Ok(connection) = Connection::open_with_flags(
-            database,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) else {
-            continue;
-        };
-        let Ok(mut statement) = connection.prepare("SELECT id, title FROM threads") else {
-            continue;
-        };
-        let Ok(rows) = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) else {
-            continue;
-        };
-        for row in rows.flatten() {
-            if let Some(title) = normalize_preview(&row.1) {
-                titles.insert(row.0, title);
-            }
-        }
-    }
-    titles
-}
-
-fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    let indexed_titles = load_codex_titles(home);
-    for path in files_with_extension(&home.join(".codex/sessions"), "jsonl")? {
-        let mut id = None;
-        let mut title = None;
-        let mut project = None;
-        let mut started_at = None;
-        visit_bounded_lines_limit(&path, Some(128), |line| {
-            let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return;
-            };
-            if record.get("type").and_then(Value::as_str) == Some("session_meta") {
-                id = string_at(&record, "/payload/id");
-                project = string_at(&record, "/payload/cwd").map(PathBuf::from);
-                started_at = string_at(&record, "/payload/timestamp")
-                    .or_else(|| string_at(&record, "/timestamp"));
-            }
-            if title.is_none()
-                && record.pointer("/payload/type").and_then(Value::as_str) == Some("message")
-                && record.pointer("/payload/role").and_then(Value::as_str) == Some("user")
-            {
-                title = record.pointer("/payload/content").and_then(content_preview);
-            }
-        })?;
-        if let Some(id) = id {
-            let title = indexed_titles.get(&id).cloned().or(title);
-            sessions.push(session(
-                AgentKind::Codex,
-                id,
-                title,
-                project,
-                path,
-                started_at,
-                None,
-                None,
-            )?);
-        }
-    }
-    Ok(())
-}
-
-fn scan_claude(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    for path in files_with_extension(&home.join(".claude/projects"), "jsonl")? {
-        let mut id = None;
-        let mut title = None;
-        let mut project = None;
-        let mut started_at = None;
-        visit_bounded_lines_limit(&path, Some(64), |line| {
-            let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return;
-            };
-            id = id.take().or_else(|| string_at(&record, "/sessionId"));
-            project = project
-                .take()
-                .or_else(|| string_at(&record, "/cwd").map(PathBuf::from));
-            started_at = started_at
-                .take()
-                .or_else(|| string_at(&record, "/timestamp"));
-            if title.is_none()
-                && record.pointer("/message/role").and_then(Value::as_str) == Some("user")
-                && record.get("isMeta").and_then(Value::as_bool) != Some(true)
-            {
-                title = record.pointer("/message/content").and_then(content_preview);
-            }
-        })?;
-        if let Some(id) = id.or_else(|| file_stem(&path)) {
-            sessions.push(session(
-                AgentKind::ClaudeCode,
-                id,
-                title,
-                project,
-                path,
-                started_at,
-                None,
-                None,
-            )?);
-        }
-    }
-    Ok(())
-}
-
-fn scan_gemini(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    let root = home.join(".gemini/tmp");
-    for path in files_with_extension(&root, "json")? {
-        if path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            != Some("chats")
-        {
-            continue;
-        }
-        let Some(value) = read_json_file(&path)? else {
-            continue;
-        };
-        let Some(id) = string_at(&value, "/sessionId") else {
-            continue;
-        };
-        let project = path
-            .parent()
-            .and_then(Path::parent)
-            .map(|directory| directory.join(".project_root"))
-            .and_then(|marker| fs::read_to_string(marker).ok())
-            .map(|value| PathBuf::from(value.trim()));
-        sessions.push(session(
-            AgentKind::GeminiCli,
-            id,
-            value
-                .get("messages")
-                .and_then(Value::as_array)
-                .and_then(|messages| {
-                    messages.iter().find_map(|message| {
-                        (message.get("type").and_then(Value::as_str) == Some("user"))
-                            .then(|| message.get("content").and_then(content_preview))
-                            .flatten()
-                    })
-                }),
-            project,
-            path,
-            string_at(&value, "/startTime"),
-            None,
-            None,
-        )?);
-    }
-    Ok(())
-}
-
-fn scan_opencode(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    let root = home.join(".local/share/opencode/storage");
-    for path in files_with_extension(&root.join("session"), "json")? {
-        let Some(value) = read_json_file(&path)? else {
-            continue;
-        };
-        let Some(id) = string_at(&value, "/id") else {
-            continue;
-        };
-        sessions.push(session(
-            AgentKind::OpenCode,
-            id,
-            string_at(&value, "/title").and_then(|title| normalize_preview(&title)),
-            string_at(&value, "/directory").map(PathBuf::from),
-            path,
-            value
-                .pointer("/time/created")
-                .and_then(Value::as_u64)
-                .map(|time| time.to_string()),
-            None,
-            None,
-        )?);
-    }
-    Ok(())
-}
-
-fn scan_pi(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    scan_pi_sessions(&home.join(".pi/agent/sessions"), &AgentKind::Pi, sessions)
-}
-
-fn scan_oh_my_pi(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    scan_pi_sessions(
-        &home.join(".omp/agent/sessions"),
-        &AgentKind::OhMyPi,
-        sessions,
-    )
-}
-
-fn scan_pi_sessions(root: &Path, kind: &AgentKind, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    for path in files_with_extension(root, "jsonl")? {
-        let mut id = None;
-        let mut title = None;
-        let mut project = None;
-        let mut started_at = None;
-        visit_bounded_lines_limit(&path, Some(64), |line| {
-            let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return;
-            };
-            if record.get("type").and_then(Value::as_str) == Some("session") {
-                id = string_at(&record, "/id");
-                project = string_at(&record, "/cwd").map(PathBuf::from);
-                started_at = string_at(&record, "/timestamp");
-            }
-            if title.is_none() && record.get("type").and_then(Value::as_str) == Some("title") {
-                title = string_at(&record, "/title").and_then(|title| normalize_preview(&title));
-            }
-            if title.is_none()
-                && record.pointer("/message/role").and_then(Value::as_str) == Some("user")
-            {
-                title = record.pointer("/message/content").and_then(content_preview);
-            }
-        })?;
-        if let Some(id) = id {
-            sessions.push(session(
-                kind.clone(),
-                id,
-                title,
-                project,
-                path,
-                started_at,
-                None,
-                None,
-            )?);
-        }
-    }
-    Ok(())
-}
-
-fn collect_provider_artifacts(
-    home: &Path,
-    session: &AgentSession,
-    files: &mut BTreeSet<PathBuf>,
-    directories: &mut BTreeSet<PathBuf>,
-) -> Result<()> {
-    match session.kind {
-        AgentKind::Codex => {
-            collect_files_with_prefix(
-                &home.join(".codex/shell_snapshots"),
-                &format!("{}.", session.id),
-                files,
-            )?;
-        }
-        AgentKind::ClaudeCode => {
-            if let Some(parent) = session.path.parent() {
-                directories.insert(parent.join(&session.id));
-            }
-            for root in ["session-env", "file-history"] {
-                directories.insert(home.join(".claude").join(root).join(&session.id));
-            }
-            collect_claude_team_artifacts(home, session, files, directories)?;
-            collect_matching_json_files(
-                &home.join(".claude/sessions"),
-                "/sessionId",
-                &session.id,
-                files,
-            )?;
-            collect_matching_json_files(
-                &home.join(".claude/plugins/claude-hud/transcript-cache"),
-                "/transcriptPath",
-                &session.path.to_string_lossy(),
-                files,
-            )?;
-        }
-        AgentKind::OpenCode => {
-            let storage = home.join(".local/share/opencode/storage");
-            let message_directory = storage.join("message").join(&session.id);
-            if message_directory.exists() {
-                for entry in fs::read_dir(&message_directory).with_context(|| {
-                    format!(
-                        "failed to inspect OpenCode messages in {}",
-                        message_directory.display()
-                    )
-                })? {
-                    let entry = entry.with_context(|| {
-                        format!(
-                            "failed to inspect an OpenCode message in {}",
-                            message_directory.display()
-                        )
-                    })?;
-                    if entry.file_type().is_ok_and(|file_type| file_type.is_file())
-                        && let Some(message_id) = file_stem(&entry.path())
-                    {
-                        validate_storage_identifier(&message_id, "OpenCode message ID")?;
-                        directories.insert(storage.join("part").join(message_id));
-                    }
-                }
-            }
-            directories.insert(message_directory);
-            files.insert(
-                storage
-                    .join("session_diff")
-                    .join(format!("{}.json", session.id)),
-            );
-            files.insert(storage.join("todo").join(format!("{}.json", session.id)));
-        }
-        AgentKind::GeminiCli | AgentKind::Pi | AgentKind::OhMyPi => {}
-        AgentKind::Cursor | AgentKind::Custom(_) => {
-            bail!("{} sessions do not support local deletion", session.kind)
-        }
-    }
-    Ok(())
-}
-
-fn collect_claude_team_artifacts(
-    home: &Path,
-    session: &AgentSession,
-    files: &mut BTreeSet<PathBuf>,
-    directories: &mut BTreeSet<PathBuf>,
-) -> Result<()> {
-    let prefix: String = session.id.chars().take(8).collect();
-    let team = home.join(".claude/teams").join(format!("session-{prefix}"));
-    let config = team.join("config.json");
-    let matches_session = config.exists()
-        && read_json_file(&config)?.is_some_and(|value| {
-            value.pointer("/leadSessionId").and_then(Value::as_str) == Some(session.id.as_str())
-        });
-    if !matches_session {
-        return Ok(());
-    }
-
-    let tasks = home.join(".claude/tasks").join(format!("session-{prefix}"));
-    if tasks.exists() {
-        for entry in fs::read_dir(&tasks).with_context(|| {
-            format!(
-                "failed to inspect Claude task artifacts in {}",
-                tasks.display()
-            )
-        })? {
-            let path = entry
-                .with_context(|| format!("failed to inspect a Claude task in {}", tasks.display()))?
-                .path();
-            if let Some(agent_id) = file_stem(&path) {
-                validate_storage_identifier(&agent_id, "Claude task agent ID")?;
-                files.insert(home.join(".claude/debug").join(format!("{agent_id}.txt")));
-            }
-        }
-    }
-    directories.insert(tasks);
-    directories.insert(team);
-    Ok(())
-}
-
-fn collect_matching_json_files(
-    root: &Path,
-    pointer: &str,
-    expected: &str,
-    files: &mut BTreeSet<PathBuf>,
-) -> Result<()> {
-    for path in files_with_extension(root, "json")? {
-        if read_json_file(&path)?
-            .is_some_and(|value| value.pointer(pointer).and_then(Value::as_str) == Some(expected))
-        {
-            files.insert(path);
-        }
-    }
-    Ok(())
-}
-
-fn collect_files_with_prefix(
-    root: &Path,
-    prefix: &str,
-    files: &mut BTreeSet<PathBuf>,
-) -> Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("failed to inspect session artifacts in {}", root.display()))?
-    {
-        let entry = entry.with_context(|| {
-            format!("failed to inspect a session artifact in {}", root.display())
-        })?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(prefix))
-        {
-            files.insert(entry.path());
-        }
-    }
-    Ok(())
+pub fn native_resume_command(kind: &AgentKind, id: &str) -> Result<NativeResumeCommand> {
+    let adapter = adapter::ProviderAdapter::from_kind(kind)
+        .with_context(|| format!("custom agent {kind} does not define a resume command"))?;
+    Ok(adapter.resume_command(id))
 }
 
 fn validate_deletion_targets(
-    home: &Path,
-    kind: &AgentKind,
+    roots: &[PathBuf],
     files: &BTreeSet<PathBuf>,
     directories: &BTreeSet<PathBuf>,
 ) -> Result<()> {
-    let roots = match kind {
-        AgentKind::Codex => vec![
-            home.join(".codex/sessions"),
-            home.join(".codex/shell_snapshots"),
-        ],
-        AgentKind::ClaudeCode => vec![home.join(".claude")],
-        AgentKind::GeminiCli => vec![home.join(".gemini/tmp")],
-        AgentKind::OpenCode => vec![home.join(".local/share/opencode/storage")],
-        AgentKind::Pi => vec![home.join(".pi/agent/sessions")],
-        AgentKind::OhMyPi => vec![home.join(".omp/agent/sessions")],
-        AgentKind::Cursor | AgentKind::Custom(_) => Vec::new(),
-    };
     for target in files.iter().chain(directories) {
         let Some(root) = roots.iter().find(|root| target.starts_with(root)) else {
             bail!(
@@ -959,24 +535,6 @@ fn remove_tree_if_present(path: &Path, summary: &mut DeletionSummary) -> Result<
     Ok(())
 }
 
-fn delete_provider_index_records(home: &Path, session: &AgentSession) -> Result<usize> {
-    match session.kind {
-        AgentKind::Codex => Ok(delete_codex_database_rows(home, &session.id)?
-            + remove_jsonl_records(&home.join(".codex/session_index.jsonl"), "/id", &session.id)?),
-        AgentKind::ClaudeCode => remove_jsonl_records(
-            &home.join(".claude/history.jsonl"),
-            "/sessionId",
-            &session.id,
-        ),
-        AgentKind::GeminiCli
-        | AgentKind::OpenCode
-        | AgentKind::Pi
-        | AgentKind::OhMyPi
-        | AgentKind::Cursor
-        | AgentKind::Custom(_) => Ok(0),
-    }
-}
-
 fn remove_jsonl_records(path: &Path, pointer: &str, expected: &str) -> Result<usize> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -1013,118 +571,6 @@ fn remove_jsonl_records(path: &Path, pointer: &str, expected: &str) -> Result<us
             .with_context(|| format!("failed to update session index {}", path.display()))?;
     }
     Ok(removed)
-}
-
-fn delete_codex_database_rows(home: &Path, session_id: &str) -> Result<usize> {
-    let codex_root = home.join(".codex");
-    if !codex_root.exists() {
-        return Ok(0);
-    }
-    let mut removed = 0_usize;
-    for entry in fs::read_dir(&codex_root)
-        .with_context(|| format!("failed to inspect Codex state in {}", codex_root.display()))?
-    {
-        let database = entry
-            .with_context(|| format!("failed to inspect Codex state in {}", codex_root.display()))?
-            .path();
-        let Some(name) = database.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".sqlite")
-            || !["state_", "goals_", "logs_", "memories_"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-        {
-            continue;
-        }
-        let mut connection = Connection::open_with_flags(
-            &database,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("failed to open Codex state database {}", database.display()))?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(2))
-            .with_context(|| {
-                format!(
-                    "failed to configure Codex state database {}",
-                    database.display()
-                )
-            })?;
-        let transaction = connection.transaction().with_context(|| {
-            format!(
-                "failed to update Codex state database {}",
-                database.display()
-            )
-        })?;
-        for (table, statement) in codex_delete_statements(name) {
-            if sqlite_table_exists(&transaction, table)? {
-                removed += transaction
-                    .execute(statement, params![session_id])
-                    .with_context(|| {
-                        format!(
-                            "failed to delete session metadata from {table} in {}",
-                            database.display()
-                        )
-                    })?;
-            }
-        }
-        transaction.commit().with_context(|| {
-            format!(
-                "failed to commit Codex state cleanup in {}",
-                database.display()
-            )
-        })?;
-    }
-    Ok(removed)
-}
-
-fn codex_delete_statements(database_name: &str) -> &'static [(&'static str, &'static str)] {
-    if database_name.starts_with("state_") {
-        &[
-            (
-                "thread_dynamic_tools",
-                "DELETE FROM thread_dynamic_tools WHERE thread_id = ?1",
-            ),
-            (
-                "thread_spawn_edges",
-                "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ?1 OR child_thread_id = ?1",
-            ),
-            ("threads", "DELETE FROM threads WHERE id = ?1"),
-        ]
-    } else if database_name.starts_with("goals_") {
-        &[
-            (
-                "thread_goal_continuation_deferrals",
-                "DELETE FROM thread_goal_continuation_deferrals WHERE thread_id = ?1",
-            ),
-            (
-                "thread_goals",
-                "DELETE FROM thread_goals WHERE thread_id = ?1",
-            ),
-        ]
-    } else if database_name.starts_with("logs_") {
-        &[("logs", "DELETE FROM logs WHERE thread_id = ?1")]
-    } else if database_name.starts_with("memories_") {
-        &[
-            (
-                "stage1_outputs",
-                "DELETE FROM stage1_outputs WHERE thread_id = ?1",
-            ),
-            ("jobs", "DELETE FROM jobs WHERE job_key = ?1"),
-        ]
-    } else {
-        &[]
-    }
-}
-
-fn sqlite_table_exists(transaction: &rusqlite::Transaction<'_>, table: &str) -> Result<bool> {
-    transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-            params![table],
-            |row| row.get(0),
-        )
-        .context("failed to inspect a Codex state database schema")
 }
 
 fn content_preview(value: &Value) -> Option<String> {

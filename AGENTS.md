@@ -49,6 +49,9 @@ main.rs
       ├── controller.rs
       │   ├── process.rs
       │   ├── session.rs
+      │   │   └── session/adapter.rs
+      │   │       ├── detail.rs
+      │   │       └── storage.rs
       │   ├── tui.rs
       │   └── view.rs
       ├── settings.rs
@@ -58,8 +61,13 @@ main.rs
 
 - `process.rs` recognizes built-in and configured custom processes, samples
   resources, and revalidates process identity immediately before signaling.
-- `session.rs` scans provider-owned native stores, resolves selectors, parses
-  persisted usage, bounds log reads, and performs provider-aware deletion.
+- `session.rs` owns the provider-neutral session model, catalog, selectors,
+  bounded I/O, and provider-independent deletion safeguards.
+- `session/adapter.rs` is the single seam for built-in session providers. It
+  uses closed-enum static dispatch so discovery, usage, detail, resume, and
+  deletion capabilities remain exhaustive without a vtable or runtime
+  registry. `adapter/storage.rs` owns native layouts and index cleanup;
+  `adapter/detail.rs` normalizes provider records into the shared model.
 - `controller.rs` associates live processes with sessions, emits stable JSON or
   text output, redacts command secrets, and resumes through native argv.
 - `tui.rs` owns the responsive top view, session picker/manager, search,
@@ -100,8 +108,14 @@ this section. Normal command execution reads mena configuration only.
 
 ## Change guidelines
 
-- Add provider session support in `session.rs` with fixtures covering discovery,
-  usage, ambiguity, deletion, and root containment.
+- Add provider session support through `session/adapter.rs`; keep all provider
+  selection inside that module, native layouts in `adapter/storage.rs`, and
+  transcript normalization in `adapter/detail.rs`. Extend interface-level
+  fixtures for discovery, usage, full detail, ambiguity, deletion, and root
+  containment.
+- Prefer the closed-enum adapter while built-in providers are compiled into
+  mena. Do not introduce `dyn Trait`, runtime registration, or heap allocation
+  merely to add another built-in provider.
 - Add process recognition in `process.rs`; keep desktop helper processes from
   matching command-line agents.
 - Preserve stable selectors (`provider:PID`, `provider:session-id`) and JSON

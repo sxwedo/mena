@@ -11,7 +11,10 @@ use serde_json::Value;
 use crate::process::{
     AgentKind, LiveAgent, discover_live_agents, discover_live_agents_with_cpu, stop_agent,
 };
-use crate::session::{AgentSession, SessionCatalog, UsageCache, tail_records};
+use crate::session::{
+    AgentSession, NativeResumeCommand, SessionCatalog, UsageCache, native_resume_command,
+    tail_records,
+};
 use crate::settings::{CustomAgentSettings, Settings};
 use crate::tui;
 use crate::ui;
@@ -284,12 +287,12 @@ fn resume_target(target: &str, settings: &Settings) -> Result<()> {
             session.project.clone(),
         )
     };
-    let spec = resume_spec(&kind, &id)?;
+    let spec = native_resume_command(&kind, &id)?;
     execute_resume(&spec, &kind, &id, project)
 }
 
 fn execute_resume(
-    spec: &ResumeSpec,
+    spec: &NativeResumeCommand,
     kind: &AgentKind,
     id: &str,
     project: Option<std::path::PathBuf>,
@@ -324,37 +327,16 @@ fn execute_resume(
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ResumeSpec {
-    program: String,
-    args: Vec<String>,
-}
-
-fn resume_spec(kind: &AgentKind, id: &str) -> Result<ResumeSpec> {
-    let (program, args): (&str, Vec<String>) = match kind {
-        AgentKind::ClaudeCode => ("claude", vec!["--resume".to_owned(), id.to_owned()]),
-        AgentKind::Codex => ("codex", vec!["resume".to_owned(), id.to_owned()]),
-        AgentKind::GeminiCli => ("gemini", vec!["--resume".to_owned(), id.to_owned()]),
-        AgentKind::OpenCode => ("opencode", vec!["--session".to_owned(), id.to_owned()]),
-        AgentKind::Pi => ("pi", vec!["--session".to_owned(), id.to_owned()]),
-        AgentKind::OhMyPi => ("omp", vec!["--resume".to_owned(), id.to_owned()]),
-        AgentKind::Cursor => ("cursor-agent", vec!["--resume".to_owned(), id.to_owned()]),
-        AgentKind::Custom(name) => {
-            bail!("custom agent {name} does not define a resume command")
-        }
-    };
-    Ok(ResumeSpec {
-        program: program.to_owned(),
-        args,
-    })
-}
-
-fn custom_resume_spec(name: &str, settings: &CustomAgentSettings, id: &str) -> Result<ResumeSpec> {
+fn custom_resume_spec(
+    name: &str,
+    settings: &CustomAgentSettings,
+    id: &str,
+) -> Result<NativeResumeCommand> {
     let (program, args) = settings
         .resume
         .split_first()
         .with_context(|| format!("custom agent `{name}` does not define a resume argv"))?;
-    Ok(ResumeSpec {
+    Ok(NativeResumeCommand {
         program: program.replace("{session}", id),
         args: args
             .iter()
@@ -667,7 +649,7 @@ fn format_unix_timestamp(timestamp: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentKind, ResumeSpec, redacted_command, resume_spec, summarize_record};
+    use super::{redacted_command, summarize_record};
 
     #[test]
     fn command_display_redacts_secret_argument_values() {
@@ -690,66 +672,5 @@ mod tests {
         );
         assert_eq!(summary, "now  message/assistant  done now");
         assert!(!summary.contains("private"));
-    }
-
-    #[test]
-    fn resume_commands_use_native_argv_without_a_shell() {
-        let cases = [
-            (
-                AgentKind::ClaudeCode,
-                ResumeSpec {
-                    program: "claude".to_owned(),
-                    args: vec!["--resume".to_owned(), "session-id".to_owned()],
-                },
-            ),
-            (
-                AgentKind::Codex,
-                ResumeSpec {
-                    program: "codex".to_owned(),
-                    args: vec!["resume".to_owned(), "session-id".to_owned()],
-                },
-            ),
-            (
-                AgentKind::GeminiCli,
-                ResumeSpec {
-                    program: "gemini".to_owned(),
-                    args: vec!["--resume".to_owned(), "session-id".to_owned()],
-                },
-            ),
-            (
-                AgentKind::OpenCode,
-                ResumeSpec {
-                    program: "opencode".to_owned(),
-                    args: vec!["--session".to_owned(), "session-id".to_owned()],
-                },
-            ),
-            (
-                AgentKind::Pi,
-                ResumeSpec {
-                    program: "pi".to_owned(),
-                    args: vec!["--session".to_owned(), "session-id".to_owned()],
-                },
-            ),
-            (
-                AgentKind::OhMyPi,
-                ResumeSpec {
-                    program: "omp".to_owned(),
-                    args: vec!["--resume".to_owned(), "session-id".to_owned()],
-                },
-            ),
-            (
-                AgentKind::Cursor,
-                ResumeSpec {
-                    program: "cursor-agent".to_owned(),
-                    args: vec!["--resume".to_owned(), "session-id".to_owned()],
-                },
-            ),
-        ];
-        for (kind, expected) in cases {
-            assert_eq!(
-                resume_spec(&kind, "session-id").expect("resume spec"),
-                expected
-            );
-        }
     }
 }

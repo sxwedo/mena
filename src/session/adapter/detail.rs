@@ -1,58 +1,25 @@
+//! Native transcript decoders that normalize provider records into session messages.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use super::{
-    AgentSession, MAX_RECORD_BYTES, MetricError, ResponseMetrics, SessionDetail, SessionMessage,
-    SessionMessageKind, SessionMessageMetrics, TokenUsage, ToolMetrics, content_text_full,
-    file_stem, files_with_extension, read_json_file, string_at, visit_bounded_lines,
+use super::super::{
+    MAX_RECORD_BYTES, MetricError, ResponseMetrics, SessionMessage, SessionMessageKind,
+    SessionMessageMetrics, TokenUsage, ToolMetrics, content_text_full, file_stem,
+    files_with_extension, read_json_file, string_at, visit_bounded_lines,
 };
 use crate::AgentKind;
 
-type Usage = (Option<u64>, Option<f64>);
+pub(super) type Usage = (Option<u64>, Option<f64>);
 
 #[derive(Default)]
-struct LoadedSession {
-    tokens: Option<u64>,
-    cost_usd: Option<f64>,
-    messages: Vec<SessionMessage>,
-}
-
-pub(super) fn usage(home: &Path, session: &AgentSession) -> Result<Usage> {
-    match session.kind {
-        AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::Pi | AgentKind::OhMyPi => {
-            jsonl_usage(&session.path, &session.kind)
-        }
-        AgentKind::GeminiCli => {
-            let usage = read_json_file(&session.path)?
-                .as_ref()
-                .map_or((None, None), gemini_usage);
-            Ok(usage)
-        }
-        AgentKind::OpenCode => opencode_usage(home, &session.id),
-        AgentKind::Cursor | AgentKind::Custom(_) => Ok((None, None)),
-    }
-}
-
-pub(super) fn load(home: &Path, selected: &AgentSession) -> Result<SessionDetail> {
-    let loaded = match selected.kind {
-        AgentKind::Codex => codex_detail(&selected.path)?,
-        AgentKind::ClaudeCode | AgentKind::Pi | AgentKind::OhMyPi => {
-            nested_jsonl_detail(&selected.path, &selected.kind)?
-        }
-        AgentKind::GeminiCli => gemini_detail(&selected.path)?,
-        AgentKind::OpenCode => opencode_detail(home, &selected.id)?,
-        AgentKind::Cursor | AgentKind::Custom(_) => LoadedSession::default(),
-    };
-    let mut session = selected.clone();
-    session.tokens = loaded.tokens;
-    session.cost_usd = loaded.cost_usd;
-    Ok(SessionDetail {
-        session,
-        messages: loaded.messages,
-    })
+pub(super) struct LoadedSession {
+    pub(super) tokens: Option<u64>,
+    pub(super) cost_usd: Option<f64>,
+    pub(super) messages: Vec<SessionMessage>,
 }
 
 enum JsonlUsage {
@@ -188,7 +155,7 @@ impl NumericUsage {
     }
 }
 
-fn jsonl_usage(path: &Path, kind: &AgentKind) -> Result<Usage> {
+pub(super) fn jsonl_usage(path: &Path, kind: &AgentKind) -> Result<Usage> {
     let mut usage = JsonlUsage::new(kind);
     let skipped = visit_bounded_lines(path, |line| {
         if let Ok(record) = serde_json::from_slice::<Value>(line) {
@@ -198,7 +165,7 @@ fn jsonl_usage(path: &Path, kind: &AgentKind) -> Result<Usage> {
     Ok(usage.finish(!skipped))
 }
 
-fn codex_detail(path: &Path) -> Result<LoadedSession> {
+pub(super) fn codex_detail(path: &Path) -> Result<LoadedSession> {
     let mut usage = JsonlUsage::new(&AgentKind::Codex);
     let mut messages: Vec<SessionMessage> = Vec::new();
     let mut current_model = None;
@@ -417,7 +384,7 @@ fn codex_event_message(
         .unwrap_or_default()
 }
 
-fn nested_jsonl_detail(path: &Path, kind: &AgentKind) -> Result<LoadedSession> {
+pub(super) fn nested_jsonl_detail(path: &Path, kind: &AgentKind) -> Result<LoadedSession> {
     let mut usage = JsonlUsage::new(kind);
     let mut messages: Vec<SessionMessage> = Vec::new();
     let mut metric_targets = BTreeMap::new();
@@ -605,7 +572,7 @@ fn correlate_nested_tools(
     }
 }
 
-fn gemini_detail(path: &Path) -> Result<LoadedSession> {
+pub(super) fn gemini_detail(path: &Path) -> Result<LoadedSession> {
     let Some(session) = read_json_file(path)? else {
         return Ok(LoadedSession::default());
     };
@@ -617,7 +584,7 @@ fn gemini_detail(path: &Path) -> Result<LoadedSession> {
     })
 }
 
-fn gemini_usage(session: &Value) -> Usage {
+pub(super) fn gemini_usage(session: &Value) -> Usage {
     let tokens = session
         .get("messages")
         .and_then(Value::as_array)
@@ -729,7 +696,7 @@ fn gemini_messages(session: &Value) -> Vec<SessionMessage> {
     messages
 }
 
-fn opencode_usage(home: &Path, session_id: &str) -> Result<Usage> {
+pub(super) fn opencode_usage(home: &Path, session_id: &str) -> Result<Usage> {
     let mut usage = NumericUsage::default();
     visit_opencode_messages(home, session_id, |_, message| {
         usage.ingest_opencode(message);
@@ -738,7 +705,7 @@ fn opencode_usage(home: &Path, session_id: &str) -> Result<Usage> {
     Ok(usage.finish())
 }
 
-fn opencode_detail(home: &Path, session_id: &str) -> Result<LoadedSession> {
+pub(super) fn opencode_detail(home: &Path, session_id: &str) -> Result<LoadedSession> {
     let storage = home.join(".local/share/opencode/storage");
     let mut usage = NumericUsage::default();
     let mut messages = Vec::new();
