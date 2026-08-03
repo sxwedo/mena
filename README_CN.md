@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/data-local--first-10b981.svg" alt="本地优先">
 </p>
 
-<p align="center"><strong>面向开发者 Agent 及其 Session 的本地控制中心。</strong></p>
+<p align="center"><strong>智能协作，有迹可循；未完之章，从容再续。</strong></p>
 
 <p align="center">
   <a href="README.md">English</a> | 简体中文

@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/data-local--first-10b981.svg" alt="Local first">
 </p>
 
-<p align="center"><strong>A local control plane for developer agents and their sessions.</strong></p>
+<p align="center"><strong>Every journey remembered. Every story carried forward.</strong></p>
 
 <p align="center">
   English | <a href="README_CN.md">简体中文</a>
