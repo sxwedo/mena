@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,8 +16,9 @@ use ratatui::{DefaultTerminal, Frame};
 use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessageKind};
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::view::{
-    AgentReport, format_bytes, format_count, format_duration, format_duration_millis,
-    format_token_breakdown,
+    AgentReport, TOOL_TOKEN_ACCOUNTING_NOTE, format_bytes, format_duration, format_metric_error,
+    format_model_usage_summary, format_response_header_metrics, format_response_summary,
+    format_token_breakdown, format_tool_summary,
 };
 
 const ACCENT: Color = Color::Cyan;
@@ -1297,8 +1297,42 @@ fn session_detail_content(
     detail: &SessionDetail,
     theme: SessionDetailTheme,
 ) -> SessionDetailContent {
+    let mut lines = session_metadata_lines(detail, theme);
+    lines.extend(model_usage_lines(detail, theme));
+    lines.extend([
+        Line::from(Span::styled(
+            format!("Conversation ({} messages)", detail.messages.len()),
+            Style::default()
+                .fg(theme.conversation_header)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ]);
+    let mut primary_line_indices = Vec::new();
+    for message in &detail.messages {
+        if matches!(
+            message.kind,
+            SessionMessageKind::User | SessionMessageKind::Assistant
+        ) {
+            primary_line_indices.push(lines.len());
+        }
+        lines.extend(session_message_lines(message, theme));
+    }
+    if detail.messages.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No persisted chat messages were found for this session.",
+            Style::default().fg(theme.empty_text),
+        )));
+    }
+    SessionDetailContent {
+        lines,
+        primary_line_indices,
+    }
+}
+
+fn session_metadata_lines(detail: &SessionDetail, theme: SessionDetailTheme) -> Vec<Line<'static>> {
     let session = &detail.session;
-    let mut lines = vec![
+    vec![
         session_detail_line("Target", session.target(), theme),
         session_detail_line("Agent", session.kind.to_string(), theme),
         session_detail_line(
@@ -1331,61 +1365,109 @@ fn session_detail_content(
         session_detail_line("Cost", format_cost(session.cost_usd), theme),
         session_detail_line("Log file", session.path.display().to_string(), theme),
         Line::from(""),
-        Line::from(Span::styled(
-            format!("Conversation ({} messages)", detail.messages.len()),
-            Style::default()
-                .fg(theme.conversation_header)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
-    let mut primary_line_indices = Vec::new();
-    for message in &detail.messages {
-        if matches!(
-            message.kind,
-            SessionMessageKind::User | SessionMessageKind::Assistant
-        ) {
-            primary_line_indices.push(lines.len());
-        }
-        let timestamp = message.timestamp.as_deref().unwrap_or("-");
+    ]
+}
+
+fn model_usage_lines(detail: &SessionDetail, theme: SessionDetailTheme) -> Vec<Line<'static>> {
+    let model_usage = detail.model_usage();
+    if model_usage.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Model usage ({} models)", model_usage.len()),
+        Style::default()
+            .fg(theme.conversation_header)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for summary in &model_usage {
         lines.push(Line::from(Span::styled(
-            message_header(message, timestamp),
-            message_kind_style(message.kind, theme),
+            format_model_usage_summary(summary),
+            Style::default().fg(theme.metadata_value),
         )));
-        if message.kind == SessionMessageKind::Assistant
-            && let Some(tokens) = format_token_breakdown(message.metrics.tokens)
-        {
+        if let Some(tokens) = format_token_breakdown(summary.tokens) {
+            lines.push(Line::from(Span::styled(
+                format!("Tokens: {tokens}"),
+                Style::default().fg(theme.metadata_value),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines
+}
+
+fn session_message_lines(
+    message: &crate::session::SessionMessage,
+    theme: SessionDetailTheme,
+) -> Vec<Line<'static>> {
+    let timestamp = message.timestamp.as_deref().unwrap_or("-");
+    let mut lines = vec![Line::from(Span::styled(
+        message_header(message, timestamp),
+        message_kind_style(message.kind, theme),
+    ))];
+    if let Some(response) = message.metrics.response.as_ref() {
+        if let Some(tokens) = format_token_breakdown(response.tokens) {
             lines.push(Line::from(Span::styled(
                 format!("Tokens: {tokens}"),
                 message_body_style(message.kind, theme),
             )));
         }
-        lines.extend(
-            message
-                .content
-                .split('\n')
-                .map(|line| line.strip_suffix('\r').unwrap_or(line))
-                .map(|line| Line::styled(line.to_owned(), message_body_style(message.kind, theme))),
-        );
-        lines.push(Line::from(""));
+        if let Some(summary) = format_response_summary(response) {
+            lines.push(Line::from(Span::styled(
+                format!("Response: {summary}"),
+                message_body_style(message.kind, theme),
+            )));
+        }
+        if let Some(error) = response.error.as_ref() {
+            lines.push(Line::from(Span::styled(
+                format!("Error: {}", format_metric_error(error)),
+                message_body_style(SessionMessageKind::Error, theme),
+            )));
+        }
     }
-    if detail.messages.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No persisted chat messages were found for this session.",
-            Style::default().fg(theme.empty_text),
-        )));
+    if matches!(
+        message.kind,
+        SessionMessageKind::Skill | SessionMessageKind::ToolCall
+    ) {
+        append_tool_lines(&mut lines, message, theme);
     }
-    SessionDetailContent {
-        lines,
-        primary_line_indices,
+    lines.extend(
+        message
+            .content
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .map(|line| Line::styled(line.to_owned(), message_body_style(message.kind, theme))),
+    );
+    lines.push(Line::from(""));
+    lines
+}
+
+fn append_tool_lines(
+    lines: &mut Vec<Line<'static>>,
+    message: &crate::session::SessionMessage,
+    theme: SessionDetailTheme,
+) {
+    if let Some(tool) = message.metrics.tool.as_ref() {
+        if let Some(summary) = format_tool_summary(tool) {
+            lines.push(Line::from(Span::styled(
+                format!("Tool: {summary}"),
+                message_body_style(message.kind, theme),
+            )));
+        }
+        if let Some(error) = tool.error.as_ref() {
+            lines.push(Line::from(Span::styled(
+                format!("Error: {}", format_metric_error(error)),
+                message_body_style(SessionMessageKind::Error, theme),
+            )));
+        }
     }
+    lines.push(Line::from(Span::styled(
+        TOOL_TOKEN_ACCOUNTING_NOTE,
+        message_body_style(message.kind, theme),
+    )));
 }
 
 fn message_header(message: &crate::session::SessionMessage, timestamp: &str) -> String {
     let mut header = format!("[{timestamp}] {}", message.kind.label());
-    if message.kind != SessionMessageKind::Assistant {
-        return header;
-    }
     if let Some(model) = message
         .model
         .as_deref()
@@ -1395,13 +1477,20 @@ fn message_header(message: &crate::session::SessionMessage, timestamp: &str) -> 
         header.push_str(" · ");
         header.push_str(model);
     }
-    if let Some(duration_ms) = message.metrics.duration_ms {
-        header.push_str(" · ");
-        header.push_str(&format_duration_millis(duration_ms));
+    if let Some(response) = message.metrics.response.as_ref() {
+        for metric in format_response_header_metrics(response) {
+            header.push_str(" · ");
+            header.push_str(&metric);
+        }
     }
-    if let Some(tokens) = message.metrics.tokens.total {
+    if matches!(
+        message.kind,
+        SessionMessageKind::Skill | SessionMessageKind::ToolCall
+    ) && let Some(tool) = message.metrics.tool.as_ref()
+        && let Some(summary) = format_tool_summary(tool)
+    {
         header.push_str(" · ");
-        let _ = write!(header, "{} tokens", format_count(tokens));
+        header.push_str(&summary);
     }
     header
 }
@@ -1806,8 +1895,8 @@ mod tests {
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
-        AgentSession, DeletionSummary, SessionDetail, SessionMessage, SessionMessageKind,
-        SessionMessageMetrics, TokenUsage,
+        AgentSession, DeletionSummary, ResponseMetrics, SessionDetail, SessionMessage,
+        SessionMessageKind, SessionMessageMetrics, TokenUsage,
     };
     use crate::settings::{ConfigColor, SessionDetailColorSettings};
     use crate::view::AgentReport;
@@ -1988,27 +2077,38 @@ mod tests {
                     timestamp: Some("2026-08-01T01:02:06Z".to_owned()),
                     model: Some("gpt-5.6".to_owned()),
                     metrics: SessionMessageMetrics {
-                        duration_ms: Some(125_450),
-                        tokens: TokenUsage {
-                            total: Some(123_456),
-                            input: Some(100_000),
-                            output: Some(23_456),
-                            cache_read: Some(80_000),
-                            cache_write: Some(500),
-                            reasoning: Some(456),
-                        },
+                        response: Some(ResponseMetrics {
+                            duration_ms: Some(125_450),
+                            time_to_first_token_ms: Some(400),
+                            cost_usd: Some(0.42),
+                            finish_reason: Some("stop".to_owned()),
+                            retry_count: Some(2),
+                            tokens: TokenUsage {
+                                total: Some(123_456),
+                                input: Some(100_000),
+                                output: Some(23_456),
+                                cache_read: Some(80_000),
+                                cache_write: Some(500),
+                                cache_write_5m: Some(400),
+                                cache_write_1h: Some(100),
+                                reasoning: Some(456),
+                                tool: Some(100),
+                            },
+                            ..ResponseMetrics::default()
+                        }),
+                        ..SessionMessageMetrics::default()
                     },
                     content: "complete second answer".to_owned(),
                 },
             ],
         });
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        let mut terminal = Terminal::new(TestBackend::new(100, 50)).expect("test terminal");
 
         terminal
             .draw(|frame| draw_sessions(frame, &mut app))
             .expect("draw details");
 
-        let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+        let screen = buffer_text(terminal.backend().buffer(), 100, 50);
         for expected in [
             "Session details",
             "Started",
@@ -2018,9 +2118,12 @@ mod tests {
             "Cost",
             "$1.2500",
             "Conversation (3 messages)",
+            "Model usage (1 models)",
+            "gpt-5.6 · 1 responses · duration 2m 05.5s · avg TTFT 400ms",
             "ASSISTANT · gpt-5.5",
-            "ASSISTANT · gpt-5.6 · 2m 05.5s · 123,456 tokens",
-            "input 100,000 · output 23,456 · cache read 80,000 · cache write 500 · reasoning 456",
+            "ASSISTANT · gpt-5.6 · 2m 05.5s · 123,456 tokens · $0.4200",
+            "input 100,000 · output 23,456 · cache read 80,000 · cache write 500 (5m 400 · 1h 100)",
+            "Response: status completed · stop reason stop · TTFT 400ms · retries 2",
             "complete first question",
             "complete first answer",
             "complete second answer",

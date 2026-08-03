@@ -3,7 +3,9 @@ use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 use crate::process::LiveAgent;
-use crate::session::{AgentSession, TokenUsage};
+use crate::session::{
+    AgentSession, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage, ToolMetrics,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReport {
@@ -270,14 +272,132 @@ pub fn format_token_breakdown(usage: TokenUsage) -> Option<String> {
         ("input", usage.input),
         ("output", usage.output),
         ("cache read", usage.cache_read),
-        ("cache write", usage.cache_write),
-        ("reasoning", usage.reasoning),
     ] {
         if let Some(value) = value {
             parts.push(format!("{label} {}", format_count(value)));
         }
     }
+    if let Some(cache_write) = usage.cache_write {
+        let mut detail = Vec::new();
+        for (label, value) in [("5m", usage.cache_write_5m), ("1h", usage.cache_write_1h)] {
+            if let Some(value) = value {
+                detail.push(format!("{label} {}", format_count(value)));
+            }
+        }
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", detail.join(" · "))
+        };
+        parts.push(format!("cache write {}{detail}", format_count(cache_write)));
+    }
+    for (label, value) in [("reasoning", usage.reasoning), ("tool", usage.tool)] {
+        if let Some(value) = value {
+            parts.push(format!("{label} {}", format_count(value)));
+        }
+    }
     (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+pub fn format_response_header_metrics(response: &ResponseMetrics) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(duration_ms) = response.duration_ms {
+        parts.push(format_duration_millis(duration_ms));
+    }
+    if let Some(tokens) = response.tokens.total {
+        parts.push(format!("{} tokens", format_count(tokens)));
+    }
+    if let Some(cost) = response.cost_usd {
+        parts.push(format!("${cost:.4}"));
+    }
+    parts
+}
+
+pub fn format_response_summary(response: &ResponseMetrics) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(status) = response_status(response) {
+        parts.push(format!("status {status}"));
+    }
+    if let Some(reason) = response.finish_reason.as_deref() {
+        parts.push(format!("stop reason {reason}"));
+    }
+    if let Some(ttft) = response.time_to_first_token_ms {
+        parts.push(format!("TTFT {}", format_duration_millis(ttft)));
+    }
+    if let Some(retries) = response.retry_count {
+        parts.push(format!("retries {}", format_count(retries)));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+pub fn format_tool_summary(tool: &ToolMetrics) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(status) = tool.status.as_deref() {
+        parts.push(status.to_owned());
+    }
+    if let Some(duration_ms) = tool.duration_ms {
+        parts.push(format_duration_millis(duration_ms));
+    }
+    if let Some(exit_code) = tool.exit_code {
+        parts.push(format!("exit {exit_code}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+pub fn format_metric_error(error: &MetricError) -> String {
+    error.code.as_deref().map_or_else(
+        || error.message.clone(),
+        |code| format!("{code} · {}", error.message),
+    )
+}
+
+pub fn format_model_usage_summary(summary: &ModelUsageSummary) -> String {
+    let mut parts = vec![
+        summary.model.clone(),
+        format!("{} responses", format_count(summary.responses)),
+    ];
+    if let Some(duration_ms) = summary.duration_ms {
+        parts.push(format!("duration {}", format_duration_millis(duration_ms)));
+    }
+    if let Some(ttft) = summary.average_time_to_first_token_ms {
+        parts.push(format!("avg TTFT {}", format_duration_millis(ttft)));
+    }
+    if let Some(tokens) = summary.tokens.total {
+        parts.push(format!("{} tokens", format_count(tokens)));
+    }
+    if let Some(cost) = summary.cost_usd {
+        parts.push(format!("${cost:.4}"));
+    }
+    if let Some(retries) = summary.retry_count {
+        parts.push(format!("{} retries", format_count(retries)));
+    }
+    if summary.errors > 0 {
+        parts.push(format!("{} errors", format_count(summary.errors)));
+    }
+    parts.join(" · ")
+}
+
+pub const TOOL_TOKEN_ACCOUNTING_NOTE: &str =
+    "Token accounting: provider response totals only; no per-call token value is persisted.";
+
+fn response_status(response: &ResponseMetrics) -> Option<&'static str> {
+    if response.error.is_some() {
+        return Some("error");
+    }
+    let reason = response.finish_reason.as_deref()?.to_ascii_lowercase();
+    match reason.as_str() {
+        "task_complete" | "complete" | "completed" | "stop" | "end_turn" | "success" => {
+            Some("completed")
+        }
+        "tool_use" | "tool_calls" | "tool-calls" | "function_call" => Some("tool use"),
+        "max_tokens" | "length" | "length_limit" => Some("length limit"),
+        "turn_aborted" | "aborted" | "interrupt" | "interrupted" | "user_interrupt" => {
+            Some("interrupted")
+        }
+        "error" | "failed" | "failure" => Some("error"),
+        "cancelled" | "canceled" => Some("cancelled"),
+        _ => None,
+    }
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -303,8 +423,11 @@ fn format_scaled(bytes: u64, unit: u64, suffix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_count, format_duration_millis, format_token_breakdown};
-    use crate::session::TokenUsage;
+    use super::{
+        format_count, format_duration_millis, format_metric_error, format_response_header_metrics,
+        format_response_summary, format_token_breakdown, format_tool_summary,
+    };
+    use crate::session::{MetricError, ResponseMetrics, TokenUsage, ToolMetrics};
 
     #[test]
     fn formats_exact_counts_and_subsecond_response_durations() {
@@ -324,7 +447,10 @@ mod tests {
                 output: Some(30),
                 cache_read: Some(0),
                 cache_write: None,
+                cache_write_5m: None,
+                cache_write_1h: None,
                 reasoning: None,
+                tool: None,
             })
             .as_deref(),
             Some("input 70 · output 30 · cache read 0")
@@ -336,5 +462,49 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn formats_response_and_tool_metrics_without_inventing_missing_values() {
+        let error = MetricError {
+            code: Some("rate_limit".to_owned()),
+            message: "retry budget exhausted".to_owned(),
+        };
+        let response = ResponseMetrics {
+            duration_ms: Some(12_345),
+            time_to_first_token_ms: Some(450),
+            cost_usd: Some(0.125),
+            finish_reason: Some("error".to_owned()),
+            retry_count: Some(2),
+            error: Some(error.clone()),
+            tokens: TokenUsage {
+                total: Some(67_890),
+                ..TokenUsage::default()
+            },
+        };
+
+        assert_eq!(
+            format_response_header_metrics(&response),
+            ["12.3s", "67,890 tokens", "$0.1250"]
+        );
+        assert_eq!(
+            format_response_summary(&response).as_deref(),
+            Some("status error · stop reason error · TTFT 450ms · retries 2")
+        );
+        assert_eq!(
+            format_metric_error(&error),
+            "rate_limit · retry budget exhausted"
+        );
+        assert_eq!(
+            format_tool_summary(&ToolMetrics {
+                status: Some("completed".to_owned()),
+                duration_ms: Some(140),
+                exit_code: Some(0),
+                error: None,
+            })
+            .as_deref(),
+            Some("completed · 140ms · exit 0")
+        );
+        assert_eq!(format_tool_summary(&ToolMetrics::default()), None);
     }
 }

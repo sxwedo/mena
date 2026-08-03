@@ -185,32 +185,49 @@ rainbow:
 Every header and content color can be overridden independently. See
 [Configuration](#configuration).
 
-### Models, duration, and tokens
+### Response, model, and token metrics
 
-When the provider persists a model ID, it appears on that assistant message.
-Persisted duration and request tokens follow it:
+When the provider persists a model ID, it appears on the response that produced
+the assistant text or tool call. Exact duration, total tokens, and cost follow
+it when present:
 
 ~~~text
-[2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens
-Tokens: input 50,000 · output 10,000 · cache read 7,000 · cache write 500 · reasoning 390
+[2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens · $0.1250
+Tokens: input 50,000 · output 10,000 · cache read 7,000 · cache write 500 (5m 400 · 1h 100) · reasoning 390 · tool 1,000
+Response: status completed · stop reason stop · TTFT 450ms · retries 1
 ~~~
 
-The second line shows the exact input, output, cache-read, cache-write, and
-reasoning fields available in that provider's native record. Missing fields are
-omitted rather than guessed. A provider may count cached input inside input, so
-mena preserves the provider's total instead of recomputing it when an explicit
-total exists. Codex supplies completed-turn duration and last-request usage;
-OpenCode and Pi-family records commonly persist both metrics; Claude Code and
-Gemini display whichever native fields exist. Session totals and cost also come
-only from provider-owned records—mena never estimates price from a public model
-table.
+The token line shows only fields in the provider's native record. This includes
+Claude's 5-minute and 1-hour cache-creation split and Gemini's request-level
+tool token count when available. Missing fields are omitted rather than guessed.
+A provider may count cached input inside input, so mena preserves an explicit
+provider total instead of recomputing it.
+
+The response line normalizes a readable status from the persisted stop reason
+and may include TTFT, retry count, and native error code/message. Cost is shown
+per response only when that exact value is persisted; mena never estimates it
+from a public price table. A model-usage section above the conversation sums the
+available response count, duration, average TTFT, tokens, cost, retries, and
+errors for each model. Missing samples do not become zeros.
+
+Tool calls show their persisted status, duration, exit code, and error details:
+
+~~~text
+[2026-07-30T13:42:05.100Z] TOOL CALL · completed · 140ms · exit 0
+Token accounting: provider response totals only; no per-call token value is persisted.
+~~~
+
+Provider stores currently do not expose a trustworthy token count for each
+individual tool execution. mena therefore keeps Gemini's exact tool-token value
+on the model response and never divides or attributes it across tool calls.
 
 ### Markdown export
 
 Press <code>e</code> in detail view. The export contains complete metadata,
-ordered messages, model IDs, exact per-response metrics, and structured tool
-content. Assistant token breakdowns use the same available-field rules as the
-detail popup.
+ordered messages, a per-model summary, model IDs, exact response and tool
+metrics, and structured tool content. Token breakdowns use the same
+available-field rules as the detail popup, so copying with <code>c</code> and
+exporting with <code>e</code> produce equivalent metric content.
 
 - Destination: the directory where mena was started.
 - Name:
@@ -240,6 +257,20 @@ path or an actionable error without moving the selection or scroll position.
 Cursor Agent and custom recognizers have no generic supported local session
 catalog. Archived-session operations return an explicit unsupported error
 instead of guessing a storage path.
+
+Persisted detail fields vary by Provider:
+
+| Provider | Exact response detail | Exact tool detail |
+|---|---|---|
+| Claude Code | Input/output, cache read/write and 5m/1h cache creation, stop reason | Result status/error and elapsed time from persisted timestamps |
+| Codex | Last-request tokens, turn duration, TTFT, completion/interruption | End-event status, duration, and error when present |
+| Gemini CLI | Input/output/cached/thought/tool tokens, duration and stop/error fields when present | Call status and result; no per-call token value |
+| OpenCode | Tokens, cost, duration, TTFT, finish reason, retry/error fields | Status, duration, exit code, and error |
+| Pi | Tokens, cost, stop/error fields when present | Result status/error and persisted elapsed time when available |
+| Oh My Pi | Tokens, cost, duration, TTFT, stop/retry/error fields | Status, duration, exit code, and error when present |
+
+Every cell is availability-based: mena omits a value when that session record
+does not contain it.
 
 ## Command reference
 

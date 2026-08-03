@@ -6,8 +6,12 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::fs::atomic_create_private;
-use crate::session::{SessionDetail, SessionMessageKind};
-use crate::view::{format_count, format_duration_millis, format_token_breakdown};
+use crate::session::{ResponseMetrics, SessionDetail, SessionMessage, SessionMessageKind};
+use crate::view::{
+    TOOL_TOKEN_ACCOUNTING_NOTE, format_metric_error, format_model_usage_summary,
+    format_response_header_metrics, format_response_summary, format_token_breakdown,
+    format_tool_summary,
+};
 
 /// Export a complete session detail document into `directory` as Markdown.
 ///
@@ -56,8 +60,15 @@ fn export_session_detail_at(
 }
 
 fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String {
-    let session = &detail.session;
     let mut markdown = String::from("# Mena Session Export\n\n");
+    render_metadata(&mut markdown, detail, exported_at);
+    render_model_usage(&mut markdown, detail);
+    render_conversation(&mut markdown, detail);
+    markdown
+}
+
+fn render_metadata(markdown: &mut String, detail: &SessionDetail, exported_at: DateTime<Utc>) {
+    let session = &detail.session;
     let target = session.target();
     let updated = format_unix_timestamp(session.updated_at);
     let tokens = session
@@ -92,7 +103,22 @@ fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String
     ] {
         let _ = writeln!(markdown, "- **{label}:** {}", one_line(&value));
     }
+}
 
+fn render_model_usage(markdown: &mut String, detail: &SessionDetail) {
+    let model_usage = detail.model_usage();
+    if !model_usage.is_empty() {
+        markdown.push_str("\n## Model Usage\n\n");
+        for summary in &model_usage {
+            let _ = writeln!(markdown, "- {}", format_model_usage_summary(summary));
+            if let Some(tokens) = format_token_breakdown(summary.tokens) {
+                let _ = writeln!(markdown, "  - Token details: {tokens}");
+            }
+        }
+    }
+}
+
+fn render_conversation(markdown: &mut String, detail: &SessionDetail) {
     let _ = write!(
         markdown,
         "\n## Conversation\n\n{}",
@@ -103,55 +129,103 @@ fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String
         }
     );
     for message in &detail.messages {
-        let timestamp = message.timestamp.as_deref().unwrap_or("-");
-        let mut metrics = String::new();
-        if message.kind == SessionMessageKind::Assistant {
-            if let Some(model) = message
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-            {
-                let _ = write!(metrics, " · {model}");
-            }
-            if let Some(duration_ms) = message.metrics.duration_ms {
-                let _ = write!(metrics, " · {}", format_duration_millis(duration_ms));
-            }
-            if let Some(tokens) = message.metrics.tokens.total {
-                let _ = write!(metrics, " · {} tokens", format_count(tokens));
-            }
+        render_message(markdown, message);
+    }
+}
+
+fn render_message(markdown: &mut String, message: &SessionMessage) {
+    let timestamp = message.timestamp.as_deref().unwrap_or("-");
+    let metrics = message_header_metrics(message);
+    let _ = writeln!(
+        markdown,
+        "### [{timestamp}] {}{metrics}\n",
+        message.kind.label()
+    );
+    if let Some(response) = message.metrics.response.as_ref() {
+        render_response_metrics(markdown, response);
+    }
+    if matches!(
+        message.kind,
+        SessionMessageKind::Skill | SessionMessageKind::ToolCall
+    ) {
+        render_tool_metrics(markdown, message);
+    }
+    render_message_body(markdown, message);
+    markdown.push('\n');
+}
+
+fn message_header_metrics(message: &SessionMessage) -> String {
+    let mut metrics = String::new();
+    if let Some(model) = message
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        let _ = write!(metrics, " · {model}");
+    }
+    if let Some(response) = message.metrics.response.as_ref() {
+        for metric in format_response_header_metrics(response) {
+            let _ = write!(metrics, " · {metric}");
         }
+    }
+    if let Some(tool) = message.metrics.tool.as_ref()
+        && let Some(summary) = format_tool_summary(tool)
+    {
+        let _ = write!(metrics, " · {summary}");
+    }
+    metrics
+}
+
+fn render_response_metrics(markdown: &mut String, response: &ResponseMetrics) {
+    if let Some(tokens) = format_token_breakdown(response.tokens) {
+        let _ = writeln!(markdown, "**Token details:** {tokens}\n");
+    }
+    if let Some(summary) = format_response_summary(response) {
+        let _ = writeln!(markdown, "**Response:** {summary}\n");
+    }
+    if let Some(error) = response.error.as_ref() {
         let _ = writeln!(
             markdown,
-            "### [{timestamp}] {}{metrics}\n",
-            message.kind.label()
+            "**Error:** {}\n",
+            one_line(&format_metric_error(error))
         );
-        if message.kind == SessionMessageKind::Assistant
-            && let Some(tokens) = format_token_breakdown(message.metrics.tokens)
-        {
-            let _ = writeln!(markdown, "**Token details:** {tokens}\n");
-        }
-        if matches!(
-            message.kind,
-            SessionMessageKind::Skill
-                | SessionMessageKind::ToolCall
-                | SessionMessageKind::ToolResult
-        ) {
-            let language = if serde_json::from_str::<serde_json::Value>(&message.content).is_ok() {
-                "json"
-            } else {
-                ""
-            };
-            write_code_fence(&mut markdown, &message.content, language);
-        } else {
-            markdown.push_str(&message.content);
-            if !message.content.ends_with('\n') {
-                markdown.push('\n');
-            }
-        }
-        markdown.push('\n');
     }
-    markdown
+}
+
+fn render_tool_metrics(markdown: &mut String, message: &SessionMessage) {
+    if let Some(tool) = message.metrics.tool.as_ref() {
+        if let Some(summary) = format_tool_summary(tool) {
+            let _ = writeln!(markdown, "**Tool:** {summary}\n");
+        }
+        if let Some(error) = tool.error.as_ref() {
+            let _ = writeln!(
+                markdown,
+                "**Error:** {}\n",
+                one_line(&format_metric_error(error))
+            );
+        }
+    }
+    let _ = writeln!(markdown, "_{TOOL_TOKEN_ACCOUNTING_NOTE}_\n");
+}
+
+fn render_message_body(markdown: &mut String, message: &SessionMessage) {
+    if matches!(
+        message.kind,
+        SessionMessageKind::Skill | SessionMessageKind::ToolCall | SessionMessageKind::ToolResult
+    ) {
+        let language = if serde_json::from_str::<serde_json::Value>(&message.content).is_ok() {
+            "json"
+        } else {
+            ""
+        };
+        write_code_fence(markdown, &message.content, language);
+    } else {
+        markdown.push_str(&message.content);
+        if !message.content.ends_with('\n') {
+            markdown.push('\n');
+        }
+    }
 }
 
 fn write_code_fence(markdown: &mut String, content: &str, language: &str) {
@@ -220,8 +294,8 @@ mod tests {
     use super::export_session_detail_at;
     use crate::AgentKind;
     use crate::session::{
-        AgentSession, SessionDetail, SessionMessage, SessionMessageKind, SessionMessageMetrics,
-        TokenUsage,
+        AgentSession, ResponseMetrics, SessionDetail, SessionMessage, SessionMessageKind,
+        SessionMessageMetrics, TokenUsage, ToolMetrics,
     };
 
     #[test]
@@ -269,9 +343,14 @@ mod tests {
             "USER",
             "第一行\n第二行",
             "ASSISTANT · gpt-5.5 · 12.3s · 67,890 tokens",
-            "**Token details:** input 50,000 · output 10,000 · cache read 7,000 · cache write 500 · reasoning 390",
+            "## Model Usage",
+            "gpt-5.5 · 1 responses · duration 12.3s · avg TTFT 450ms · 67,890 tokens · $0.1250",
+            "**Token details:** input 50,000 · output 10,000 · cache read 7,000 · cache write 500 (5m 400 · 1h 100) · reasoning 390 · tool 1,000",
+            "**Response:** status completed · stop reason stop · TTFT 450ms · retries 1",
             "model-specific answer",
-            "TOOL CALL",
+            "TOOL CALL · completed · 140ms · exit 0",
+            "**Tool:** completed · 140ms · exit 0",
+            "Token accounting: provider response totals only; no per-call token value is persisted.",
             "README.md",
             "TOOL RESULT",
             "最后一条，完整保留",
@@ -320,15 +399,26 @@ mod tests {
                     timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
                     model: Some("gpt-5.5".to_owned()),
                     metrics: SessionMessageMetrics {
-                        duration_ms: Some(12_345),
-                        tokens: TokenUsage {
-                            total: Some(67_890),
-                            input: Some(50_000),
-                            output: Some(10_000),
-                            cache_read: Some(7_000),
-                            cache_write: Some(500),
-                            reasoning: Some(390),
-                        },
+                        response: Some(ResponseMetrics {
+                            duration_ms: Some(12_345),
+                            time_to_first_token_ms: Some(450),
+                            cost_usd: Some(0.125),
+                            finish_reason: Some("stop".to_owned()),
+                            retry_count: Some(1),
+                            tokens: TokenUsage {
+                                total: Some(67_890),
+                                input: Some(50_000),
+                                output: Some(10_000),
+                                cache_read: Some(7_000),
+                                cache_write: Some(500),
+                                cache_write_5m: Some(400),
+                                cache_write_1h: Some(100),
+                                reasoning: Some(390),
+                                tool: Some(1_000),
+                            },
+                            ..ResponseMetrics::default()
+                        }),
+                        ..SessionMessageMetrics::default()
                     },
                     content: "model-specific answer".to_owned(),
                 },
@@ -336,7 +426,15 @@ mod tests {
                     kind: SessionMessageKind::ToolCall,
                     timestamp: Some("2026-01-01T00:00:03Z".to_owned()),
                     model: None,
-                    metrics: SessionMessageMetrics::default(),
+                    metrics: SessionMessageMetrics {
+                        response: None,
+                        tool: Some(ToolMetrics {
+                            status: Some("completed".to_owned()),
+                            duration_ms: Some(140),
+                            exit_code: Some(0),
+                            error: None,
+                        }),
+                    },
                     content: "{\n  \"name\": \"read\",\n  \"path\": \"README.md\",\n  \"literal\": \"```\"\n}".to_owned(),
                 },
                 SessionMessage {

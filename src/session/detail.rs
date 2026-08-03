@@ -5,9 +5,9 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use super::{
-    AgentSession, MAX_RECORD_BYTES, SessionDetail, SessionMessage, SessionMessageKind,
-    SessionMessageMetrics, TokenUsage, content_text_full, file_stem, files_with_extension,
-    read_json_file, string_at, visit_bounded_lines,
+    AgentSession, MAX_RECORD_BYTES, MetricError, ResponseMetrics, SessionDetail, SessionMessage,
+    SessionMessageKind, SessionMessageMetrics, TokenUsage, ToolMetrics, content_text_full,
+    file_stem, files_with_extension, read_json_file, string_at, visit_bounded_lines,
 };
 use crate::AgentKind;
 
@@ -204,6 +204,7 @@ fn codex_detail(path: &Path) -> Result<LoadedSession> {
     let mut current_model = None;
     let mut pending_assistant: Option<usize> = None;
     let mut turn_last_assistant: Option<usize> = None;
+    let mut tool_targets = BTreeMap::<String, usize>::new();
     let skipped = visit_bounded_lines(path, |line| {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
@@ -219,21 +220,14 @@ fn codex_detail(path: &Path) -> Result<LoadedSession> {
         let Some(payload_type) = payload.get("type").and_then(Value::as_str) else {
             return;
         };
-        if payload_type == "task_started" {
-            pending_assistant = None;
-            turn_last_assistant = None;
-        } else if payload_type == "token_count" {
-            if let Some(index) = pending_assistant.take()
-                && let Some(usage) = payload.pointer("/info/last_token_usage")
-            {
-                messages[index].metrics.tokens = token_usage(usage);
-            }
-        } else if payload_type == "task_complete"
-            && let Some(index) = turn_last_assistant
-            && let Some(duration_ms) = payload.get("duration_ms").and_then(number_as_milliseconds)
-        {
-            messages[index].metrics.duration_ms = Some(duration_ms);
-        }
+        update_codex_metrics(
+            payload_type,
+            payload,
+            &mut messages,
+            &mut pending_assistant,
+            &mut turn_last_assistant,
+            &tool_targets,
+        );
         let timestamp =
             string_at(&record, "/timestamp").or_else(|| string_at(&record, "/payload/timestamp"));
         let parsed = if payload_type == "message" {
@@ -256,6 +250,17 @@ fn codex_detail(path: &Path) -> Result<LoadedSession> {
         };
         let start = messages.len();
         messages.extend(parsed);
+        if matches!(payload_type, "function_call" | "custom_tool_call")
+            && let Some(call_id) = string_at(payload, "/call_id")
+            && let Some(relative_index) = messages[start..].iter().position(|message| {
+                matches!(
+                    message.kind,
+                    SessionMessageKind::ToolCall | SessionMessageKind::Skill
+                )
+            })
+        {
+            tool_targets.insert(call_id, start + relative_index);
+        }
         if messages[start..]
             .iter()
             .any(|message| message.kind == SessionMessageKind::User)
@@ -279,6 +284,110 @@ fn codex_detail(path: &Path) -> Result<LoadedSession> {
         cost_usd,
         messages,
     })
+}
+
+fn update_codex_metrics(
+    payload_type: &str,
+    payload: &Value,
+    messages: &mut [SessionMessage],
+    pending_assistant: &mut Option<usize>,
+    turn_last_assistant: &mut Option<usize>,
+    tool_targets: &BTreeMap<String, usize>,
+) {
+    if payload_type == "task_started" {
+        *pending_assistant = None;
+        *turn_last_assistant = None;
+    } else if payload_type == "token_count" {
+        if let Some(index) = pending_assistant.take()
+            && let Some(usage) = payload.pointer("/info/last_token_usage")
+        {
+            messages[index].metrics.response_mut().tokens = token_usage(usage);
+        }
+    } else if matches!(payload_type, "task_complete" | "turn_aborted")
+        && let Some(index) = *turn_last_assistant
+    {
+        let response = messages[index].metrics.response_mut();
+        response.duration_ms = payload.get("duration_ms").and_then(number_as_milliseconds);
+        response.time_to_first_token_ms = payload
+            .get("time_to_first_token_ms")
+            .and_then(number_as_milliseconds);
+        response.finish_reason = string_at(payload, "/reason")
+            .or_else(|| string_at(payload, "/status"))
+            .or_else(|| Some(payload_type.to_owned()));
+    } else if matches!(payload_type, "mcp_tool_call_end" | "patch_apply_end")
+        && let Some(call_id) = string_at(payload, "/call_id")
+        && let Some(index) = tool_targets.get(&call_id).copied()
+    {
+        let tool = messages[index].metrics.tool_mut();
+        tool.duration_ms = codex_tool_duration_ms(payload);
+        tool.status = codex_tool_status(payload);
+        tool.exit_code = payload.get("exit_code").and_then(Value::as_i64);
+        tool.error = codex_tool_error(payload);
+    }
+}
+
+fn codex_tool_duration_ms(payload: &Value) -> Option<u64> {
+    payload
+        .get("duration_ms")
+        .and_then(number_as_milliseconds)
+        .or_else(|| {
+            let duration = payload.get("duration")?;
+            let seconds = duration.get("secs")?.as_u64()?;
+            let nanos = duration
+                .get("nanos")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            Some(
+                seconds
+                    .saturating_mul(1_000)
+                    .saturating_add(nanos / 1_000_000),
+            )
+        })
+}
+
+fn codex_tool_status(payload: &Value) -> Option<String> {
+    string_at(payload, "/status")
+        .or_else(|| {
+            payload
+                .get("success")
+                .and_then(Value::as_bool)
+                .map(|success| {
+                    if success {
+                        "completed".to_owned()
+                    } else {
+                        "error".to_owned()
+                    }
+                })
+        })
+        .or_else(|| {
+            let result = payload.get("result")?;
+            if result.get("Ok").is_some() {
+                Some("completed".to_owned())
+            } else if result.get("Err").is_some() {
+                Some("error".to_owned())
+            } else {
+                None
+            }
+        })
+}
+
+fn codex_tool_error(payload: &Value) -> Option<MetricError> {
+    metric_error(payload)
+        .or_else(|| {
+            string_at(payload, "/stderr")
+                .filter(|message| !message.trim().is_empty())
+                .map(|message| MetricError {
+                    code: None,
+                    message,
+                })
+        })
+        .or_else(|| {
+            let error = payload.pointer("/result/Err")?;
+            Some(MetricError {
+                code: None,
+                message: content_text_full(error)?,
+            })
+        })
 }
 
 fn codex_event_message(
@@ -312,6 +421,7 @@ fn nested_jsonl_detail(path: &Path, kind: &AgentKind) -> Result<LoadedSession> {
     let mut usage = JsonlUsage::new(kind);
     let mut messages: Vec<SessionMessage> = Vec::new();
     let mut metric_targets = BTreeMap::new();
+    let mut tool_targets: BTreeMap<String, (usize, Option<u64>)> = BTreeMap::new();
     let skipped = visit_bounded_lines(path, |line| {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
@@ -326,30 +436,40 @@ fn nested_jsonl_detail(path: &Path, kind: &AgentKind) -> Result<LoadedSession> {
         let timestamp =
             string_at(&record, "/timestamp").or_else(|| string_at(&record, "/message/timestamp"));
         let model = record.pointer("/message").and_then(model_id);
-        let mut parsed = messages_from_content(
-            SessionMessageKind::from_provider_role(role),
-            timestamp,
-            model,
-            content,
-        );
-        if let Some(index) = parsed
-            .iter()
-            .rposition(|message| message.kind == SessionMessageKind::Assistant)
+        let parent_kind = SessionMessageKind::from_provider_role(role);
+        let mut parsed =
+            parsed_messages_from_content(parent_kind, timestamp.clone(), model.clone(), content);
+        if let Some(tool_id) = string_at(&record, "/message/toolCallId")
+            .or_else(|| string_at(&record, "/message/tool_use_id"))
         {
-            let target = messages.len() + index;
-            if let Some(message_id) = string_at(&record, "/message/id")
-                && let Some(previous) = metric_targets.insert(message_id, target)
-            {
-                messages[previous].metrics = SessionMessageMetrics::default();
+            for parsed in &mut parsed {
+                if parsed.message.kind == SessionMessageKind::ToolResult
+                    && parsed.tool_call_id.is_none()
+                {
+                    parsed.tool_call_id = Some(tool_id.clone());
+                }
             }
-            parsed[index].metrics.tokens = record
-                .pointer("/message/usage")
-                .map_or_else(TokenUsage::default, token_usage_with_component_total);
-            parsed[index].metrics.duration_ms = record
-                .pointer("/message/duration")
-                .and_then(number_as_milliseconds);
         }
-        messages.extend(parsed);
+        let start = messages.len();
+        attach_nested_response_metrics(
+            &record,
+            parent_kind,
+            model,
+            start,
+            &mut parsed,
+            &mut metric_targets,
+            &mut messages,
+        );
+        let timestamp_ms = timestamp.as_deref().and_then(timestamp_millis);
+        let tool_events = nested_tool_events(&parsed, start);
+        messages.extend(parsed.into_iter().map(|parsed| parsed.message));
+        correlate_nested_tools(
+            &record,
+            timestamp_ms,
+            tool_events,
+            &mut messages,
+            &mut tool_targets,
+        );
     })?;
     ensure_complete(path, skipped)?;
     let (tokens, cost_usd) = usage.finish(true);
@@ -358,6 +478,131 @@ fn nested_jsonl_detail(path: &Path, kind: &AgentKind) -> Result<LoadedSession> {
         cost_usd,
         messages,
     })
+}
+
+#[derive(Debug)]
+struct NestedToolEvent {
+    kind: SessionMessageKind,
+    id: String,
+    target: usize,
+    status: Option<String>,
+    error: Option<MetricError>,
+}
+
+fn attach_nested_response_metrics(
+    record: &Value,
+    parent_kind: SessionMessageKind,
+    model: Option<String>,
+    start: usize,
+    parsed: &mut [ParsedMessage],
+    metric_targets: &mut BTreeMap<String, usize>,
+    messages: &mut [SessionMessage],
+) {
+    if parent_kind != SessionMessageKind::Assistant {
+        return;
+    }
+    let response_target = parsed
+        .iter()
+        .rposition(|parsed| parsed.message.kind == SessionMessageKind::Assistant)
+        .or_else(|| {
+            parsed.iter().rposition(|parsed| {
+                matches!(
+                    parsed.message.kind,
+                    SessionMessageKind::ToolCall | SessionMessageKind::Skill
+                )
+            })
+        });
+    let Some(index) = response_target else {
+        return;
+    };
+    parsed[index].message.model = model;
+    let target = start + index;
+    if let Some(message_id) = string_at(record, "/message/id")
+        && let Some(previous) = metric_targets.insert(message_id, target)
+    {
+        messages[previous].metrics = SessionMessageMetrics::default();
+    }
+    let native_message = record.pointer("/message").unwrap_or(record);
+    parsed[index].message.metrics.response = Some(ResponseMetrics {
+        duration_ms: record
+            .pointer("/message/duration")
+            .and_then(number_as_milliseconds),
+        time_to_first_token_ms: record
+            .pointer("/message/ttft")
+            .and_then(number_as_milliseconds),
+        cost_usd: record
+            .pointer("/message/usage/cost/total")
+            .and_then(Value::as_f64),
+        finish_reason: string_at(record, "/message/stopReason")
+            .or_else(|| string_at(record, "/message/stop_reason")),
+        retry_count: response_retry_count(native_message),
+        error: metric_error(native_message),
+        tokens: record
+            .pointer("/message/usage")
+            .map_or_else(TokenUsage::default, token_usage_with_component_total),
+    });
+}
+
+fn nested_tool_events(parsed: &[ParsedMessage], start: usize) -> Vec<NestedToolEvent> {
+    parsed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parsed)| {
+            Some(NestedToolEvent {
+                kind: parsed.message.kind,
+                id: parsed.tool_call_id.clone()?,
+                target: start + index,
+                status: parsed.tool_status.clone(),
+                error: parsed.tool_error.clone(),
+            })
+        })
+        .collect()
+}
+
+fn correlate_nested_tools(
+    record: &Value,
+    timestamp_ms: Option<u64>,
+    events: Vec<NestedToolEvent>,
+    messages: &mut [SessionMessage],
+    tool_targets: &mut BTreeMap<String, (usize, Option<u64>)>,
+) {
+    for event in events {
+        if matches!(
+            event.kind,
+            SessionMessageKind::ToolCall | SessionMessageKind::Skill
+        ) {
+            tool_targets.insert(event.id, (event.target, timestamp_ms));
+            continue;
+        }
+        let Some((call_target, started_at)) = tool_targets.get(&event.id).copied() else {
+            continue;
+        };
+        let is_error = record.pointer("/message/isError").and_then(Value::as_bool);
+        let tool = messages[call_target].metrics.tool_mut();
+        tool.status = event.status.or_else(|| {
+            is_error.map(|is_error| {
+                if is_error {
+                    "error".to_owned()
+                } else {
+                    "completed".to_owned()
+                }
+            })
+        });
+        tool.duration_ms = record
+            .pointer("/message/details/wallTimeMs")
+            .and_then(number_as_milliseconds)
+            .or_else(|| {
+                timestamp_ms
+                    .zip(started_at)
+                    .map(|(ended, started)| ended.saturating_sub(started))
+            });
+        tool.exit_code = record
+            .pointer("/message/details/exitCode")
+            .and_then(Value::as_i64);
+        tool.error = event
+            .error
+            .or_else(|| metric_error(record.pointer("/message").unwrap_or(record)));
+    }
 }
 
 fn gemini_detail(path: &Path) -> Result<LoadedSession> {
@@ -411,22 +656,73 @@ fn gemini_messages(session: &Value) -> Vec<SessionMessage> {
             model_id(message),
             content,
         );
-        if let Some(index) = parsed
+        if let Some(tool_calls) = message.get("toolCalls").and_then(Value::as_array) {
+            for call in tool_calls {
+                let mut call_content = call.clone();
+                if let Some(object) = call_content.as_object_mut() {
+                    object.remove("result");
+                }
+                if let Some(content) = content_text_full(&call_content) {
+                    parsed.push(SessionMessage {
+                        kind: tool_call_kind(call),
+                        timestamp: string_at(call, "/timestamp")
+                            .or_else(|| string_at(message, "/timestamp")),
+                        model: None,
+                        metrics: SessionMessageMetrics {
+                            response: None,
+                            tool: tool_metrics(call),
+                        },
+                        content,
+                    });
+                }
+                if let Some(result) = call.get("result")
+                    && let Some(content) = content_text_full(result)
+                {
+                    parsed.push(SessionMessage {
+                        kind: SessionMessageKind::ToolResult,
+                        timestamp: string_at(call, "/timestamp")
+                            .or_else(|| string_at(message, "/timestamp")),
+                        model: None,
+                        metrics: SessionMessageMetrics::default(),
+                        content,
+                    });
+                }
+            }
+        }
+        let response_target = parsed
             .iter()
             .rposition(|message| message.kind == SessionMessageKind::Assistant)
+            .or_else(|| {
+                parsed.iter().rposition(|message| {
+                    matches!(
+                        message.kind,
+                        SessionMessageKind::ToolCall | SessionMessageKind::Skill
+                    )
+                })
+            });
+        if SessionMessageKind::from_provider_role(role) == SessionMessageKind::Assistant
+            && let Some(index) = response_target
         {
-            parsed[index].metrics.tokens = message
-                .get("tokens")
-                .or_else(|| message.get("usage"))
-                .map_or_else(TokenUsage::default, token_usage_with_component_total);
-            parsed[index].metrics.duration_ms = message
-                .get("durationMs")
-                .and_then(number_as_milliseconds)
-                .or_else(|| {
-                    message
-                        .pointer("/metrics/durationMs")
-                        .and_then(number_as_milliseconds)
-                });
+            parsed[index].model = model_id(message);
+            parsed[index].metrics.response = Some(ResponseMetrics {
+                duration_ms: message
+                    .get("durationMs")
+                    .and_then(number_as_milliseconds)
+                    .or_else(|| {
+                        message
+                            .pointer("/metrics/durationMs")
+                            .and_then(number_as_milliseconds)
+                    }),
+                finish_reason: string_at(message, "/finishReason")
+                    .or_else(|| string_at(message, "/stopReason")),
+                retry_count: response_retry_count(message),
+                error: metric_error(message),
+                tokens: message
+                    .get("tokens")
+                    .or_else(|| message.get("usage"))
+                    .map_or_else(TokenUsage::default, token_usage_with_component_total),
+                ..ResponseMetrics::default()
+            });
         }
         messages.extend(parsed);
     }
@@ -464,10 +760,15 @@ fn opencode_detail(home: &Path, session_id: &str) -> Result<LoadedSession> {
         let mut part_paths = files_with_extension(&storage.join("part").join(&message_id), "json")?;
         part_paths.sort();
         let mut parsed = Vec::new();
+        let mut first_part_started = None;
         for part_path in part_paths {
             let Some(part) = read_json_file(&part_path)? else {
                 continue;
             };
+            if let Some(started) = part.pointer("/time/start").and_then(Value::as_u64) {
+                first_part_started =
+                    Some(first_part_started.map_or(started, |value: u64| value.min(started)));
+            }
             parsed.extend(opencode_part_messages(
                 parent_kind,
                 timestamp.clone(),
@@ -489,14 +790,23 @@ fn opencode_detail(home: &Path, session_id: &str) -> Result<LoadedSession> {
             .iter()
             .rposition(|message| message.kind == SessionMessageKind::Assistant)
         {
-            parsed[index].metrics.tokens = message
-                .get("tokens")
-                .map_or_else(TokenUsage::default, token_usage_with_component_total);
-            parsed[index].metrics.duration_ms = message
-                .pointer("/time/completed")
-                .and_then(Value::as_u64)
-                .zip(created)
-                .map(|(completed, created)| completed.saturating_sub(created));
+            parsed[index].metrics.response = Some(ResponseMetrics {
+                duration_ms: message
+                    .pointer("/time/completed")
+                    .and_then(Value::as_u64)
+                    .zip(created)
+                    .map(|(completed, created)| completed.saturating_sub(created)),
+                time_to_first_token_ms: first_part_started
+                    .zip(created)
+                    .map(|(started, created)| started.saturating_sub(created)),
+                cost_usd: message.get("cost").and_then(Value::as_f64),
+                finish_reason: string_at(message, "/finish"),
+                retry_count: response_retry_count(message),
+                error: metric_error(message),
+                tokens: message
+                    .get("tokens")
+                    .map_or_else(TokenUsage::default, token_usage_with_component_total),
+            });
         }
         for (part_index, message) in parsed.into_iter().enumerate() {
             messages.push((
@@ -541,48 +851,115 @@ fn visit_opencode_messages(
     Ok(())
 }
 
+#[derive(Debug)]
+struct ParsedMessage {
+    message: SessionMessage,
+    tool_call_id: Option<String>,
+    tool_status: Option<String>,
+    tool_error: Option<MetricError>,
+}
+
 fn messages_from_content(
     parent_kind: SessionMessageKind,
     timestamp: Option<String>,
     model: Option<String>,
     content: &Value,
 ) -> Vec<SessionMessage> {
+    parsed_messages_from_content(parent_kind, timestamp, model, content)
+        .into_iter()
+        .map(|parsed| parsed.message)
+        .collect()
+}
+
+fn parsed_messages_from_content(
+    parent_kind: SessionMessageKind,
+    timestamp: Option<String>,
+    model: Option<String>,
+    content: &Value,
+) -> Vec<ParsedMessage> {
     if let Value::Array(parts) = content {
         return parts
             .iter()
             .flat_map(|part| {
-                messages_from_content(parent_kind, timestamp.clone(), model.clone(), part)
+                parsed_messages_from_content(parent_kind, timestamp.clone(), model.clone(), part)
             })
             .collect();
     }
 
-    let kind =
-        content
-            .get("type")
-            .and_then(Value::as_str)
-            .map_or(parent_kind, |value| match value {
+    let kind = content
+        .get("type")
+        .and_then(Value::as_str)
+        .map_or(parent_kind, |value| {
+            match value.to_ascii_lowercase().as_str() {
                 "text" | "input_text" | "output_text" => parent_kind,
-                "tool_use" | "tool_call" | "function_call" => tool_call_kind(content),
-                "tool_result" | "function_call_output" => SessionMessageKind::ToolResult,
+                "tool_use" | "tool_call" | "toolcall" | "function_call" => tool_call_kind(content),
+                "tool_result" | "toolresult" | "function_call_output" => {
+                    SessionMessageKind::ToolResult
+                }
                 "error" => SessionMessageKind::Error,
                 "thinking" | "reasoning" | "system" | "meta" | "developer_message" => {
                     SessionMessageKind::System
                 }
                 _ => SessionMessageKind::System,
-            });
+            }
+        });
+    let tool_call_id = tool_call_id(kind, content);
+    let tool_is_error = (kind == SessionMessageKind::ToolResult)
+        .then(|| content.get("is_error").and_then(Value::as_bool))
+        .flatten();
     content_text_full(content)
-        .map(|content| {
-            vec![SessionMessage {
-                kind,
-                timestamp,
-                model: (kind == SessionMessageKind::Assistant)
-                    .then_some(model)
-                    .flatten(),
-                metrics: SessionMessageMetrics::default(),
-                content,
+        .map(|rendered_content| {
+            vec![ParsedMessage {
+                tool_call_id,
+                tool_status: tool_is_error.map(|is_error| {
+                    if is_error {
+                        "error".to_owned()
+                    } else {
+                        "completed".to_owned()
+                    }
+                }),
+                tool_error: tool_is_error
+                    .filter(|is_error| *is_error)
+                    .map(|_| MetricError {
+                        code: None,
+                        message: content
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .map_or_else(|| rendered_content.clone(), str::to_owned),
+                    }),
+                message: SessionMessage {
+                    kind,
+                    timestamp,
+                    model: (kind == SessionMessageKind::Assistant)
+                        .then_some(model)
+                        .flatten(),
+                    metrics: SessionMessageMetrics::default(),
+                    content: rendered_content,
+                },
             }]
         })
         .unwrap_or_default()
+}
+
+fn tool_call_id(kind: SessionMessageKind, value: &Value) -> Option<String> {
+    let pointers: &[&str] = match kind {
+        SessionMessageKind::ToolCall | SessionMessageKind::Skill => {
+            &["/id", "/call_id", "/callId", "/toolCallId"]
+        }
+        SessionMessageKind::ToolResult => &["/tool_use_id", "/toolCallId", "/call_id", "/callId"],
+        _ => return None,
+    };
+    pointers
+        .iter()
+        .find_map(|pointer| string_at(value, pointer))
+}
+
+fn timestamp_millis(value: &str) -> Option<u64> {
+    value.parse().ok().or_else(|| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .and_then(|timestamp| timestamp.timestamp_millis().try_into().ok())
+    })
 }
 
 fn opencode_part_messages(
@@ -617,7 +994,12 @@ fn opencode_part_messages(
                 kind,
                 timestamp: timestamp.clone(),
                 model: None,
-                metrics: SessionMessageMetrics::default(),
+                metrics: SessionMessageMetrics {
+                    tool: (pointer == "/state/input")
+                        .then(|| tool_metrics(part))
+                        .flatten(),
+                    ..SessionMessageMetrics::default()
+                },
                 content,
             });
         }
@@ -662,7 +1044,70 @@ fn model_id(value: &Value) -> Option<String> {
     .find_map(|pointer| string_at(value, pointer))
 }
 
+fn response_retry_count(value: &Value) -> Option<u64> {
+    u64_at(value, &["/retryCount", "/retry_count", "/retries"])
+}
+
+fn metric_error(value: &Value) -> Option<MetricError> {
+    let message = ["/errorMessage", "/error/message", "/result/error/message"]
+        .into_iter()
+        .find_map(|pointer| string_at(value, pointer))
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            value
+                .pointer("/result/error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })?;
+    let code = [
+        "/errorId",
+        "/error/code",
+        "/error/type",
+        "/error/name",
+        "/result/error/code",
+    ]
+    .into_iter()
+    .find_map(|pointer| string_at(value, pointer));
+    Some(MetricError { code, message })
+}
+
+fn tool_metrics(value: &Value) -> Option<ToolMetrics> {
+    let state = value.get("state").unwrap_or(value);
+    let duration_ms = state
+        .pointer("/time/end")
+        .and_then(Value::as_u64)
+        .zip(state.pointer("/time/start").and_then(Value::as_u64))
+        .map(|(end, start)| end.saturating_sub(start))
+        .or_else(|| state.get("durationMs").and_then(number_as_milliseconds))
+        .or_else(|| state.get("wallTimeMs").and_then(number_as_milliseconds));
+    let metrics = ToolMetrics {
+        status: string_at(state, "/status"),
+        duration_ms,
+        exit_code: ["/exitCode", "/exit_code", "/metadata/exitCode"]
+            .into_iter()
+            .find_map(|pointer| state.pointer(pointer).and_then(Value::as_i64)),
+        error: metric_error(state),
+    };
+    (metrics != ToolMetrics::default()).then_some(metrics)
+}
+
 fn token_usage(usage: &Value) -> TokenUsage {
+    let five_minute_cache_write = u64_at(usage, &["/cache_creation/ephemeral_5m_input_tokens"]);
+    let one_hour_cache_write = u64_at(usage, &["/cache_creation/ephemeral_1h_input_tokens"]);
+    let cache_write = u64_at(
+        usage,
+        &[
+            "/cache_creation_input_tokens",
+            "/cache/write",
+            "/cacheWrite",
+        ],
+    )
+    .or_else(|| optional_sum([five_minute_cache_write, one_hour_cache_write]));
     TokenUsage {
         total: u64_at(usage, &["/total_tokens", "/totalTokens", "/total"]),
         input: u64_at(usage, &["/input_tokens", "/input"]),
@@ -677,14 +1122,9 @@ fn token_usage(usage: &Value) -> TokenUsage {
                 "/cached",
             ],
         ),
-        cache_write: u64_at(
-            usage,
-            &[
-                "/cache_creation_input_tokens",
-                "/cache/write",
-                "/cacheWrite",
-            ],
-        ),
+        cache_write,
+        cache_write_5m: five_minute_cache_write,
+        cache_write_1h: one_hour_cache_write,
         reasoning: u64_at(
             usage,
             &[
@@ -694,7 +1134,15 @@ fn token_usage(usage: &Value) -> TokenUsage {
                 "/thoughts",
             ],
         ),
+        tool: u64_at(usage, &["/tool", "/toolUsePromptTokenCount"]),
     }
+}
+
+fn optional_sum<const N: usize>(values: [Option<u64>; N]) -> Option<u64> {
+    values
+        .iter()
+        .any(Option::is_some)
+        .then(|| values.into_iter().flatten().fold(0, u64::saturating_add))
 }
 
 fn token_usage_with_component_total(usage: &Value) -> TokenUsage {
@@ -706,6 +1154,7 @@ fn token_usage_with_component_total(usage: &Value) -> TokenUsage {
             usage.cache_read,
             usage.cache_write,
             usage.reasoning,
+            usage.tool,
         ];
         let found = components.iter().any(Option::is_some);
         usage.total = found.then(|| {

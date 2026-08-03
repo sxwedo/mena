@@ -65,15 +65,15 @@ impl SessionMessageKind {
             "user" | "human" => Self::User,
             "assistant" | "gemini" | "model" => Self::Assistant,
             "skill" => Self::Skill,
-            "tool_call" | "tool_use" | "function_call" => Self::ToolCall,
-            "tool_result" | "function_call_output" => Self::ToolResult,
+            "tool_call" | "toolcall" | "tool_use" | "function_call" => Self::ToolCall,
+            "tool_result" | "toolresult" | "function_call_output" => Self::ToolResult,
             "error" => Self::Error,
             _ => Self::System,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionMessage {
     pub kind: SessionMessageKind,
     pub timestamp: Option<String>,
@@ -82,11 +82,49 @@ pub struct SessionMessage {
     pub content: String,
 }
 
-/// Exact per-response metrics persisted by a provider.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Metrics attached to one persisted message.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionMessageMetrics {
+    pub response: Option<ResponseMetrics>,
+    pub tool: Option<ToolMetrics>,
+}
+
+impl SessionMessageMetrics {
+    pub(crate) fn response_mut(&mut self) -> &mut ResponseMetrics {
+        self.response.get_or_insert_default()
+    }
+
+    pub(crate) fn tool_mut(&mut self) -> &mut ToolMetrics {
+        self.tool.get_or_insert_default()
+    }
+}
+
+/// Exact metrics persisted for one model response.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResponseMetrics {
     pub duration_ms: Option<u64>,
+    pub time_to_first_token_ms: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub finish_reason: Option<String>,
+    pub retry_count: Option<u64>,
+    pub error: Option<MetricError>,
     pub tokens: TokenUsage,
+}
+
+/// Provider-persisted error details for one model response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricError {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+/// Exact execution metrics persisted for one tool call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolMetrics {
+    pub status: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub exit_code: Option<i64>,
+    pub error: Option<MetricError>,
 }
 
 /// Exact token usage persisted for one provider response.
@@ -97,13 +135,129 @@ pub struct TokenUsage {
     pub output: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
+    pub cache_write_5m: Option<u64>,
+    pub cache_write_1h: Option<u64>,
     pub reasoning: Option<u64>,
+    pub tool: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionDetail {
     pub session: AgentSession,
     pub messages: Vec<SessionMessage>,
+}
+
+impl SessionDetail {
+    /// Returns exact persisted response metrics grouped by model.
+    #[must_use]
+    pub fn model_usage(&self) -> Vec<ModelUsageSummary> {
+        let mut summaries = BTreeMap::<String, ModelUsageAccumulator>::new();
+        for message in &self.messages {
+            let Some(response) = message.metrics.response.as_ref() else {
+                continue;
+            };
+            let Some(model) = message
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            else {
+                continue;
+            };
+            summaries
+                .entry(model.to_owned())
+                .or_default()
+                .ingest(response);
+        }
+        summaries
+            .into_iter()
+            .map(|(model, summary)| summary.finish(model))
+            .collect()
+    }
+}
+
+/// Exact persisted response totals for one model in a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelUsageSummary {
+    pub model: String,
+    pub responses: u64,
+    pub duration_ms: Option<u64>,
+    pub average_time_to_first_token_ms: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub retry_count: Option<u64>,
+    pub errors: u64,
+    pub tokens: TokenUsage,
+}
+
+#[derive(Debug, Default)]
+struct ModelUsageAccumulator {
+    responses: u64,
+    duration_ms: Option<u64>,
+    time_to_first_token_ms: Option<u64>,
+    time_to_first_token_samples: u64,
+    cost_usd: Option<f64>,
+    retry_count: Option<u64>,
+    errors: u64,
+    tokens: TokenUsage,
+}
+
+impl ModelUsageAccumulator {
+    fn ingest(&mut self, response: &ResponseMetrics) {
+        self.responses = self.responses.saturating_add(1);
+        add_optional_u64(&mut self.duration_ms, response.duration_ms);
+        if response.time_to_first_token_ms.is_some() {
+            self.time_to_first_token_samples = self.time_to_first_token_samples.saturating_add(1);
+            add_optional_u64(
+                &mut self.time_to_first_token_ms,
+                response.time_to_first_token_ms,
+            );
+        }
+        if let Some(cost) = response.cost_usd {
+            self.cost_usd = Some(self.cost_usd.unwrap_or_default() + cost);
+        }
+        add_optional_u64(&mut self.retry_count, response.retry_count);
+        self.errors = self
+            .errors
+            .saturating_add(u64::from(response.error.is_some()));
+        self.tokens.add(response.tokens);
+    }
+
+    fn finish(self, model: String) -> ModelUsageSummary {
+        ModelUsageSummary {
+            model,
+            responses: self.responses,
+            duration_ms: self.duration_ms,
+            average_time_to_first_token_ms: self.time_to_first_token_ms.map(|total| {
+                total
+                    .checked_div(self.time_to_first_token_samples)
+                    .unwrap_or_default()
+            }),
+            cost_usd: self.cost_usd,
+            retry_count: self.retry_count,
+            errors: self.errors,
+            tokens: self.tokens,
+        }
+    }
+}
+
+impl TokenUsage {
+    fn add(&mut self, other: Self) {
+        add_optional_u64(&mut self.total, other.total);
+        add_optional_u64(&mut self.input, other.input);
+        add_optional_u64(&mut self.output, other.output);
+        add_optional_u64(&mut self.cache_read, other.cache_read);
+        add_optional_u64(&mut self.cache_write, other.cache_write);
+        add_optional_u64(&mut self.cache_write_5m, other.cache_write_5m);
+        add_optional_u64(&mut self.cache_write_1h, other.cache_write_1h);
+        add_optional_u64(&mut self.reasoning, other.reasoning);
+        add_optional_u64(&mut self.tool, other.tool);
+    }
+}
+
+fn add_optional_u64(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or_default().saturating_add(value));
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1216,11 +1370,95 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
-    use super::{SessionCatalog, SessionMessageKind};
+    use super::{
+        AgentSession, ResponseMetrics, SessionCatalog, SessionDetail, SessionMessage,
+        SessionMessageKind, SessionMessageMetrics, TokenUsage,
+    };
     use crate::AgentKind;
+
+    #[test]
+    fn aggregates_only_exact_response_metrics_by_model() {
+        let response = |input: u64,
+                        output: u64,
+                        tool: u64,
+                        duration: u64,
+                        ttft: u64,
+                        cost: f64,
+                        retries: u64,
+                        error: bool| {
+            ResponseMetrics {
+                duration_ms: Some(duration),
+                time_to_first_token_ms: Some(ttft),
+                cost_usd: Some(cost),
+                retry_count: Some(retries),
+                error: error.then(|| super::MetricError {
+                    code: Some("provider_error".to_owned()),
+                    message: "failed".to_owned(),
+                }),
+                tokens: TokenUsage {
+                    total: Some(input + output + tool),
+                    input: Some(input),
+                    output: Some(output),
+                    tool: Some(tool),
+                    ..TokenUsage::default()
+                },
+                ..ResponseMetrics::default()
+            }
+        };
+        let detail = SessionDetail {
+            session: AgentSession {
+                kind: AgentKind::GeminiCli,
+                id: "model-summary".to_owned(),
+                title: None,
+                project: None,
+                path: PathBuf::from("session.json"),
+                started_at: None,
+                updated_at: 0,
+                tokens: None,
+                cost_usd: None,
+            },
+            messages: vec![
+                SessionMessage {
+                    kind: SessionMessageKind::Assistant,
+                    timestamp: None,
+                    model: Some("gemini-pro".to_owned()),
+                    metrics: SessionMessageMetrics {
+                        response: Some(response(10, 2, 3, 1_000, 100, 0.1, 0, false)),
+                        tool: None,
+                    },
+                    content: "first".to_owned(),
+                },
+                SessionMessage {
+                    kind: SessionMessageKind::Assistant,
+                    timestamp: None,
+                    model: Some("gemini-pro".to_owned()),
+                    metrics: SessionMessageMetrics {
+                        response: Some(response(20, 4, 5, 2_000, 300, 0.2, 1, true)),
+                        tool: None,
+                    },
+                    content: "second".to_owned(),
+                },
+            ],
+        };
+
+        let summaries = detail.model_usage();
+
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.model, "gemini-pro");
+        assert_eq!(summary.responses, 2);
+        assert_eq!(summary.duration_ms, Some(3_000));
+        assert_eq!(summary.average_time_to_first_token_ms, Some(200));
+        assert_eq!(summary.retry_count, Some(1));
+        assert_eq!(summary.errors, 1);
+        assert_eq!(summary.tokens.total, Some(44));
+        assert_eq!(summary.tokens.tool, Some(8));
+        assert!((summary.cost_usd.expect("cost") - 0.3).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn duplicate_native_records_resolve_to_one_logical_session() {
@@ -1431,7 +1669,7 @@ mod tests {
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"question\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"answer\"}}\n",
                 "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":23,\"reasoning_output_tokens\":5,\"total_tokens\":123},\"total_token_usage\":{\"total_tokens\":999}}}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"duration_ms\":6543}}\n"
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"duration_ms\":6543,\"time_to_first_token_ms\":321}}\n"
             ),
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
@@ -1448,13 +1686,20 @@ mod tests {
 
         assert_eq!(detail.session.tokens, Some(999));
         assert_eq!(assistant.model.as_deref(), Some("gpt-5.6"));
-        assert_eq!(assistant.metrics.tokens.total, Some(123));
-        assert_eq!(assistant.metrics.tokens.input, Some(100));
-        assert_eq!(assistant.metrics.tokens.output, Some(23));
-        assert_eq!(assistant.metrics.tokens.cache_read, Some(80));
-        assert_eq!(assistant.metrics.tokens.cache_write, None);
-        assert_eq!(assistant.metrics.tokens.reasoning, Some(5));
-        assert_eq!(assistant.metrics.duration_ms, Some(6_543));
+        let response = assistant
+            .metrics
+            .response
+            .as_ref()
+            .expect("response metrics");
+        assert_eq!(response.tokens.total, Some(123));
+        assert_eq!(response.tokens.input, Some(100));
+        assert_eq!(response.tokens.output, Some(23));
+        assert_eq!(response.tokens.cache_read, Some(80));
+        assert_eq!(response.tokens.cache_write, None);
+        assert_eq!(response.tokens.reasoning, Some(5));
+        assert_eq!(response.duration_ms, Some(6_543));
+        assert_eq!(response.time_to_first_token_ms, Some(321));
+        assert_eq!(response.finish_reason.as_deref(), Some("task_complete"));
     }
 
     #[test]
@@ -1504,6 +1749,48 @@ mod tests {
     }
 
     #[test]
+    fn correlates_codex_tool_end_metrics_and_aborted_turns() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".codex/sessions/2026/01/02/native-metrics.jsonl");
+        write(
+            &session_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-native-metrics\",\"cwd\":\"/work\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"{}\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"done\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"mcp_tool_call_end\",\"call_id\":\"call-1\",\"duration\":{\"secs\":1,\"nanos\":250000000},\"result\":{\"Ok\":{\"content\":\"done\"}}}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"partial answer\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"reason\":\"user_interrupt\",\"duration_ms\":2345}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("codex"), "codex-native-metrics")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+        let tool = detail
+            .messages
+            .iter()
+            .find(|message| message.kind == SessionMessageKind::ToolCall)
+            .and_then(|message| message.metrics.tool.as_ref())
+            .expect("correlated tool metrics");
+        assert_eq!(tool.status.as_deref(), Some("completed"));
+        assert_eq!(tool.duration_ms, Some(1_250));
+        let response = detail
+            .messages
+            .iter()
+            .find(|message| message.kind == SessionMessageKind::Assistant)
+            .and_then(|message| message.metrics.response.as_ref())
+            .expect("aborted response metrics");
+        assert_eq!(response.duration_ms, Some(2_345));
+        assert_eq!(response.finish_reason.as_deref(), Some("user_interrupt"));
+    }
+
+    #[test]
     fn loads_every_claude_chat_message_in_file_order() {
         let temp = tempdir().expect("temp home");
         let session_path = temp
@@ -1513,7 +1800,7 @@ mod tests {
             &session_path,
             concat!(
                 "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"cwd\":\"/work/claude\",\"timestamp\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"user\",\"content\":\"first question\"}}\n",
-                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"id\":\"message-1\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40},\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:06Z\",\"message\":{\"id\":\"message-1\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_5m_input_tokens\":15,\"ephemeral_1h_input_tokens\":25}},\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]}}\n",
                 "{\"type\":\"user\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:07Z\",\"message\":{\"role\":\"user\",\"content\":\"second question\"}}\n",
                 "{\"type\":\"assistant\",\"sessionId\":\"claude-detail\",\"timestamp\":\"2026-01-02T03:04:08Z\",\"message\":{\"id\":\"message-2\",\"role\":\"assistant\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":100,\"output_tokens\":50},\"content\":\"second answer\"}}\n"
             ),
@@ -1543,15 +1830,27 @@ mod tests {
             Some("claude-sonnet-4-6")
         );
         assert_eq!(detail.messages[3].model.as_deref(), Some("claude-opus-4-6"));
-        assert_eq!(detail.messages[1].metrics.tokens.total, Some(100));
-        assert_eq!(detail.messages[1].metrics.tokens.input, Some(10));
-        assert_eq!(detail.messages[1].metrics.tokens.output, Some(20));
-        assert_eq!(detail.messages[1].metrics.tokens.cache_read, Some(30));
-        assert_eq!(detail.messages[1].metrics.tokens.cache_write, Some(40));
-        assert_eq!(detail.messages[1].metrics.tokens.reasoning, None);
-        assert_eq!(detail.messages[3].metrics.tokens.total, Some(150));
-        assert_eq!(detail.messages[3].metrics.tokens.input, Some(100));
-        assert_eq!(detail.messages[3].metrics.tokens.output, Some(50));
+        let first_response = detail.messages[1]
+            .metrics
+            .response
+            .as_ref()
+            .expect("first response metrics");
+        assert_eq!(first_response.tokens.total, Some(100));
+        assert_eq!(first_response.tokens.input, Some(10));
+        assert_eq!(first_response.tokens.output, Some(20));
+        assert_eq!(first_response.tokens.cache_read, Some(30));
+        assert_eq!(first_response.tokens.cache_write, Some(40));
+        assert_eq!(first_response.tokens.cache_write_5m, Some(15));
+        assert_eq!(first_response.tokens.cache_write_1h, Some(25));
+        assert_eq!(first_response.tokens.reasoning, None);
+        let second_response = detail.messages[3]
+            .metrics
+            .response
+            .as_ref()
+            .expect("second response metrics");
+        assert_eq!(second_response.tokens.total, Some(150));
+        assert_eq!(second_response.tokens.input, Some(100));
+        assert_eq!(second_response.tokens.output, Some(50));
     }
 
     #[test]
@@ -1576,8 +1875,17 @@ mod tests {
         let detail = catalog.detail(session).expect("load complete detail");
 
         assert_eq!(detail.session.tokens, Some(30));
-        assert_eq!(detail.messages[1].metrics.tokens.total, None);
-        assert_eq!(detail.messages[2].metrics.tokens.total, Some(30));
+        assert!(detail.messages[1].metrics.response.is_none());
+        assert_eq!(
+            detail.messages[2]
+                .metrics
+                .response
+                .as_ref()
+                .expect("latest response metrics")
+                .tokens
+                .total,
+            Some(30)
+        );
     }
 
     #[test]
@@ -1640,7 +1948,7 @@ mod tests {
             .join(".gemini/tmp/project/chats/gemini-detail.json");
         write(
             &session_path,
-            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","tokens":{"input":70,"output":15,"cached":11,"thoughts":5,"total":101},"durationMs":1234,"content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","tokens":{"input":150,"output":35,"cached":12,"thoughts":5,"total":202},"durationMs":2345,"content":"second answer"}]}"#,
+            r#"{"sessionId":"gemini-detail","messages":[{"type":"user","content":"first question"},{"type":"gemini","model":"gemini-3.1-pro","tokens":{"input":70,"output":15,"cached":11,"thoughts":5,"tool":6,"total":101},"durationMs":1234,"content":"first answer"},{"type":"user","content":"second question"},{"type":"gemini","model":"gemini-3.1-flash","tokens":{"input":150,"output":35,"cached":12,"thoughts":5,"tool":7,"total":202},"durationMs":2345,"content":"second answer"}]}"#,
         );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let session = catalog
@@ -1667,18 +1975,30 @@ mod tests {
             detail.messages[3].model.as_deref(),
             Some("gemini-3.1-flash")
         );
-        assert_eq!(detail.messages[1].metrics.tokens.total, Some(101));
-        assert_eq!(detail.messages[1].metrics.tokens.input, Some(70));
-        assert_eq!(detail.messages[1].metrics.tokens.output, Some(15));
-        assert_eq!(detail.messages[1].metrics.tokens.cache_read, Some(11));
-        assert_eq!(detail.messages[1].metrics.tokens.reasoning, Some(5));
-        assert_eq!(detail.messages[1].metrics.duration_ms, Some(1_234));
-        assert_eq!(detail.messages[3].metrics.tokens.total, Some(202));
-        assert_eq!(detail.messages[3].metrics.tokens.input, Some(150));
-        assert_eq!(detail.messages[3].metrics.tokens.output, Some(35));
-        assert_eq!(detail.messages[3].metrics.tokens.cache_read, Some(12));
-        assert_eq!(detail.messages[3].metrics.tokens.reasoning, Some(5));
-        assert_eq!(detail.messages[3].metrics.duration_ms, Some(2_345));
+        let first_response = detail.messages[1]
+            .metrics
+            .response
+            .as_ref()
+            .expect("first response metrics");
+        assert_eq!(first_response.tokens.total, Some(101));
+        assert_eq!(first_response.tokens.input, Some(70));
+        assert_eq!(first_response.tokens.output, Some(15));
+        assert_eq!(first_response.tokens.cache_read, Some(11));
+        assert_eq!(first_response.tokens.reasoning, Some(5));
+        assert_eq!(first_response.tokens.tool, Some(6));
+        assert_eq!(first_response.duration_ms, Some(1_234));
+        let second_response = detail.messages[3]
+            .metrics
+            .response
+            .as_ref()
+            .expect("second response metrics");
+        assert_eq!(second_response.tokens.total, Some(202));
+        assert_eq!(second_response.tokens.input, Some(150));
+        assert_eq!(second_response.tokens.output, Some(35));
+        assert_eq!(second_response.tokens.cache_read, Some(12));
+        assert_eq!(second_response.tokens.reasoning, Some(5));
+        assert_eq!(second_response.tokens.tool, Some(7));
+        assert_eq!(second_response.duration_ms, Some(2_345));
         assert_eq!(detail.session.tokens, Some(303));
     }
 
@@ -1721,6 +2041,47 @@ mod tests {
     }
 
     #[test]
+    fn loads_gemini_native_tool_calls_with_request_level_tool_tokens() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".gemini/tmp/project/chats/gemini-tools.json");
+        write(
+            &session_path,
+            r#"{"sessionId":"gemini-tools","messages":[{"type":"gemini","model":"gemini-3.1-pro","timestamp":"2026-01-01T00:00:00Z","tokens":{"input":10,"output":2,"tool":7,"total":19},"content":"","toolCalls":[{"id":"tool-1","name":"read_file","args":{"path":"README.md"},"result":{"content":"hello"},"status":"success","timestamp":"2026-01-01T00:00:00.500Z"}]}]}"#,
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("gemini"), "gemini-tools")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|message| message.kind)
+                .collect::<Vec<_>>(),
+            [SessionMessageKind::ToolCall, SessionMessageKind::ToolResult,]
+        );
+        let response = detail.messages[0]
+            .metrics
+            .response
+            .as_ref()
+            .expect("Gemini response metrics");
+        assert_eq!(response.tokens.tool, Some(7));
+        assert_eq!(detail.messages[0].model.as_deref(), Some("gemini-3.1-pro"));
+        let tool = detail.messages[0]
+            .metrics
+            .tool
+            .as_ref()
+            .expect("Gemini tool status");
+        assert_eq!(tool.status.as_deref(), Some("success"));
+        assert!(detail.messages[0].content.contains("README.md"));
+        assert!(detail.messages[1].content.contains("hello"));
+    }
+
+    #[test]
     fn loads_pi_and_oh_my_pi_chat_messages_from_jsonl() {
         let temp = tempdir().expect("temp home");
         for (root, session_id) in [
@@ -1756,16 +2117,123 @@ mod tests {
                 detail.messages[1].model,
                 Some(format!("model-for-{session_id}"))
             );
-            assert_eq!(detail.messages[1].metrics.tokens.total, Some(789));
-            assert_eq!(detail.messages[1].metrics.tokens.input, Some(100));
-            assert_eq!(detail.messages[1].metrics.tokens.output, Some(89));
-            assert_eq!(detail.messages[1].metrics.tokens.cache_read, Some(600));
-            assert_eq!(detail.messages[1].metrics.tokens.cache_write, Some(0));
-            assert_eq!(detail.messages[1].metrics.tokens.reasoning, Some(12));
-            assert_eq!(detail.messages[1].metrics.duration_ms, Some(3_456));
+            let response = detail.messages[1]
+                .metrics
+                .response
+                .as_ref()
+                .expect("response metrics");
+            assert_eq!(response.tokens.total, Some(789));
+            assert_eq!(response.tokens.input, Some(100));
+            assert_eq!(response.tokens.output, Some(89));
+            assert_eq!(response.tokens.cache_read, Some(600));
+            assert_eq!(response.tokens.cache_write, Some(0));
+            assert_eq!(response.tokens.reasoning, Some(12));
+            assert_eq!(response.duration_ms, Some(3_456));
             assert_eq!(detail.session.tokens, Some(789));
             assert_eq!(detail.session.cost_usd, Some(0.125));
         }
+    }
+
+    #[test]
+    fn loads_native_response_error_details_and_retry_count() {
+        let temp = tempdir().expect("temp home");
+        write(
+            &temp
+                .path()
+                .join(".omp/agent/sessions/omp-response-error.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"id\":\"omp-response-error\",\"cwd\":\"/work\"}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"model\":\"error-model\",\"stopReason\":\"error\",\"retryCount\":2,\"errorId\":\"rate_limit\",\"errorMessage\":\"retry budget exhausted\",\"usage\":{\"totalTokens\":12},\"content\":\"partial answer\"}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("omp"), "omp-response-error")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+        let response = detail.messages[0]
+            .metrics
+            .response
+            .as_ref()
+            .expect("response metrics");
+
+        assert_eq!(response.finish_reason.as_deref(), Some("error"));
+        assert_eq!(response.retry_count, Some(2));
+        let error = response.error.as_ref().expect("error details");
+        assert_eq!(error.code.as_deref(), Some("rate_limit"));
+        assert_eq!(error.message, "retry budget exhausted");
+    }
+
+    #[test]
+    fn correlates_pi_family_tool_status_and_duration_by_native_call_id() {
+        let temp = tempdir().expect("temp home");
+        write(
+            &temp
+                .path()
+                .join(".omp/agent/sessions/omp-tool-metrics.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"id\":\"omp-tool-metrics\",\"cwd\":\"/work\"}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call-1\",\"name\":\"bash\",\"arguments\":{\"command\":\"true\"}}]}}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"timestamp\":\"2026-01-01T00:00:00.450Z\",\"toolCallId\":\"call-1\",\"toolName\":\"bash\",\"isError\":false,\"details\":{\"wallTimeMs\":400},\"content\":\"done\"}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("omp"), "omp-tool-metrics")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+
+        assert_eq!(detail.messages[0].kind, SessionMessageKind::ToolCall);
+        assert_eq!(detail.messages[1].kind, SessionMessageKind::ToolResult);
+        let tool = detail.messages[0]
+            .metrics
+            .tool
+            .as_ref()
+            .expect("correlated tool metrics");
+        assert_eq!(tool.status.as_deref(), Some("completed"));
+        assert_eq!(tool.duration_ms, Some(400));
+    }
+
+    #[test]
+    fn correlates_claude_tool_errors_and_duration_by_native_call_id() {
+        let temp = tempdir().expect("temp home");
+        write(
+            &temp
+                .path()
+                .join(".claude/projects/project/claude-tool-metrics.jsonl"),
+            concat!(
+                "{\"type\":\"assistant\",\"sessionId\":\"claude-tool-metrics\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet\",\"stop_reason\":\"tool_use\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1},\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu-1\",\"name\":\"read\",\"input\":{\"path\":\"missing\"}}]}}\n",
+                "{\"type\":\"user\",\"sessionId\":\"claude-tool-metrics\",\"timestamp\":\"2026-01-01T00:00:00.750Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu-1\",\"is_error\":true,\"content\":\"file not found\"}]}}\n"
+            ),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("claude"), "claude-tool-metrics")
+            .expect("fixture session");
+
+        let detail = catalog.detail(session).expect("load complete detail");
+        let tool = detail.messages[0]
+            .metrics
+            .tool
+            .as_ref()
+            .expect("correlated tool metrics");
+
+        assert_eq!(tool.status.as_deref(), Some("error"));
+        assert_eq!(tool.duration_ms, Some(750));
+        assert_eq!(
+            tool.error.as_ref().map(|error| error.message.as_str()),
+            Some("file not found")
+        );
+        assert_eq!(detail.messages[0].model.as_deref(), Some("claude-sonnet"));
+        let response = detail.messages[0]
+            .metrics
+            .response
+            .as_ref()
+            .expect("tool-only model response metrics");
+        assert_eq!(response.finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(response.tokens.total, Some(11));
     }
 
     #[test]
@@ -1778,11 +2246,11 @@ mod tests {
         );
         write(
             &storage.join("message/opencode-detail/message-2.json"),
-            r#"{"id":"message-2","role":"assistant","modelID":"big-pickle","time":{"created":3000,"completed":6450},"tokens":{"input":100,"output":20,"reasoning":10,"cache":{"read":5,"write":2}},"cost":0.42}"#,
+            r#"{"id":"message-2","role":"assistant","modelID":"big-pickle","finish":"stop","time":{"created":3000,"completed":6450},"tokens":{"input":100,"output":20,"reasoning":10,"cache":{"read":5,"write":2}},"cost":0.42}"#,
         );
         write(
             &storage.join("part/message-2/part-2.json"),
-            r#"{"type":"text","text":"second answer"}"#,
+            r#"{"type":"text","time":{"start":3400,"end":6400},"text":"second answer"}"#,
         );
         write(
             &storage.join("message/opencode-detail/message-1.json"),
@@ -1794,7 +2262,7 @@ mod tests {
         );
         write(
             &storage.join("part/message-1/part-tool.json"),
-            r#"{"type":"tool","tool":"read","state":{"input":{"path":"README.md"},"output":"file contents"}}"#,
+            r#"{"type":"tool","tool":"read","state":{"status":"completed","time":{"start":100,"end":240},"input":{"path":"README.md"},"output":"file contents"}}"#,
         );
         write(
             &storage.join("part/message-1/part-skill.json"),
@@ -1814,18 +2282,33 @@ mod tests {
         assert!(detail.messages[1].content.contains("frontend-design"));
         assert_eq!(detail.messages[2].kind, SessionMessageKind::ToolCall);
         assert!(detail.messages[2].content.contains("README.md"));
+        let tool = detail.messages[2]
+            .metrics
+            .tool
+            .as_ref()
+            .expect("tool metrics");
+        assert_eq!(tool.status.as_deref(), Some("completed"));
+        assert_eq!(tool.duration_ms, Some(140));
         assert_eq!(detail.messages[3].kind, SessionMessageKind::ToolResult);
         assert!(detail.messages[3].content.contains("file contents"));
         assert_eq!(detail.messages[4].kind, SessionMessageKind::Assistant);
         assert_eq!(detail.messages[4].content, "second answer");
         assert_eq!(detail.messages[4].model.as_deref(), Some("big-pickle"));
-        assert_eq!(detail.messages[4].metrics.tokens.total, Some(137));
-        assert_eq!(detail.messages[4].metrics.tokens.input, Some(100));
-        assert_eq!(detail.messages[4].metrics.tokens.output, Some(20));
-        assert_eq!(detail.messages[4].metrics.tokens.cache_read, Some(5));
-        assert_eq!(detail.messages[4].metrics.tokens.cache_write, Some(2));
-        assert_eq!(detail.messages[4].metrics.tokens.reasoning, Some(10));
-        assert_eq!(detail.messages[4].metrics.duration_ms, Some(3_450));
+        let response = detail.messages[4]
+            .metrics
+            .response
+            .as_ref()
+            .expect("native response metrics");
+        assert_eq!(response.tokens.total, Some(137));
+        assert_eq!(response.tokens.input, Some(100));
+        assert_eq!(response.tokens.output, Some(20));
+        assert_eq!(response.tokens.cache_read, Some(5));
+        assert_eq!(response.tokens.cache_write, Some(2));
+        assert_eq!(response.tokens.reasoning, Some(10));
+        assert_eq!(response.duration_ms, Some(3_450));
+        assert_eq!(response.time_to_first_token_ms, Some(400));
+        assert_eq!(response.cost_usd, Some(0.42));
+        assert_eq!(response.finish_reason.as_deref(), Some("stop"));
         assert_eq!(detail.session.tokens, Some(137));
         assert_eq!(detail.session.cost_usd, Some(0.42));
     }

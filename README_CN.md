@@ -176,29 +176,44 @@ mena stop claude:43120 --force
 
 每种消息的标题和正文颜色都可以独立覆盖，参见[配置](#配置)。
 
-### 模型、耗时与 Token
+### 响应、模型与 Token 指标
 
-如果 Provider 持久化了模型 ID，它会显示在对应的 Assistant 消息上。已记录的
-响应耗时和请求 Token 会紧随其后：
+如果 Provider 持久化了模型 ID，它会显示在生成 Assistant 文本或 Tool Call 的
+对应响应上。原生记录中存在准确的耗时、总 Token 和成本时，也会紧随其后：
 
 ~~~text
-[2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens
-Tokens: input 50,000 · output 10,000 · cache read 7,000 · cache write 500 · reasoning 390
+[2026-07-30T13:42:04.795Z] ASSISTANT · gpt-5.6 · 12.3s · 67,890 tokens · $0.1250
+Tokens: input 50,000 · output 10,000 · cache read 7,000 · cache write 500 (5m 400 · 1h 100) · reasoning 390 · tool 1,000
+Response: status completed · stop reason stop · TTFT 450ms · retries 1
 ~~~
 
-第二行会展示该 Provider 原生记录中实际存在的输入、输出、缓存读取、缓存写入和
-推理 Token；缺失字段直接省略，不会猜测。某些 Provider 会把缓存 Token 同时计入
-输入 Token，因此原生记录存在明确总数时，mena 会原样保留总数而不会重新计算。
-Codex 可以提供已完成 Turn 的耗时和最后一次请求用量；OpenCode 与 Pi 系列记录通常
-同时保存这两项指标；Claude Code 和 Gemini 则展示其原生 Session 中实际存在的
-字段。Session 总 Token 和成本同样只来自 Provider 自己的持久化记录，mena 绝不会
-根据公开模型价格进行估算。
+Token 行只展示 Provider 原生记录中实际存在的字段，包括 Claude 的 5 分钟/1 小时
+缓存创建明细，以及 Gemini 在可用时提供的请求级 Tool Token。缺失字段直接省略，
+不会猜测。某些 Provider 会把缓存 Token 同时计入输入 Token，因此只要原生记录
+提供了明确总数，mena 就会原样保留而不会重新计算。
+
+Response 行会根据持久化的 stop reason 归一化出易读状态，并在原生数据存在时展示
+TTFT、重试次数以及错误代码/消息。单次响应成本也只在 Provider 准确持久化该值时
+展示；mena 绝不会根据公开模型价格估算。Conversation 上方还会按模型汇总响应数、
+总耗时、平均 TTFT、Token、成本、重试和错误；缺失样本不会被当作零。
+
+Tool Call 会展示原生持久化的状态、耗时、退出码和错误详情：
+
+~~~text
+[2026-07-30T13:42:05.100Z] TOOL CALL · completed · 140ms · exit 0
+Token accounting: provider response totals only; no per-call token value is persisted.
+~~~
+
+目前各 Provider 的 Session 存储都没有提供可信的“每一次工具执行 Token 数”。因此
+mena 会把 Gemini 的精确 Tool Token 保留在模型响应上，绝不会把它拆分或推算到
+各个 Tool Call。
 
 ### Markdown 导出
 
 在详情视图中按 <code>e</code>。导出文件包含完整元数据、按顺序排列的消息、
-模型 ID、准确的单次响应指标以及结构化 Tool 内容。Assistant Token 明细遵循与
-详情弹窗相同的可用字段规则。
+按模型汇总、模型 ID、准确的响应与 Tool 指标，以及结构化 Tool 内容。Token 明细
+遵循与详情弹窗相同的可用字段规则，因此按 <code>c</code> 复制和按
+<code>e</code> 导出的指标内容保持一致。
 
 - 目标目录：启动 mena 时所在的当前目录。
 - 文件名：
@@ -226,6 +241,20 @@ Codex 可以提供已完成 Turn 的耗时和最后一次请求用量；OpenCode
 
 Cursor Agent 和自定义识别规则没有通用且受支持的本地 Session 目录。对于归档
 Session 操作，mena 会明确返回“不支持”错误，而不是猜测存储路径。
+
+各 Provider 可持久化的详情字段有所不同：
+
+| Provider | 精确响应详情 | 精确 Tool 详情 |
+|---|---|---|
+| Claude Code | 输入/输出、缓存读写与 5m/1h 缓存创建、stop reason | 结果状态/错误，以及由持久化时间戳得到的耗时 |
+| Codex | 最后一次请求 Token、Turn 耗时、TTFT、完成/中断状态 | End 事件中的状态、耗时及可用错误 |
+| Gemini CLI | 输入/输出/缓存/思考/Tool Token，以及可用的耗时和 stop/error 字段 | 调用状态和结果；没有单次调用 Token |
+| OpenCode | Token、成本、耗时、TTFT、finish reason、重试/错误字段 | 状态、耗时、退出码和错误 |
+| Pi | Token、成本以及可用的 stop/error 字段 | 结果状态/错误，以及可用的持久化耗时 |
+| Oh My Pi | Token、成本、耗时、TTFT、stop/retry/error 字段 | 可用的状态、耗时、退出码和错误 |
+
+上述每项都遵循“原生记录存在才展示”：某个 Session 没有对应字段时，mena 会直接
+省略，不会补零或推断。
 
 ## 命令参考
 
