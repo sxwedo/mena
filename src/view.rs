@@ -4,13 +4,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::process::LiveAgent;
 use crate::session::{
-    AgentSession, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage, ToolMetrics,
+    AgentSession, AssociationSummary, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage,
+    ToolMetrics,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReport {
     pub agent: LiveAgent,
     pub session: Option<AgentSession>,
+    pub association: AssociationSummary,
 }
 
 impl AgentReport {
@@ -32,7 +34,7 @@ pub fn render_process_table(
         return "No running developer agents found.\n".to_owned();
     }
 
-    let mut headers = vec!["ID", "AGENT", "PROJECT", "STATUS", "DURATION"];
+    let mut headers = vec!["ID", "AGENT", "PROJECT", "STATUS", "SESSION", "DURATION"];
     if resources {
         headers.extend(["CPU", "MEMORY"]);
     }
@@ -50,6 +52,7 @@ pub fn render_process_table(
                     .project()
                     .map_or_else(|| "-".to_owned(), project_label),
                 agent.process.status.clone(),
+                report.association.status.label().to_owned(),
                 format_duration(agent.process.run_time),
             ];
             if let Some(selected) = selected {

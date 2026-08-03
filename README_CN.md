@@ -138,14 +138,29 @@ mena resume --list        # 非交互式候选列表
 Cursor Agent 和自定义识别规则没有通用且受支持的本地 Session 目录。`mena` 会
 返回明确的“不支持”错误，而不是猜测存储路径。
 
+### 运行进程与 Session 的关联
+
+只有当前原生证据能够唯一指向一个逻辑 Session 时，`mena` 才展示运行进程的
+Session 数据。Claude Code 提供包含 PID、进程启动时间、项目和 Session ID 的原生
+运行时记录；Pi 和 Oh My Pi 仅在进程确实打开且只打开一个已收录的原生对话文件时
+精确关联（Linux 使用 `/proc`，macOS 使用 `/usr/sbin/lsof`）。
+
+Provider 的恢复或 Session 参数只能证明进程启动时选择了哪个 Session；Agent 可能
+在不重启进程的情况下切换 Session，因此该证据标记为 `launch`，而不是 `exact`。
+项目相同、时间接近和“最近更新”都不会被用来宣称精确关联。状态为 `ambiguous`、
+`unconfirmed` 或 `unsupported` 时，不输出 Session ID、Token 或成本。
+
 ## 数据与安全
 
 - 对话数据始终保留在 Provider 的原生本地存储中。
 - Token、成本、耗时、TTFT、重试和错误只在原生记录存在时展示，缺失值绝不估算。
+- 只有 `exact` 原生关联才会把指标归属到运行进程；`ps --json` 同时输出
+  `session_match` 和 `session_match_evidence`。
 - 恢复命令使用“程序 + argv”执行，绝不调用 Shell。
 - 停止进程前重新验证 PID、启动时间、可执行文件和 Provider。
 - 删除操作拒绝运行中的 Session、歧义 Target、路径穿越和 Provider 根目录之外的
-  符号链接逃逸。
+  符号链接逃逸；只要某个运行进程无法精确关联，该 Provider 的全部 Session 都按
+  fail closed 方式禁止删除。
 - 详情导出采用原子写入、绝不覆盖已有文件，并在 Unix 下使用 `0600` 权限。
 
 ## 自动化
@@ -153,12 +168,12 @@ Cursor Agent 和自定义识别规则没有通用且受支持的本地 Session �
 `ps`、`inspect` 和 `sessions` 提供稳定的 JSON 输出：
 
 ```sh
-mena ps --json | jq '.[] | {id, project, tokens, cost_usd}'
+mena ps --json | jq '.[] | {id, project, session_match, session_match_evidence, tokens, cost_usd}'
 mena ss --json | jq '.[] | select(.agent == "codex") | .target'
 ```
 
-人类可读输出中的短横线表示未关联原生 Session；`n/a` 表示 Session 存在，但没有
-准确持久化的成本。
+人类可读输出中的短横线表示没有精确关联原生 Session；`n/a` 表示已精确关联，但
+Session 中没有持久化成本。
 
 ## 配置
 

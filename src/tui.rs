@@ -651,7 +651,7 @@ impl SessionsApp {
         };
         if self.active_targets.contains(&session.target()) {
             self.status = Some(StatusMessage::error(
-                "Cannot delete a session that is attached to a running agent".to_owned(),
+                "Cannot delete a session that may be attached to a running agent".to_owned(),
             ));
         } else {
             self.mode = BrowserMode::ConfirmDelete;
@@ -2847,6 +2847,10 @@ mod tests {
                 tokens: Some(125_500_000),
                 cost_usd: None,
             }),
+            association: crate::session::AssociationSummary {
+                status: crate::session::AssociationStatus::Exact,
+                evidence: Some(crate::session::AssociationEvidence::NativeRuntime),
+            },
         }
     }
 

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
@@ -87,6 +89,53 @@ pub struct ProcessSnapshot {
 pub struct LiveAgent {
     pub kind: AgentKind,
     pub process: ProcessSnapshot,
+}
+
+/// Returns absolute files currently held open by a process when the host
+/// exposes that information. Missing permissions or a process exit produce no
+/// evidence; callers must never turn absence into a guessed association.
+#[must_use]
+pub fn open_file_paths(pid: u32) -> Vec<PathBuf> {
+    open_file_paths_platform(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn open_file_paths_platform(pid: u32) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+        .filter(|path| path.is_absolute())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn open_file_paths_platform(pid: u32) -> Vec<PathBuf> {
+    const MAX_LSOF_OUTPUT_BYTES: usize = 16 * 1_024 * 1_024;
+    let Ok(output) = Command::new("/usr/sbin/lsof")
+        .args(["-Fn", "-p", &pid.to_string()])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() || output.stdout.len() > MAX_LSOF_OUTPUT_BYTES {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.strip_prefix(b"n"))
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const fn open_file_paths_platform(_pid: u32) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[must_use]

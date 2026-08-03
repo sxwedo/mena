@@ -146,15 +146,34 @@ Cursor Agent and custom recognizers do not have a generic supported local
 session catalog. `mena` returns an explicit unsupported error instead of
 guessing a storage path.
 
+### Live session association
+
+`mena` reports live-session data only when current native evidence identifies
+one logical session. Claude Code supplies PID, process-start, project, and
+session identity metadata. Pi and Oh My Pi are matched only while the live
+process holds exactly one cataloged native transcript open (via `/proc` on
+Linux or `/usr/sbin/lsof` on macOS).
+
+A provider resume/session argument proves only which session launched the
+process; because an agent may switch sessions without restarting, it is shown
+as `launch`, not `exact`. Project equality, timestamps, and “most recently
+updated” are never used to claim a live association. `ambiguous`,
+`unconfirmed`, and `unsupported` processes therefore expose no session ID,
+tokens, or cost.
+
 ## Data and safety
 
 - Conversation data stays in the provider's native local store.
 - Tokens, cost, duration, TTFT, retries, and errors appear only when the native
   record contains them; missing values are never estimated.
+- Live process metrics are attributed to a session only for an `exact` native
+  association; `ps --json` exposes `session_match` and
+  `session_match_evidence`.
 - Resume commands use program-plus-argv execution and never invoke a shell.
 - Stop revalidates PID, start time, executable, and provider before signaling.
 - Delete rejects live sessions, ambiguous targets, path traversal, and symlink
-  escapes outside provider-owned roots.
+  escapes outside provider-owned roots. If any live process is not exactly
+  associated, deletion fails closed for that provider's complete catalog.
 - Detail export is atomic, never overwrites an existing file, and uses mode
   `0600` on Unix.
 
@@ -163,12 +182,12 @@ guessing a storage path.
 `ps`, `inspect`, and `sessions` expose stable JSON output:
 
 ```sh
-mena ps --json | jq '.[] | {id, project, tokens, cost_usd}'
+mena ps --json | jq '.[] | {id, project, session_match, session_match_evidence, tokens, cost_usd}'
 mena ss --json | jq '.[] | select(.agent == "codex") | .target'
 ```
 
-A dash in human output means no native session was associated. `n/a` means a
-session exists but does not contain an exact persisted cost.
+A dash in human output means no exact native session was associated. `n/a`
+means an exact session exists but does not contain a persisted cost.
 
 ## Configuration
 

@@ -11,10 +11,12 @@ use serde_json::Value;
 
 use super::super::{
     AgentSession, content_preview, file_stem, files_with_extension, normalize_preview,
-    read_json_file, remove_jsonl_records, session, string_at, validate_storage_identifier,
-    visit_bounded_lines_limit,
+    paths_equivalent, read_json_file, remove_jsonl_records, session, string_at,
+    validate_storage_identifier, visit_bounded_lines_limit,
 };
-use crate::AgentKind;
+use crate::{AgentKind, ProcessSnapshot};
+
+const PROCESS_START_TOLERANCE_SECONDS: u64 = 5;
 
 pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
     let indexed_titles = load_codex_titles(home);
@@ -179,6 +181,41 @@ pub(super) fn scan_oh_my_pi(home: &Path, sessions: &mut Vec<AgentSession>) -> Re
         &AgentKind::OhMyPi,
         sessions,
     )
+}
+
+pub(super) fn runtime_claude_session_ids(
+    home: &Path,
+    process: &ProcessSnapshot,
+) -> Result<Vec<String>> {
+    let path = home
+        .join(".claude/sessions")
+        .join(format!("{}.json", process.pid));
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let Some(record) = read_json_file(&path)? else {
+        return Ok(Vec::new());
+    };
+    if record.get("pid").and_then(Value::as_u64) != Some(u64::from(process.pid)) {
+        return Ok(Vec::new());
+    }
+    let Some(started_at_ms) = record.get("startedAt").and_then(Value::as_u64) else {
+        return Ok(Vec::new());
+    };
+    if (started_at_ms / 1_000).abs_diff(process.started_at) > PROCESS_START_TOLERANCE_SECONDS {
+        return Ok(Vec::new());
+    }
+    let Some(runtime_cwd) = string_at(&record, "/cwd").map(PathBuf::from) else {
+        return Ok(Vec::new());
+    };
+    if !process
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| paths_equivalent(cwd, &runtime_cwd))
+    {
+        return Ok(Vec::new());
+    }
+    Ok(string_at(&record, "/sessionId").into_iter().collect())
 }
 
 fn scan_pi_sessions(root: &Path, kind: &AgentKind, sessions: &mut Vec<AgentSession>) -> Result<()> {

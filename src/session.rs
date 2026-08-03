@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::AgentKind;
+use crate::process::{AgentKind, LiveAgent};
 
 mod adapter;
 
@@ -33,6 +33,116 @@ pub struct AgentSession {
 impl AgentSession {
     pub(crate) fn target(&self) -> String {
         format!("{}:{}", self.kind.slug(), self.id)
+    }
+}
+
+/// How confidently a live process is associated with one persisted session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssociationStatus {
+    /// Current native runtime evidence selected one logical session.
+    Exact,
+    /// The argv identifies the launch session, but the provider can switch sessions in-process.
+    Launch,
+    /// Native evidence selected more than one logical session.
+    Ambiguous,
+    /// The provider has a catalog, but no native process-to-session identity was found.
+    Unconfirmed,
+    /// The provider has no supported local session catalog.
+    Unsupported,
+}
+
+impl AssociationStatus {
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Launch => "launch",
+            Self::Ambiguous => "ambiguous",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Native evidence used to establish an exact process-to-session association.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssociationEvidence {
+    /// Provider-owned runtime metadata containing the live PID and session identity.
+    NativeRuntime,
+    /// The live process has the provider-owned transcript file open.
+    OpenSessionFile,
+    /// A provider-native resume/session selector in the process argv.
+    ResumeArgument,
+}
+
+impl AssociationEvidence {
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::NativeRuntime => "native_runtime",
+            Self::OpenSessionFile => "open_session_file",
+            Self::ResumeArgument => "resume_argument",
+        }
+    }
+}
+
+/// Stable, owned association metadata suitable for reports and JSON output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssociationSummary {
+    pub(crate) status: AssociationStatus,
+    pub(crate) evidence: Option<AssociationEvidence>,
+}
+
+impl AssociationSummary {
+    const fn unsupported() -> Self {
+        Self {
+            status: AssociationStatus::Unsupported,
+            evidence: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessSessionAssociation<'a> {
+    session: Option<&'a AgentSession>,
+    summary: AssociationSummary,
+}
+
+impl<'a> ProcessSessionAssociation<'a> {
+    #[must_use]
+    pub(crate) const fn session(self) -> Option<&'a AgentSession> {
+        self.session
+    }
+
+    #[must_use]
+    pub(crate) const fn summary(self) -> AssociationSummary {
+        self.summary
+    }
+}
+
+/// Batch association result. Matching is global so deletion protection and
+/// process reporting consume the same evidence and cannot drift apart.
+#[derive(Debug)]
+pub struct SessionAssociations<'a> {
+    by_pid: BTreeMap<u32, ProcessSessionAssociation<'a>>,
+    protected_targets: BTreeSet<String>,
+}
+
+impl<'a> SessionAssociations<'a> {
+    #[must_use]
+    pub(crate) fn for_process(&self, pid: u32) -> ProcessSessionAssociation<'a> {
+        self.by_pid
+            .get(&pid)
+            .copied()
+            .unwrap_or(ProcessSessionAssociation {
+                session: None,
+                summary: AssociationSummary::unsupported(),
+            })
+    }
+
+    #[must_use]
+    pub(crate) const fn protected_targets(&self) -> &BTreeSet<String> {
+        &self.protected_targets
     }
 }
 
@@ -363,27 +473,112 @@ impl SessionCatalog {
         Ok(first)
     }
 
-    pub fn latest_for_process(
-        &self,
-        kind: &AgentKind,
-        project: Option<&Path>,
-        process_started_at: u64,
-    ) -> Option<&AgentSession> {
-        if let Some(project) = project.filter(|project| !is_root(project)) {
-            return self
-                .sessions
-                .iter()
-                .filter(|session| {
-                    &session.kind == kind && session.project.as_deref() == Some(project)
-                })
-                .max_by_key(|session| session.updated_at);
+    pub(crate) fn associate_processes<'a>(
+        &'a self,
+        agents: &[LiveAgent],
+    ) -> Result<SessionAssociations<'a>> {
+        let mut by_pid = BTreeMap::new();
+        let mut protected_targets = BTreeSet::new();
+
+        for agent in agents {
+            let Some(adapter) = adapter::ProviderAdapter::from_kind(&agent.kind) else {
+                by_pid.insert(
+                    agent.process.pid,
+                    ProcessSessionAssociation {
+                        session: None,
+                        summary: AssociationSummary::unsupported(),
+                    },
+                );
+                continue;
+            };
+            if !adapter.has_session_catalog() {
+                by_pid.insert(
+                    agent.process.pid,
+                    ProcessSessionAssociation {
+                        session: None,
+                        summary: AssociationSummary::unsupported(),
+                    },
+                );
+                continue;
+            }
+
+            let evidence = adapter.process_evidence(&self.home, &agent.process)?;
+            let mut candidates = BTreeMap::<String, (&AgentSession, AssociationEvidence)>::new();
+            for item in evidence {
+                for session in self.sessions.iter().filter(|session| {
+                    session.kind == agent.kind
+                        && item.matches(session)
+                        && association_project_consistent(session, agent.process.cwd.as_deref())
+                }) {
+                    let target = session.target();
+                    candidates
+                        .entry(target)
+                        .and_modify(|(selected, source)| {
+                            if session.updated_at > selected.updated_at {
+                                *selected = session;
+                            }
+                            *source = item.source;
+                        })
+                        .or_insert((session, item.source));
+                }
+            }
+
+            let association = match candidates.len() {
+                1 => {
+                    let (target, (session, source)) =
+                        candidates.into_iter().next().expect("one candidate");
+                    if source == AssociationEvidence::ResumeArgument {
+                        protect_provider_sessions(
+                            &self.sessions,
+                            &agent.kind,
+                            &mut protected_targets,
+                        );
+                        ProcessSessionAssociation {
+                            session: None,
+                            summary: AssociationSummary {
+                                status: AssociationStatus::Launch,
+                                evidence: Some(source),
+                            },
+                        }
+                    } else {
+                        protected_targets.insert(target);
+                        ProcessSessionAssociation {
+                            session: Some(session),
+                            summary: AssociationSummary {
+                                status: AssociationStatus::Exact,
+                                evidence: Some(source),
+                            },
+                        }
+                    }
+                }
+                0 => {
+                    protect_provider_sessions(&self.sessions, &agent.kind, &mut protected_targets);
+                    ProcessSessionAssociation {
+                        session: None,
+                        summary: AssociationSummary {
+                            status: AssociationStatus::Unconfirmed,
+                            evidence: None,
+                        },
+                    }
+                }
+                _ => {
+                    protect_provider_sessions(&self.sessions, &agent.kind, &mut protected_targets);
+                    ProcessSessionAssociation {
+                        session: None,
+                        summary: AssociationSummary {
+                            status: AssociationStatus::Ambiguous,
+                            evidence: None,
+                        },
+                    }
+                }
+            };
+            by_pid.insert(agent.process.pid, association);
         }
-        self.sessions
-            .iter()
-            .filter(|session| {
-                &session.kind == kind && session.updated_at >= process_started_at.saturating_sub(5)
-            })
-            .max_by_key(|session| session.updated_at)
+
+        Ok(SessionAssociations {
+            by_pid,
+            protected_targets,
+        })
     }
 
     pub fn with_usage(&self, session: &AgentSession) -> Result<AgentSession> {
@@ -427,6 +622,39 @@ impl SessionCatalog {
             .with_context(|| format!("{} sessions do not support local deletion", selected.kind))?;
         adapter.delete(&self.home, selected, files)
     }
+}
+
+fn protect_provider_sessions(
+    sessions: &[AgentSession],
+    kind: &AgentKind,
+    protected_targets: &mut BTreeSet<String>,
+) {
+    protected_targets.extend(
+        sessions
+            .iter()
+            .filter(|session| &session.kind == kind)
+            .map(AgentSession::target),
+    );
+}
+
+fn association_project_consistent(session: &AgentSession, process_cwd: Option<&Path>) -> bool {
+    match (
+        session.project.as_deref().filter(|path| !is_root(path)),
+        process_cwd.filter(|path| !is_root(path)),
+    ) {
+        (Some(session_project), Some(process_project)) => {
+            paths_equivalent(session_project, process_project)
+        }
+        _ => true,
+    }
+}
+
+pub fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    left == right
+        || fs::canonicalize(left)
+            .ok()
+            .zip(fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
 }
 
 pub fn native_resume_command(kind: &AgentKind, id: &str) -> Result<NativeResumeCommand> {
@@ -817,14 +1045,15 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use tempfile::tempdir;
 
     use super::{
-        AgentSession, ResponseMetrics, SessionCatalog, SessionDetail, SessionMessage,
-        SessionMessageKind, SessionMessageMetrics, TokenUsage,
+        AgentSession, AssociationEvidence, AssociationStatus, ResponseMetrics, SessionCatalog,
+        SessionDetail, SessionMessage, SessionMessageKind, SessionMessageMetrics, TokenUsage,
     };
-    use crate::AgentKind;
+    use crate::process::{AgentKind, LiveAgent, ProcessSnapshot};
 
     #[test]
     fn aggregates_only_exact_response_metrics_by_model() {
@@ -1992,39 +2221,213 @@ mod tests {
     }
 
     #[test]
-    fn matches_a_recent_session_when_a_gui_agent_reports_the_root_directory() {
+    fn records_a_resume_selector_without_claiming_it_is_still_current() {
         let temp = tempdir().expect("temp home");
-        let session_path = temp.path().join(".codex/sessions/2026/01/02/codex.jsonl");
         write(
-            &session_path,
+            &temp.path().join(".codex/sessions/2026/01/02/codex.jsonl"),
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-id\",\"cwd\":\"/work/project\"}}\n",
         );
+        write(
+            &temp.path().join(".codex/sessions/2026/01/02/other.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-other\",\"cwd\":\"/work/project\"}}\n",
+        );
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
-        let updated_at = catalog.sessions()[0].updated_at;
+        let agent = live_agent(
+            AgentKind::Codex,
+            42,
+            &["codex", "resume", "codex-id"],
+            "/work/project",
+            100,
+        );
 
-        let matched = catalog
-            .latest_for_process(
-                &AgentKind::Codex,
-                Some(std::path::Path::new("/")),
-                updated_at,
-            )
-            .expect("recent Codex session");
+        let associations = catalog
+            .associate_processes(std::slice::from_ref(&agent))
+            .expect("associate process");
+        let association = associations.for_process(42);
 
-        assert_eq!(matched.id, "codex-id");
+        assert!(association.session().is_none());
+        assert_eq!(association.summary().status, AssociationStatus::Launch);
         assert_eq!(
-            matched.project.as_deref(),
-            Some(std::path::Path::new("/work/project"))
+            association.summary().evidence,
+            Some(AssociationEvidence::ResumeArgument)
         );
-        assert!(
-            catalog
-                .latest_for_process(
-                    &AgentKind::Codex,
-                    Some(std::path::Path::new("/work/other-project")),
-                    updated_at,
-                )
-                .is_none(),
-            "a meaningful cwd must never fall back to another project's session"
+        assert_eq!(
+            associations.protected_targets(),
+            &std::collections::BTreeSet::from([
+                "codex:codex-id".to_owned(),
+                "codex:codex-other".to_owned(),
+            ])
         );
+    }
+
+    #[test]
+    fn never_infers_a_live_session_from_recency_or_shared_project() {
+        let temp = tempdir().expect("temp home");
+        for id in ["older", "newer"] {
+            write(
+                &temp
+                    .path()
+                    .join(format!(".codex/sessions/2026/01/02/{id}.jsonl")),
+                &format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/work/project\"}}}}\n"
+                ),
+            );
+        }
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let agent = live_agent(
+            AgentKind::Codex,
+            42,
+            &["codex", "app-server"],
+            "/work/project",
+            1,
+        );
+
+        let associations = catalog
+            .associate_processes(std::slice::from_ref(&agent))
+            .expect("associate process");
+        let association = associations.for_process(42);
+
+        assert!(association.session().is_none());
+        assert_eq!(association.summary().status, AssociationStatus::Unconfirmed);
+        assert_eq!(
+            associations.protected_targets(),
+            &std::collections::BTreeSet::from(
+                ["codex:newer".to_owned(), "codex:older".to_owned(),]
+            )
+        );
+    }
+
+    #[test]
+    fn claude_runtime_identity_requires_pid_start_time_and_project() {
+        let temp = tempdir().expect("temp home");
+        write(
+            &temp
+                .path()
+                .join(".claude/projects/-work-project/claude-id.jsonl"),
+            "{\"sessionId\":\"claude-id\",\"cwd\":\"/work/project\"}\n",
+        );
+        write(
+            &temp
+                .path()
+                .join(".claude/projects/-work-project/claude-other.jsonl"),
+            "{\"sessionId\":\"claude-other\",\"cwd\":\"/work/project\"}\n",
+        );
+        write(
+            &temp.path().join(".claude/sessions/42.json"),
+            "{\"pid\":42,\"sessionId\":\"claude-id\",\"cwd\":\"/work/project\",\"startedAt\":101000}\n",
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let agent = live_agent(AgentKind::ClaudeCode, 42, &["claude"], "/work/project", 100);
+
+        let associations = catalog
+            .associate_processes(std::slice::from_ref(&agent))
+            .expect("associate process");
+        let association = associations.for_process(42);
+
+        assert_eq!(
+            association.session().map(|session| session.id.as_str()),
+            Some("claude-id")
+        );
+        assert_eq!(association.summary().status, AssociationStatus::Exact);
+        assert_eq!(
+            association.summary().evidence,
+            Some(AssociationEvidence::NativeRuntime)
+        );
+        assert_eq!(
+            associations.protected_targets(),
+            &std::collections::BTreeSet::from(["claude:claude-id".to_owned()])
+        );
+
+        let stale_agent = LiveAgent {
+            process: ProcessSnapshot {
+                started_at: 200,
+                ..agent.process
+            },
+            ..agent
+        };
+        let associations = catalog
+            .associate_processes(std::slice::from_ref(&stale_agent))
+            .expect("reject stale runtime identity");
+        assert_eq!(
+            associations.for_process(42).summary().status,
+            AssociationStatus::Unconfirmed
+        );
+        assert!(associations.for_process(42).session().is_none());
+        assert_eq!(associations.protected_targets().len(), 2);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pi_family_runtime_identity_uses_the_open_native_transcript() {
+        let temp = tempdir().expect("temp home");
+        let session_path = temp
+            .path()
+            .join(".omp/agent/sessions/project/session.jsonl");
+        write(
+            &session_path,
+            "{\"type\":\"session\",\"id\":\"omp-id\",\"cwd\":\"/work/project\"}\n",
+        );
+        let _open_transcript = fs::File::open(&session_path).expect("hold transcript open");
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let agent = live_agent(
+            AgentKind::OhMyPi,
+            std::process::id(),
+            &["omp"],
+            "/work/project",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("current time")
+                .as_secs(),
+        );
+
+        let associations = catalog
+            .associate_processes(std::slice::from_ref(&agent))
+            .expect("associate process");
+        let association = associations.for_process(std::process::id());
+
+        assert_eq!(
+            association.session().map(|session| session.id.as_str()),
+            Some("omp-id")
+        );
+        assert_eq!(association.summary().status, AssociationStatus::Exact);
+        assert_eq!(
+            association.summary().evidence,
+            Some(AssociationEvidence::OpenSessionFile)
+        );
+    }
+
+    #[test]
+    fn conflicting_native_selectors_are_ambiguous_and_fail_closed() {
+        let temp = tempdir().expect("temp home");
+        for id in ["gemini-a", "gemini-b"] {
+            write(
+                &temp
+                    .path()
+                    .join(format!(".gemini/tmp/project/chats/{id}.json")),
+                &format!("{{\"sessionId\":\"{id}\",\"messages\":[]}}"),
+            );
+        }
+        write(
+            &temp.path().join(".gemini/tmp/project/.project_root"),
+            "/work/project\n",
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        let agent = live_agent(
+            AgentKind::GeminiCli,
+            42,
+            &["gemini", "--resume", "gemini-a", "--resume", "gemini-b"],
+            "/work/project",
+            100,
+        );
+
+        let associations = catalog
+            .associate_processes(std::slice::from_ref(&agent))
+            .expect("associate process");
+        let association = associations.for_process(42);
+
+        assert!(association.session().is_none());
+        assert_eq!(association.summary().status, AssociationStatus::Ambiguous);
+        assert_eq!(associations.protected_targets().len(), 2);
     }
 
     fn assert_session(
@@ -2050,5 +2453,29 @@ mod tests {
     fn write(path: &std::path::Path, contents: &str) {
         fs::create_dir_all(path.parent().expect("parent")).expect("create fixture directory");
         fs::write(path, contents).expect("write fixture");
+    }
+
+    fn live_agent(
+        kind: AgentKind,
+        pid: u32,
+        command: &[&str],
+        cwd: &str,
+        started_at: u64,
+    ) -> LiveAgent {
+        LiveAgent {
+            kind,
+            process: ProcessSnapshot {
+                pid,
+                parent_pid: Some(1),
+                executable: PathBuf::from(command[0]),
+                command: command.iter().map(ToString::to_string).collect(),
+                cwd: Some(PathBuf::from(cwd)),
+                started_at,
+                run_time: 1,
+                cpu_percent: 0.0,
+                memory_bytes: 1,
+                status: "running".to_owned(),
+            },
+        }
     }
 }

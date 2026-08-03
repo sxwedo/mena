@@ -62,14 +62,15 @@ main.rs
 - `process.rs` recognizes built-in and configured custom processes, samples
   resources, and revalidates process identity immediately before signaling.
 - `session.rs` owns the provider-neutral session model, catalog, selectors,
-  bounded I/O, and provider-independent deletion safeguards.
+  evidence-based live association, bounded I/O, and provider-independent
+  deletion safeguards.
 - `session/adapter.rs` is the single seam for built-in session providers. It
   uses closed-enum static dispatch so discovery, usage, detail, resume, and
   deletion capabilities remain exhaustive without a vtable or runtime
   registry. `adapter/storage.rs` owns native layouts and index cleanup;
   `adapter/detail.rs` normalizes provider records into the shared model.
-- `controller.rs` associates live processes with sessions, emits stable JSON or
-  text output, redacts command secrets, and resumes through native argv.
+- `controller.rs` consumes session associations, emits stable JSON or text
+  output, redacts command secrets, and resumes through native argv.
 - `tui.rs` owns the responsive top view, session picker/manager, search,
   details, and destructive-action confirmation.
 - `settings.rs` owns `~/.config/mena/config.toml`. Its optional clix importer is
@@ -83,6 +84,10 @@ main.rs
 - Never invoke a shell for resume commands. Construct program and argv
   separately; substitute only the `{session}` placeholder.
 - Never infer token cost from public prices. Report only persisted exact values.
+- Never claim a current process-to-session association from project equality,
+  recency, or timestamps alone. Only current provider-native runtime evidence is
+  exact; a resume argv is launch evidence only. Unconfirmed processes must not
+  receive session metrics, and deletion must fail closed for their provider.
 - Keep log reads bounded and redact common secret-bearing process arguments in
   default output. `--raw` is an explicit opt-in.
 - Never delete a session attached to a running process.
@@ -111,8 +116,8 @@ this section. Normal command execution reads mena configuration only.
 - Add provider session support through `session/adapter.rs`; keep all provider
   selection inside that module, native layouts in `adapter/storage.rs`, and
   transcript normalization in `adapter/detail.rs`. Extend interface-level
-  fixtures for discovery, usage, full detail, ambiguity, deletion, and root
-  containment.
+  fixtures for discovery, live-association evidence, usage, full detail,
+  ambiguity, deletion, and root containment.
 - Prefer the closed-enum adapter while built-in providers are compiled into
   mena. Do not introduce `dyn Trait`, runtime registration, or heap allocation
   merely to add another built-in provider.

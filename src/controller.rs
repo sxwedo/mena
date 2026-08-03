@@ -74,24 +74,24 @@ pub fn run_inspect(args: &TargetArgs, settings: &Settings) -> Result<()> {
         let agent = resolve_live(&live, &args.target, &settings.agent.custom)
             .with_context(|| format!("running agent not found: {}", args.target))?;
         let catalog = scan_sessions(Some(&agent.kind))?;
-        let session = catalog
-            .latest_for_process(
-                &agent.kind,
-                agent.process.cwd.as_deref(),
-                agent.process.started_at,
-            )
+        let association = catalog
+            .associate_processes(std::slice::from_ref(agent))?
+            .for_process(agent.process.pid);
+        let session = association
+            .session()
             .map(|session| catalog.with_usage(session))
             .transpose()?;
         let report = AgentReport {
             agent: agent.clone(),
             session: session.clone(),
+            association: association.summary(),
         };
         if args.json {
             let mut value = process_json(&report);
             value["session"] = session.as_ref().map_or(Value::Null, session_json);
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            print_live_details(agent, session.as_ref());
+            print_live_details(&report);
         }
         return Ok(());
     }
@@ -120,16 +120,15 @@ pub fn run_logs(args: &LogsArgs, settings: &Settings) -> Result<()> {
         let agent = resolve_live(&live, &args.target, &settings.agent.custom)
             .with_context(|| format!("running agent not found: {}", args.target))?;
         catalog = scan_sessions(Some(&agent.kind))?;
-        catalog
-            .latest_for_process(
-                &agent.kind,
-                agent.process.cwd.as_deref(),
-                agent.process.started_at,
-            )
-            .with_context(|| {
+        let association = catalog
+            .associate_processes(std::slice::from_ref(agent))?
+            .for_process(agent.process.pid);
+        association.session().with_context(|| {
                 format!(
-                    "no local {} session could be matched to {}; pass a session ID instead",
-                    agent.kind, args.target
+                    "no exact local {} session association for {} (status: {}); pass a provider:session-id target instead",
+                    agent.kind,
+                    args.target,
+                    association.summary().status.label()
                 )
             })?
     } else {
@@ -196,7 +195,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             |detail| clipboard.copy_detail(detail),
             |session| {
                 if active_session_targets(&catalog, settings)?.contains(&session.target()) {
-                    bail!("cannot delete a session that is attached to a running agent");
+                    bail!("cannot delete a session that may be attached to a running agent");
                 }
                 catalog.delete_session(session)
             },
@@ -353,18 +352,20 @@ fn scan_sessions(provider: Option<&AgentKind>) -> Result<SessionCatalog> {
 
 fn agent_reports(agents: Vec<LiveAgent>, usage_cache: &mut UsageCache) -> Result<Vec<AgentReport>> {
     let catalog = scan_sessions(None)?;
+    let associations = catalog.associate_processes(&agents)?;
     agents
         .into_iter()
         .map(|agent| {
-            let session = catalog
-                .latest_for_process(
-                    &agent.kind,
-                    agent.process.cwd.as_deref(),
-                    agent.process.started_at,
-                )
+            let association = associations.for_process(agent.process.pid);
+            let session = association
+                .session()
                 .map(|session| usage_cache.enrich(&catalog, session))
                 .transpose()?;
-            Ok(AgentReport { agent, session })
+            Ok(AgentReport {
+                agent,
+                session,
+                association: association.summary(),
+            })
         })
         .collect()
 }
@@ -374,18 +375,10 @@ fn active_session_targets(
     settings: &Settings,
 ) -> Result<BTreeSet<String>> {
     let live = discover_live_agents(&settings.agent.custom)?;
-    Ok(live
-        .iter()
-        .filter_map(|agent| {
-            catalog
-                .latest_for_process(
-                    &agent.kind,
-                    agent.process.cwd.as_deref(),
-                    agent.process.started_at,
-                )
-                .map(AgentSession::target)
-        })
-        .collect())
+    Ok(catalog
+        .associate_processes(&live)?
+        .protected_targets()
+        .clone())
 }
 
 fn resolve_live<'a>(
@@ -450,6 +443,8 @@ fn process_json(report: &AgentReport) -> Value {
         "duration_seconds": agent.process.run_time,
         "cpu_percent": agent.process.cpu_percent,
         "memory_bytes": agent.process.memory_bytes,
+        "session_match": report.association.status.label(),
+        "session_match_evidence": report.association.evidence.map(crate::session::AssociationEvidence::label),
         "session_id": report.session.as_ref().map(|session| &session.id),
         "tokens": report.session.as_ref().and_then(|session| session.tokens),
         "cost_usd": report.session.as_ref().and_then(|session| session.cost_usd),
@@ -484,7 +479,9 @@ fn session_list_json(session: &AgentSession) -> Value {
     })
 }
 
-fn print_live_details(agent: &LiveAgent, session: Option<&AgentSession>) {
+fn print_live_details(report: &AgentReport) {
+    let agent = &report.agent;
+    let session = report.session.as_ref();
     println!("ID:          {}:{}", agent.kind.slug(), agent.process.pid);
     println!("Agent:       {}", agent.kind);
     println!("PID:         {}", agent.process.pid);
@@ -509,9 +506,13 @@ fn print_live_details(agent: &LiveAgent, session: Option<&AgentSession>) {
     println!("CPU:         {:.1}%", agent.process.cpu_percent);
     println!("Memory:      {}", format_bytes(agent.process.memory_bytes));
     println!("Command:     {}", redacted_command(&agent.process.command));
+    println!("Session match: {}", report.association.status.label());
+    if let Some(evidence) = report.association.evidence {
+        println!("Evidence:    {}", evidence.label());
+    }
     if let Some(session) = session {
         println!();
-        println!("Matched session (latest for this agent and project):");
+        println!("Exactly matched native session:");
         print_session_details(session);
     } else {
         println!("Session:     -");
@@ -649,7 +650,12 @@ fn format_unix_timestamp(timestamp: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{redacted_command, summarize_record};
+    use std::path::PathBuf;
+
+    use super::{process_json, redacted_command, summarize_record};
+    use crate::process::{AgentKind, LiveAgent, ProcessSnapshot};
+    use crate::session::{AssociationStatus, AssociationSummary};
+    use crate::view::AgentReport;
 
     #[test]
     fn command_display_redacts_secret_argument_values() {
@@ -672,5 +678,39 @@ mod tests {
         );
         assert_eq!(summary, "now  message/assistant  done now");
         assert!(!summary.contains("private"));
+    }
+
+    #[test]
+    fn process_json_exposes_unconfirmed_associations_without_session_metrics() {
+        let report = AgentReport {
+            agent: LiveAgent {
+                kind: AgentKind::Codex,
+                process: ProcessSnapshot {
+                    pid: 42,
+                    parent_pid: Some(1),
+                    executable: PathBuf::from("/opt/bin/codex"),
+                    command: vec!["codex".to_owned(), "app-server".to_owned()],
+                    cwd: Some(PathBuf::from("/work/project")),
+                    started_at: 100,
+                    run_time: 1,
+                    cpu_percent: 0.0,
+                    memory_bytes: 1,
+                    status: "running".to_owned(),
+                },
+            },
+            session: None,
+            association: AssociationSummary {
+                status: AssociationStatus::Unconfirmed,
+                evidence: None,
+            },
+        };
+
+        let value = process_json(&report);
+
+        assert_eq!(value["session_match"], "unconfirmed");
+        assert!(value["session_match_evidence"].is_null());
+        assert!(value["session_id"].is_null());
+        assert!(value["tokens"].is_null());
+        assert!(value["cost_usd"].is_null());
     }
 }

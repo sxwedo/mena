@@ -171,7 +171,9 @@ mod tests {
 
     use super::{AgentKind, ProcessSnapshot};
     use crate::process::{LiveAgent, recognize_agent};
-    use crate::session::AgentSession;
+    use crate::session::{
+        AgentSession, AssociationEvidence, AssociationStatus, AssociationSummary,
+    };
     use crate::view::{AgentReport, render_process_table};
 
     fn process(executable: &str, command: &[&str]) -> ProcessSnapshot {
@@ -272,6 +274,10 @@ mod tests {
                 tokens: Some(12_345),
                 cost_usd: None,
             }),
+            association: AssociationSummary {
+                status: AssociationStatus::Exact,
+                evidence: Some(AssociationEvidence::NativeRuntime),
+            },
         };
 
         let rendered = render_process_table(&[report], false, None);
@@ -280,6 +286,8 @@ mod tests {
         assert!(rendered.contains("AGENT"));
         assert!(rendered.contains("PROJECT"));
         assert!(rendered.contains("STATUS"));
+        assert!(rendered.contains("SESSION"));
+        assert!(rendered.contains("exact"));
         assert!(rendered.contains("DURATION"));
         assert!(rendered.contains("TOKENS"));
         assert!(rendered.contains("COST"));
