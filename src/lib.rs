@@ -40,6 +40,7 @@ pub enum AgentCommand {
     /// Show the tail of a local agent session log
     Logs(LogsArgs),
     /// List saved sessions, including sessions without a running process
+    #[command(visible_alias = "ss")]
     Sessions(SessionsArgs),
     /// Gracefully terminate a running agent process
     Stop(StopArgs),

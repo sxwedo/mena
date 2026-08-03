@@ -27,6 +27,7 @@ fn execute() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
+    use mena::AgentCommand;
 
     use super::Cli;
 
@@ -44,6 +45,7 @@ mod tests {
             vec!["mena", "inspect", "codex:42"],
             vec!["mena", "logs", "session-id", "-n", "20"],
             vec!["mena", "sessions", "--plain"],
+            vec!["mena", "ss", "--plain"],
             vec![
                 "mena",
                 "sessions",
@@ -61,5 +63,27 @@ mod tests {
             Cli::try_parse_from(&invocation)
                 .unwrap_or_else(|error| panic!("failed to parse {invocation:?}: {error}"));
         }
+    }
+
+    #[test]
+    fn ss_is_equivalent_to_sessions() {
+        let cli = Cli::try_parse_from([
+            "mena",
+            "ss",
+            "--provider",
+            "codex",
+            "--limit",
+            "12",
+            "--json",
+        ])
+        .expect("ss should parse as the sessions command");
+
+        let AgentCommand::Sessions(args) = cli.args.command else {
+            panic!("ss did not resolve to sessions");
+        };
+        assert_eq!(args.provider.as_deref(), Some("codex"));
+        assert_eq!(args.limit, Some(12));
+        assert!(args.json);
+        assert!(!args.plain);
     }
 }
