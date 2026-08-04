@@ -97,7 +97,8 @@ session, export it as Markdown, or permanently delete it.
 
 | Key | Action |
 |---|---|
-| `/` | Search target, provider, project, or title |
+| `/` | Search target, provider, project, or title. Press `Enter` to also search the full transcript of every saved session (shown with a live progress indicator; `Esc` cancels) |
+| `g` | Toggle list grouping — flat or grouped by project |
 | `Enter` or `i` | Open session detail |
 | `r` | Resume with the native provider CLI |
 | `d`, then lowercase `y` | Permanently delete the selected session |

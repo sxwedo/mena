@@ -90,7 +90,8 @@ mena ss --json
 
 | 按键 | 操作 |
 |---|---|
-| `/` | 按 Target、Provider、项目或标题搜索 |
+| `/` | 按 Target、Provider、项目或标题搜索。按 `Enter` 会进一步对所有已保存 Session 的完整对话做全文搜索（带实时进度指示，可按 `Esc` 取消） |
+| `g` | 切换列表分组 — 扁平 或 按项目分组 |
 | `Enter` 或 `i` | 打开 Session 详情 |
 | `r` | 使用 Provider 原生 CLI 恢复 |
 | `d`，然后输入小写 `y` | 永久删除选中的 Session |

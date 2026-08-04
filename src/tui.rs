@@ -205,6 +205,33 @@ pub fn pick_session(sessions: Vec<AgentSession>) -> Result<Option<AgentSession>>
     )
 }
 
+/// Advance an in-progress transcript search by one batch, polling (non-blocking)
+/// for an Esc to cancel. Returns `Ok(true)` when a search is in progress and the
+/// caller should `continue` the event loop (redraw next tick); `Ok(false)` when
+/// no search is active so the caller proceeds to normal event reading.
+fn pump_search(
+    app: &mut SessionsApp,
+    load_detail: Option<&mut DetailCallback<'_>>,
+) -> Result<bool> {
+    if app.search_in_progress.is_none() {
+        return Ok(false);
+    }
+    let Some(load_detail) = load_detail else {
+        return Ok(false);
+    };
+    step_message_search(app, load_detail);
+    if app.search_in_progress.is_some()
+        && event::poll(Duration::from_millis(0)).context("failed to poll input")?
+        && matches!(
+            event::read().context("failed to read terminal input")?,
+            Event::Key(key) if is_key_press(&key) && key.code == KeyCode::Esc
+        )
+    {
+        abort_message_search(app);
+    }
+    Ok(true)
+}
+
 fn run_session_browser(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
@@ -220,6 +247,14 @@ fn run_session_browser(
             .terminal
             .draw(|frame| draw_sessions(frame, &mut app))
             .context("failed to draw session browser")?;
+        // While a transcript search runs incrementally, drive it one batch per
+        // frame instead of blocking on event::read. Esc cancels; any other key
+        // is swallowed until the scan finishes. Each tick redraws the spinner.
+        if pump_search(&mut app, callbacks.load_detail.as_mut())
+            .context("failed to advance transcript search")?
+        {
+            continue;
+        }
         let input = event::read().context("failed to read terminal input")?;
         if app.mode == BrowserMode::Detail {
             for input in read_detail_event_batch(input)? {
@@ -242,11 +277,11 @@ fn run_session_browser(
             Event::Key(key) if is_key_press(&key) => {
                 if app.mode == BrowserMode::Search {
                     if key.code == KeyCode::Enter {
-                        // Enter commits the query: run a one-shot full-text search
-                        // over every session's transcript (bounded I/O per file,
-                        // same cost as opening each detail). Live per-keystroke
-                        // filtering above stays scalar-only.
-                        run_message_search(&mut app, callbacks.load_detail.as_mut());
+                        // Enter commits the query. If a transcript loader is
+                        // available, kick off an incremental full-text search
+                        // (animated, Esc-cancellable); otherwise fall back to a
+                        // synchronous scalar-only filter.
+                        start_message_search(&mut app, callbacks.load_detail.is_some());
                         app.mode = BrowserMode::Browse;
                     } else {
                         handle_search_key(&mut app, key);
@@ -270,6 +305,7 @@ fn run_session_browser(
                     KeyCode::Home => app.first(),
                     KeyCode::End => app.last(),
                     KeyCode::Char('/') => app.mode = BrowserMode::Search,
+                    KeyCode::Char('g') => app.cycle_grouping(),
                     KeyCode::Enter if app.purpose == BrowserPurpose::Pick => {
                         return Ok(app.selected_session().cloned());
                     }
@@ -367,31 +403,53 @@ fn handle_search_key(app: &mut SessionsApp, key: KeyEvent) {
     }
 }
 
-/// Run a one-shot full-text search across all sessions' transcripts and commit
-/// the hits. Without a `load_detail` callback (e.g. the lightweight
-/// `pick_session` browser) this is a no-op that just falls back to Browse.
-fn run_message_search<F>(app: &mut SessionsApp, load_detail: Option<&mut F>)
-where
-    F: FnMut(&AgentSession) -> Result<SessionDetail> + ?Sized,
-{
-    let Some(load_detail) = load_detail else {
-        // No transcript loader available (e.g. pick_session). Still make sure
-        // the visible rows reflect the current scalar query.
+/// Begin an incremental full-text search over every session's transcript.
+/// Returns `true` if a search is now running incrementally (the event loop
+/// drives it with `step_message_search`). Returns `false` when there is no
+/// transcript loader (e.g. `pick_session`) or the query is empty — in that case
+/// it falls back to scalar-only filtering synchronously and no animation runs.
+fn start_message_search(app: &mut SessionsApp, has_loader: bool) -> bool {
+    if !has_loader {
         app.message_search = None;
         app.recompute_filter();
-        return;
-    };
+        return false;
+    }
     let query = app.query.trim().to_ascii_lowercase();
     if query.is_empty() {
         app.clear_message_search();
-        return;
+        return false;
     }
-    let mut hits: BTreeSet<usize> = BTreeSet::new();
-    let mut errors = 0u32;
-    for (index, session) in app.sessions.iter().enumerate() {
-        // A session that already matches on scalar fields need not be loaded.
+    app.search_in_progress = Some(InProgressSearch {
+        query,
+        hits: BTreeSet::new(),
+        errors: 0,
+        cursor: 0,
+        started: Instant::now(),
+    });
+    true
+}
+
+/// Advance an in-progress search by one session. Returns `true` once the whole
+/// catalog has been scanned (the search is finalized and committed). No-op if no
+/// search is in progress.
+fn step_message_search<F>(app: &mut SessionsApp, load_detail: &mut F) -> bool
+where
+    F: FnMut(&AgentSession) -> Result<SessionDetail> + ?Sized,
+{
+    let Some(progress) = app.search_in_progress.as_mut() else {
+        return true;
+    };
+    let query = progress.query.clone();
+    let total = app.sessions.len();
+    // Scan up to a small batch per tick so very small catalogs still animate a
+    // frame or two but large ones don't spend forever idling between draws.
+    while progress.cursor < total {
+        let index = progress.cursor;
+        progress.cursor += 1;
+        let session = &app.sessions[index];
+        // Scalar matches count as hits without paying for a transcript load.
         if session_matches(session, &query) {
-            hits.insert(index);
+            progress.hits.insert(index);
             continue;
         }
         match load_detail(session) {
@@ -401,24 +459,40 @@ where
                     .iter()
                     .any(|message| message.content.to_ascii_lowercase().contains(&query)) =>
             {
-                hits.insert(index);
+                progress.hits.insert(index);
             }
             Ok(_) => {}
-            Err(_) => errors += 1,
+            Err(_) => progress.errors += 1,
         }
+        // Did real I/O this iteration — yield back to the loop for a redraw.
+        return false;
     }
+    // Cursor reached the end: commit.
+    let InProgressSearch { hits, errors, .. } =
+        app.search_in_progress.take().expect("in-progress search");
     let matched = hits.len();
     app.apply_message_search(hits);
-    app.status = Some(StatusMessage::success(format!(
-        "Searched transcripts — {matched} match{}",
-        if matched == 1 { "" } else { "es" }
-    )));
-    if errors > 0 {
-        app.status = Some(StatusMessage::error(format!(
+    app.status = if errors > 0 {
+        Some(StatusMessage::error(format!(
             "Searched transcripts — {matched} match{}, {errors} session{} failed to load",
             if matched == 1 { "" } else { "es" },
             if errors == 1 { "" } else { "s" }
-        )));
+        )))
+    } else {
+        Some(StatusMessage::success(format!(
+            "Searched transcripts — {matched} match{}",
+            if matched == 1 { "" } else { "es" }
+        )))
+    };
+    true
+}
+
+/// Drop an in-progress search without committing partial results (Esc).
+fn abort_message_search(app: &mut SessionsApp) {
+    if app.search_in_progress.take().is_some() {
+        app.status = Some(StatusMessage::error(
+            "Transcript search cancelled".to_owned(),
+        ));
     }
 }
 
@@ -542,10 +616,56 @@ enum BrowserMode {
     ConfirmDelete,
 }
 
+/// How the session list is grouped in the table. `Flat` is the legacy single
+/// list; `Project` inserts a header row per project and keeps the original
+/// within-group order. Navigation still operates on the flat `filtered` index
+/// list — grouping only changes rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Grouping {
+    #[default]
+    Flat,
+    Project,
+}
+
+impl Grouping {
+    /// Cycle to the next grouping mode (bound to a key in Browse mode).
+    const fn cycle(self) -> Self {
+        match self {
+            Self::Flat => Self::Project,
+            Self::Project => Self::Flat,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::Project => "by project",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailAction {
     Continue,
     Resume,
+}
+
+/// A full-text message search running incrementally so the UI can show
+/// progress and stay responsive (Esc cancels) while transcripts load one by
+/// one. Lives on `SessionsApp::search_in_progress`; the event loop drives one
+/// `step_message_search` per tick.
+#[derive(Debug)]
+struct InProgressSearch {
+    /// Lowercased committed query, captured at submit time.
+    query: String,
+    /// Session indices whose transcripts match the query, accumulated as we go.
+    hits: BTreeSet<usize>,
+    /// Number of sessions whose transcripts failed to load.
+    errors: u32,
+    /// Index (into `SessionsApp::sessions`) of the next session to scan.
+    cursor: usize,
+    /// When the search started, used to animate the spinner between ticks.
+    started: Instant,
 }
 
 #[derive(Debug)]
@@ -569,6 +689,11 @@ struct SessionsApp {
     /// after the user presses Enter in Search mode, so live per-keystroke filtering
     /// stays on the cheap scalar fields while full-text search runs once on submit.
     message_search: Option<BTreeSet<usize>>,
+    /// A message search currently running incrementally. `Some` only between
+    /// pressing Enter (commit) and the scan finishing (or Esc cancelling).
+    search_in_progress: Option<InProgressSearch>,
+    /// Whether the table renders flat or with per-project group headers.
+    grouping: Grouping,
 }
 
 impl SessionsApp {
@@ -609,6 +734,8 @@ impl SessionsApp {
             detail_status: None,
             status: None,
             message_search: None,
+            search_in_progress: None,
+            grouping: Grouping::Flat,
         };
         app.recompute_filter();
         app
@@ -639,6 +766,15 @@ impl SessionsApp {
     fn append_search(&mut self, value: &str) {
         self.query.push_str(value);
         self.recompute_filter();
+    }
+
+    /// Toggle the list grouping (flat ↔ by project).
+    fn cycle_grouping(&mut self) {
+        self.grouping = self.grouping.cycle();
+        self.status = Some(StatusMessage::success(format!(
+            "Grouped: {}",
+            self.grouping.label(),
+        )));
     }
 
     /// Commit a full-text search over session transcripts. `hits` are the indices
@@ -1119,20 +1255,77 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
                 .add_modifier(Modifier::BOLD),
         )
         .bottom_margin(1);
-    let rows = app.filtered.iter().filter_map(|index| {
-        let session = app.sessions.get(*index)?;
-        Some(Row::new(columns.iter().map(|column| {
-            Cell::from(session_value(session, column.kind, app))
-        })))
-    });
+
+    // Build the visible row sequence. In Project grouping each group gets a
+    // non-selectable header row; `filtered_to_display` maps the flat filtered
+    // index (what navigation/selection uses) to the actual table row so the
+    // highlight lands on a session row, never a header.
+    let mut rows: Vec<Row<'_>> = Vec::new();
+    let mut filtered_to_display: Vec<usize> = Vec::with_capacity(app.filtered.len());
+    let group_header_style = Style::default()
+        .fg(METADATA_KEY)
+        .add_modifier(Modifier::BOLD);
+    let session_row = |session_index: usize| {
+        let session = &app.sessions[session_index];
+        Row::new(
+            columns
+                .iter()
+                .map(|column| Cell::from(session_value(session, column.kind, app))),
+        )
+    };
+    match app.grouping {
+        Grouping::Flat => {
+            for &session_index in &app.filtered {
+                filtered_to_display.push(rows.len());
+                rows.push(session_row(session_index));
+            }
+        }
+        Grouping::Project => {
+            let mut seen: Vec<String> = Vec::new();
+            // First pass: discover group order by first appearance.
+            for &session_index in &app.filtered {
+                let key = session_project_label(&app.sessions[session_index]);
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+            // Second pass: emit header + members per group, in discovery order.
+            for key in &seen {
+                rows.push(
+                    Row::new(vec![Cell::from(format!(" ▾ {key} "))]).style(group_header_style),
+                );
+                for &session_index in &app.filtered {
+                    if session_project_label(&app.sessions[session_index]) == *key {
+                        filtered_to_display.push(rows.len());
+                        rows.push(session_row(session_index));
+                    }
+                }
+            }
+        }
+    }
+
+    let grouping_label = app.grouping.label();
     let table_title = match app.purpose {
         BrowserPurpose::Manage => format!(
-            " Sessions  {} shown / {} saved ",
+            " Sessions  {} shown / {} saved  ·  grouped: {} ",
             app.filtered.len(),
-            app.sessions.len()
+            app.sessions.len(),
+            grouping_label,
         ),
-        BrowserPurpose::Pick => format!(" Resume session  {} matches ", app.filtered.len()),
+        BrowserPurpose::Pick => format!(
+            " Resume session  {} matches  ·  grouped: {} ",
+            app.filtered.len(),
+            grouping_label,
+        ),
     };
+
+    // Translate the flat selection to its table row so the highlight and scroll
+    // follow the user's intent, then restore the flat index after rendering so
+    // navigation keeps working on the filtered list.
+    let flat_selected = app.table_state.selected();
+    let display_selected = flat_selected.and_then(|index| filtered_to_display.get(index).copied());
+    app.table_state.select(display_selected);
+
     let table = Table::new(rows, columns.iter().map(|column| column.constraint))
         .header(header)
         .block(Block::new().borders(Borders::ALL).title(table_title))
@@ -1145,6 +1338,17 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
         )
         .highlight_symbol("› ");
     frame.render_stateful_widget(table, area, &mut app.table_state);
+
+    app.table_state.select(flat_selected);
+}
+
+/// Stable label used as the grouping key for project grouping. Sessions without
+/// a project land in a dedicated bucket so they still group together.
+fn session_project_label(session: &AgentSession) -> String {
+    session.project.as_deref().map_or_else(
+        || "(no project)".to_owned(),
+        |project| project.display().to_string(),
+    )
 }
 
 fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
@@ -1626,11 +1830,40 @@ fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
 }
 
 fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
-    let footer = app.status.as_ref().map_or_else(
-        || session_key_hints(app.purpose),
-        |status| Line::from(Span::styled(status.text.clone(), status.style)),
+    let footer = app.search_in_progress.as_ref().map_or_else(
+        || footer_for_status(app),
+        |progress| searching_footer_line(progress, app),
     );
     frame.render_widget(Paragraph::new(footer).alignment(Alignment::Center), area);
+}
+
+fn footer_for_status(app: &SessionsApp) -> Line<'static> {
+    app.status.as_ref().map_or_else(
+        || session_key_hints(app.purpose),
+        |status| Line::from(Span::styled(status.text.clone(), status.style)),
+    )
+}
+
+fn searching_footer_line(progress: &InProgressSearch, app: &SessionsApp) -> Line<'static> {
+    Line::from(Span::styled(
+        search_progress_text(progress, app.sessions.len()),
+        Style::default().fg(ACCENT),
+    ))
+}
+
+/// Braille spinner frames; advanced by elapsed time so the animation ticks even
+/// when each transcript loads faster than a frame.
+const SEARCH_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn search_progress_text(progress: &InProgressSearch, total: usize) -> String {
+    let frame = SEARCH_SPINNER
+        [progress.started.elapsed().as_millis() as usize / 100 % SEARCH_SPINNER.len()];
+    format!(
+        " {frame} Searching transcripts — {scanned}/{total} scanned, {hits} match{plural} (Esc cancel) ",
+        scanned = progress.cursor.min(total),
+        hits = progress.hits.len(),
+        plural = if progress.hits.len() == 1 { "" } else { "es" },
+    )
 }
 
 fn session_key_hints(purpose: BrowserPurpose) -> Line<'static> {
@@ -1638,6 +1871,7 @@ fn session_key_hints(purpose: BrowserPurpose) -> Line<'static> {
         key_hints(&[
             ("↑/↓", "navigate"),
             ("/", "search"),
+            ("g", "group"),
             ("Enter", "resume"),
             ("q", "cancel"),
         ])
@@ -1645,6 +1879,7 @@ fn session_key_hints(purpose: BrowserPurpose) -> Line<'static> {
         key_hints(&[
             ("↑/↓", "navigate"),
             ("/", "search"),
+            ("g", "group"),
             ("Enter", "details"),
             ("r", "resume"),
             ("d", "delete"),
@@ -1979,9 +2214,11 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::{
-        BrowserMode, BrowserPurpose, DetailAction, SessionDetailTheme, SessionsApp, StatusMessage,
-        TopApp, coalesce_detail_events, configure_alternate_scroll, draw_sessions, draw_top,
-        handle_detail_event, handle_detail_key, run_message_search, session_columns,
+        BrowserMode, BrowserPurpose, DetailAction, Grouping, InProgressSearch, SessionDetailTheme,
+        SessionsApp, StatusMessage, TopApp, abort_message_search, coalesce_detail_events,
+        configure_alternate_scroll, draw_sessions, draw_top, handle_detail_event,
+        handle_detail_key, search_progress_text, session_columns, session_project_label,
+        start_message_search, step_message_search,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -2045,14 +2282,14 @@ mod tests {
         app.recompute_filter();
         assert_eq!(app.filtered.len(), 1);
 
-        let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("test terminal");
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("test terminal");
         terminal
             .draw(|frame| draw_sessions(frame, &mut app))
             .expect("draw sessions");
-        let screen = buffer_text(terminal.backend().buffer(), 80, 18);
+        let screen = buffer_text(terminal.backend().buffer(), 100, 18);
         assert!(screen.contains("Fix terminal rendering"));
         assert!(screen.contains("d delete"));
-        assert!(screen.lines().all(|line| line.chars().count() == 80));
+        assert!(screen.lines().all(|line| line.chars().count() == 100));
     }
 
     #[test]
@@ -2992,11 +3229,13 @@ mod tests {
                 }],
             })
         };
-        run_message_search(&mut app, Some(&mut load_detail));
+        assert!(start_message_search(&mut app, true));
+        while !step_message_search(&mut app, &mut load_detail) {}
 
         assert_eq!(app.filtered.len(), 1);
         assert_eq!(app.filtered[0], 0);
         assert_eq!(app.message_search.as_ref().map(BTreeSet::len), Some(1));
+        assert!(app.search_in_progress.is_none());
         assert!(app.status.as_ref().is_some_and(|status| !status.is_error));
     }
 
@@ -3017,7 +3256,8 @@ mod tests {
                 }],
             })
         };
-        run_message_search(&mut app, Some(&mut load_detail));
+        assert!(start_message_search(&mut app, true));
+        while !step_message_search(&mut app, &mut load_detail) {}
         assert_eq!(app.filtered.len(), 1);
 
         // Typing one more char should drop the stale transcript search and fall
@@ -3033,9 +3273,129 @@ mod tests {
         let sessions = vec![transcript_session("a", "Alpha", "/tmp/a.jsonl")];
         let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
         app.query = "rewrite".to_owned();
-        run_message_search::<fn(&AgentSession) -> Result<SessionDetail>>(&mut app, None);
+        // No loader: start_message_search returns false synchronously and never
+        // spawns an incremental search.
+        assert!(!start_message_search(&mut app, false));
         assert!(app.message_search.is_none());
+        assert!(app.search_in_progress.is_none());
         assert!(app.filtered.is_empty());
+    }
+
+    #[test]
+    fn search_progress_text_reports_scanned_and_hit_counts() {
+        let progress = InProgressSearch {
+            query: "rewrite".to_owned(),
+            hits: [1usize, 4].into_iter().collect(),
+            errors: 0,
+            cursor: 3,
+            started: std::time::Instant::now(),
+        };
+        let text = search_progress_text(&progress, 5);
+        assert!(text.contains("3/5 scanned"));
+        assert!(text.contains("2 matches"));
+        assert!(text.contains("Esc cancel"));
+    }
+
+    #[test]
+    fn abort_message_search_discards_partial_results() {
+        let sessions = vec![
+            transcript_session("a", "Alpha", "/tmp/a.jsonl"),
+            transcript_session("b", "Beta", "/tmp/b.jsonl"),
+        ];
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        app.query = "rewrite".to_owned();
+        assert!(start_message_search(&mut app, true));
+        // Scan one session, then cancel before finishing.
+        let mut load_detail = |session: &AgentSession| {
+            Ok(SessionDetail {
+                session: session.clone(),
+                messages: vec![SessionMessage {
+                    kind: SessionMessageKind::User,
+                    timestamp: None,
+                    model: None,
+                    metrics: SessionMessageMetrics::default(),
+                    content: "rewrite the parser".to_owned(),
+                }],
+            })
+        };
+        step_message_search(&mut app, &mut load_detail);
+        assert!(app.search_in_progress.is_some());
+        abort_message_search(&mut app);
+        // No committed message search, and the footer status reflects the cancel.
+        assert!(app.message_search.is_none());
+        assert!(app.search_in_progress.is_none());
+        assert!(app.status.as_ref().is_some_and(|status| status.is_error));
+    }
+
+    #[test]
+    fn cycle_grouping_toggles_between_flat_and_project() {
+        let sessions = vec![
+            transcript_session("a", "Alpha", "/tmp/a.jsonl"),
+            transcript_session("b", "Beta", "/tmp/b.jsonl"),
+        ];
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        assert_eq!(app.grouping, Grouping::Flat);
+
+        app.cycle_grouping();
+        assert_eq!(app.grouping, Grouping::Project);
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|status| status.text.contains("by project"))
+        );
+
+        app.cycle_grouping();
+        assert_eq!(app.grouping, Grouping::Flat);
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|status| status.text.contains("flat"))
+        );
+    }
+
+    #[test]
+    fn project_grouping_renders_header_rows_and_keeps_selection_on_a_session() {
+        // Two projects (p1, p2) with two sessions each. With Project grouping on,
+        // each project renders a header row; the highlight must land on the
+        // selected session's table row, not on a header.
+        let mut sessions = vec![
+            transcript_session("a1", "Alpha one", "/tmp/p1/a1.jsonl"),
+            transcript_session("a2", "Alpha two", "/tmp/p1/a2.jsonl"),
+            transcript_session("b1", "Beta one", "/tmp/p2/b1.jsonl"),
+            transcript_session("b2", "Beta two", "/tmp/p2/b2.jsonl"),
+        ];
+        // Distinct project paths so labels differ.
+        sessions[0].project = Some(PathBuf::from("/work/p1"));
+        sessions[1].project = Some(PathBuf::from("/work/p1"));
+        sessions[2].project = Some(PathBuf::from("/work/p2"));
+        sessions[3].project = Some(PathBuf::from("/work/p2"));
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        app.grouping = Grouping::Project;
+        // Select the first session of the second project (flat filtered index 2).
+        app.table_state.select(Some(2));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw sessions");
+        let screen = buffer_text(terminal.backend().buffer(), 120, 20);
+
+        // Both project headers should appear.
+        assert!(screen.contains("▾ /work/p1"));
+        assert!(screen.contains("▾ /work/p2"));
+        // Title of the selected session must be visible somewhere on screen.
+        assert!(screen.contains("Beta one"));
+        // Selection state is restored to the flat index after rendering.
+        assert_eq!(app.table_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn session_project_label_buckets_missing_projects() {
+        let mut session = transcript_session("a", "Alpha", "/tmp/a.jsonl");
+        session.project = None;
+        assert_eq!(session_project_label(&session), "(no project)");
+        session.project = Some(PathBuf::from("/work/x"));
+        assert_eq!(session_project_label(&session), "/work/x");
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
