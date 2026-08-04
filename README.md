@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/0904f6b5-8cc4-4832-8ee0-5090a7f67ffb" width="220" alt="mena logo" />
+  <img src="https://github.com/user-attachments/assets/1fb078f4-f1e1-4196-b97e-162505a6eafe" width="220" alt="mena logo"/>
 </p>
 
 
