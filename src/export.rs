@@ -6,34 +6,43 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::fs::atomic_create_private;
-use crate::session::{ResponseMetrics, SessionDetail, SessionMessage, SessionMessageKind};
+use crate::session::{
+    DetailScope, ResponseMetrics, SessionDetail, SessionMessage, SessionMessageKind,
+};
 use crate::view::{
     TOOL_TOKEN_ACCOUNTING_NOTE, format_metric_error, format_model_usage_summary,
     format_response_header_metrics, format_response_summary, format_token_breakdown,
     format_tool_summary,
 };
 
-/// Export a complete session detail document into `directory` as Markdown.
+/// Export a session detail document into `directory` as Markdown.
 ///
-/// The returned path is absolute. Existing files are never replaced; an
-/// incrementing suffix is added when a timestamped name already exists.
+/// `scope` selects which messages are written: `Conversation` omits tool
+/// calls, tool results, skills, system, and error messages. The returned path
+/// is absolute. Existing files are never replaced; an incrementing suffix is
+/// added when a timestamped name already exists.
 ///
 /// # Errors
 ///
 /// Returns an error when the destination directory cannot be resolved or the
 /// private atomic file creation fails.
-pub fn export_session_detail(detail: &SessionDetail, directory: &Path) -> Result<PathBuf> {
-    export_session_detail_at(detail, directory, SystemTime::now())
+pub fn export_session_detail(
+    detail: &SessionDetail,
+    directory: &Path,
+    scope: DetailScope,
+) -> Result<PathBuf> {
+    export_session_detail_at(detail, directory, SystemTime::now(), scope)
 }
 
-pub fn render_session_detail_markdown(detail: &SessionDetail) -> String {
-    render_markdown(detail, SystemTime::now().into())
+pub fn render_session_detail_markdown(detail: &SessionDetail, scope: DetailScope) -> String {
+    render_markdown(detail, SystemTime::now().into(), scope)
 }
 
 fn export_session_detail_at(
     detail: &SessionDetail,
     directory: &Path,
     exported_at: SystemTime,
+    scope: DetailScope,
 ) -> Result<PathBuf> {
     let directory = directory
         .canonicalize()
@@ -42,8 +51,12 @@ fn export_session_detail_at(
     let timestamp = exported_datetime.format("%Y%m%d-%H%M%S");
     let provider = sanitize_filename_component(detail.session.kind.slug(), "agent");
     let session_id = sanitize_filename_component(&detail.session.id, "session");
-    let stem = format!("mena-session-{provider}-{session_id}-{timestamp}");
-    let markdown = render_markdown(detail, exported_datetime);
+    let variant = match scope {
+        DetailScope::All => "full",
+        DetailScope::Conversation => "conv",
+    };
+    let stem = format!("mena-session-{provider}-{session_id}-{timestamp}-{variant}");
+    let markdown = render_markdown(detail, exported_datetime, scope);
 
     for sequence in 1_usize.. {
         let suffix = if sequence == 1 {
@@ -59,11 +72,15 @@ fn export_session_detail_at(
     unreachable!("an unbounded sequence always has another candidate file name")
 }
 
-fn render_markdown(detail: &SessionDetail, exported_at: DateTime<Utc>) -> String {
+fn render_markdown(
+    detail: &SessionDetail,
+    exported_at: DateTime<Utc>,
+    scope: DetailScope,
+) -> String {
     let mut markdown = String::from("# Mena Session Export\n\n");
     render_metadata(&mut markdown, detail, exported_at);
     render_model_usage(&mut markdown, detail);
-    render_conversation(&mut markdown, detail);
+    render_conversation(&mut markdown, detail, scope);
     markdown
 }
 
@@ -118,17 +135,30 @@ fn render_model_usage(markdown: &mut String, detail: &SessionDetail) {
     }
 }
 
-fn render_conversation(markdown: &mut String, detail: &SessionDetail) {
+fn render_conversation(markdown: &mut String, detail: &SessionDetail, scope: DetailScope) {
+    let visible: Vec<&SessionMessage> = detail.messages_in(scope).collect();
     let _ = write!(
         markdown,
-        "\n## Conversation\n\n{}",
+        "\n## Conversation ({})\n\n{}",
+        scope.label(),
         if detail.messages.is_empty() {
             "_No persisted chat messages were found for this session._\n".to_owned()
+        } else if visible.is_empty() {
+            "_No user or assistant messages in this scope._\n".to_owned()
         } else {
             String::new()
         }
     );
-    for message in &detail.messages {
+    let hidden = detail.hidden_message_count(scope);
+    if hidden > 0 {
+        let _ = writeln!(
+            markdown,
+            "_{hidden} tool/system message{} hidden by `{}` scope._\n",
+            if hidden == 1 { "" } else { "s" },
+            scope.label(),
+        );
+    }
+    for message in visible {
         render_message(markdown, message);
     }
 }
@@ -294,8 +324,8 @@ mod tests {
     use super::export_session_detail_at;
     use crate::AgentKind;
     use crate::session::{
-        AgentSession, ResponseMetrics, SessionDetail, SessionMessage, SessionMessageKind,
-        SessionMessageMetrics, TokenUsage, ToolMetrics,
+        AgentSession, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
+        SessionMessageKind, SessionMessageMetrics, TokenUsage, ToolMetrics,
     };
 
     #[test]
@@ -305,18 +335,20 @@ mod tests {
         let exported_at = UNIX_EPOCH + Duration::from_secs(1_767_225_845);
 
         let first =
-            export_session_detail_at(&detail, directory.path(), exported_at).expect("first export");
-        let second = export_session_detail_at(&detail, directory.path(), exported_at)
-            .expect("collision export");
+            export_session_detail_at(&detail, directory.path(), exported_at, DetailScope::All)
+                .expect("first export");
+        let second =
+            export_session_detail_at(&detail, directory.path(), exported_at, DetailScope::All)
+                .expect("collision export");
 
         assert!(first.is_absolute());
         assert_eq!(
             first.file_name().and_then(|value| value.to_str()),
-            Some("mena-session-codex-id_with_unicode-20260101-000405.md")
+            Some("mena-session-codex-id_with_unicode-20260101-000405-full.md")
         );
         assert_eq!(
             second.file_name().and_then(|value| value.to_str()),
-            Some("mena-session-codex-id_with_unicode-20260101-000405-2.md")
+            Some("mena-session-codex-id_with_unicode-20260101-000405-full-2.md")
         );
         let markdown = fs::read_to_string(&first).expect("read Markdown");
         for expected in [
@@ -371,6 +403,43 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn conversation_scope_hides_tools_but_keeps_metadata_and_model_usage() {
+        let directory = tempdir().expect("export directory");
+        let detail = fixture_detail();
+        let exported_at = UNIX_EPOCH + Duration::from_secs(1_767_225_845);
+
+        let path = export_session_detail_at(
+            &detail,
+            directory.path(),
+            exported_at,
+            DetailScope::Conversation,
+        )
+        .expect("conversation export");
+
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("mena-session-codex-id_with_unicode-20260101-000405-conv.md")
+        );
+        let markdown = fs::read_to_string(&path).expect("read conversation Markdown");
+
+        // User/assistant dialogue is retained.
+        assert!(markdown.contains("第一行\n第二行"));
+        assert!(markdown.contains("ASSISTANT · gpt-5.5"));
+        assert!(markdown.contains("model-specific answer"));
+        // Metadata and model usage are always present, even in conversation scope.
+        assert!(markdown.contains("TARGET"));
+        assert!(markdown.contains("## Model Usage"));
+        assert!(markdown.contains("gpt-5.5 · 1 responses"));
+        // Tool content is hidden.
+        assert!(!markdown.contains("TOOL CALL"));
+        assert!(!markdown.contains("TOOL RESULT"));
+        assert!(!markdown.contains("README.md"));
+        assert!(!markdown.contains("最后一条，完整保留"));
+        // The hidden count and scope are surfaced.
+        assert!(markdown.contains("2 tool/system messages hidden by `conversation only` scope"));
     }
 
     fn fixture_detail() -> SessionDetail {

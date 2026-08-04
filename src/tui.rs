@@ -13,7 +13,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::session::{AgentSession, DeletionSummary, SessionDetail, SessionMessageKind};
+use crate::session::{
+    AgentSession, DeletionSummary, DetailScope, SessionDetail, SessionMessageKind,
+};
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::view::{
     AgentReport, TOOL_TOKEN_ACCOUNTING_NOTE, format_bytes, format_duration, format_metric_error,
@@ -117,8 +119,8 @@ const fn configured_color(color: ConfigColor) -> Color {
 }
 type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
-type ExportCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<PathBuf>;
-type CopyCallback<'a> = &'a mut dyn FnMut(&SessionDetail) -> Result<()>;
+type ExportCallback<'a> = &'a mut dyn FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>;
+type CopyCallback<'a> = &'a mut dyn FnMut(&SessionDetail, DetailScope) -> Result<()>;
 
 #[derive(Default)]
 struct SessionBrowserCallbacks<'a> {
@@ -177,8 +179,8 @@ pub fn manage_sessions(
     active_targets: BTreeSet<String>,
     detail_colors: &SessionDetailColorSettings,
     mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
-    mut export: impl FnMut(&SessionDetail) -> Result<PathBuf>,
-    mut copy: impl FnMut(&SessionDetail) -> Result<()>,
+    mut export: impl FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>,
+    mut copy: impl FnMut(&SessionDetail, DetailScope) -> Result<()>,
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
 ) -> Result<Option<AgentSession>> {
     run_session_browser(
@@ -694,6 +696,9 @@ struct SessionsApp {
     search_in_progress: Option<InProgressSearch>,
     /// Whether the table renders flat or with per-project group headers.
     grouping: Grouping,
+    /// Which messages the detail preview shows. Defaults to `Conversation`
+    /// (user/assistant only); toggled with `p`/`Shift+P` in detail mode.
+    preview_scope: DetailScope,
 }
 
 impl SessionsApp {
@@ -736,6 +741,7 @@ impl SessionsApp {
             message_search: None,
             search_in_progress: None,
             grouping: Grouping::Flat,
+            preview_scope: DetailScope::Conversation,
         };
         app.recompute_filter();
         app
@@ -834,7 +840,23 @@ impl SessionsApp {
         self.detail_primary_offsets.clear();
         self.detail_layout = None;
         self.detail_status = None;
+        // Each freshly opened session starts in the conversation-only preview;
+        // the user can press Shift+P to reveal tool/system messages.
+        self.preview_scope = DetailScope::Conversation;
         self.mode = BrowserMode::Detail;
+    }
+
+    /// Switch the detail preview scope. Invalidates the cached layout so the
+    /// next redraw reflows for the new message set, and clamps scroll.
+    fn set_preview_scope(&mut self, scope: DetailScope) {
+        if self.preview_scope == scope {
+            return;
+        }
+        self.preview_scope = scope;
+        self.detail_scroll = 0;
+        self.detail_max_scroll = 0;
+        self.detail_primary_offsets.clear();
+        self.detail_layout = None;
     }
 
     fn close_detail(&mut self) {
@@ -907,6 +929,7 @@ fn handle_detail_key(
     if key.code == KeyCode::Char('r') {
         return DetailAction::Resume;
     }
+    let scope = app.preview_scope;
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i' | 'q') => app.close_detail(),
         KeyCode::Char('c')
@@ -922,11 +945,11 @@ fn handle_detail_key(
                 .detail
                 .as_ref()
                 .zip(copy)
-                .map(|(detail, copy)| copy(detail));
+                .map(|(detail, copy)| copy(detail, scope));
             if let Some(result) = result {
                 app.detail_status = Some(match result {
                     Ok(()) => {
-                        StatusMessage::success("Copied complete detail to clipboard".to_owned())
+                        StatusMessage::success(format!("Copied {} to clipboard", scope.label()))
                     }
                     Err(error) => StatusMessage::error(format!("Copy failed: {error:#}")),
                 });
@@ -937,14 +960,20 @@ fn handle_detail_key(
                 .detail
                 .as_ref()
                 .zip(export)
-                .map(|(detail, export)| export(detail));
+                .map(|(detail, export)| export(detail, scope));
             if let Some(result) = result {
                 app.detail_status = Some(match result {
-                    Ok(path) => StatusMessage::success(format!("Exported: {}", path.display())),
+                    Ok(path) => StatusMessage::success(format!(
+                        "Exported {}: {}",
+                        scope.label(),
+                        path.display()
+                    )),
                     Err(error) => StatusMessage::error(format!("Export failed: {error:#}")),
                 });
             }
         }
+        KeyCode::Char('p') => app.set_preview_scope(DetailScope::Conversation),
+        KeyCode::Char('P') => app.set_preview_scope(DetailScope::All),
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
             app.jump_detail_primary(false);
         }
@@ -1390,7 +1419,12 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         .is_none_or(|layout| layout.width != content_width)
     {
         let detail = app.detail.as_ref().expect("detail mode has detail data");
-        app.detail_layout = Some(DetailLayoutCache::new(detail, content_width, theme));
+        app.detail_layout = Some(DetailLayoutCache::new(
+            detail,
+            content_width,
+            theme,
+            app.preview_scope,
+        ));
     }
     let (content_height, primary_offsets) = {
         let layout = app
@@ -1417,37 +1451,53 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
     frame.render_widget(paragraph.scroll((local_scroll, 0)), areas[0]);
-    if let Some(status) = app.detail_status.as_ref() {
-        let color = if status.is_error {
-            theme.status_error
-        } else {
-            theme.status_success
-        };
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                status.text.clone(),
-                Style::default().fg(color),
-            ))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
-            areas[1],
-        );
-    }
+    render_detail_status_bar(frame, areas[1], app.detail_status.as_ref(), theme);
+    render_detail_footer(frame, areas[2], theme);
+}
+
+fn render_detail_status_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    status: Option<&StatusMessage>,
+    theme: SessionDetailTheme,
+) {
+    let Some(status) = status else {
+        return;
+    };
+    let color = if status.is_error {
+        theme.status_error
+    } else {
+        theme.status_success
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            status.text.clone(),
+            Style::default().fg(color),
+        ))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailTheme) {
     frame.render_widget(
         Paragraph::new(themed_key_hints(
             &[
-                ("Shift+↑/↓", "message"),
+                ("Shift+↑/↓", "msg"),
+                ("p", "chat"),
+                ("Shift+P", "all"),
                 ("c", "copy"),
                 ("r", "resume"),
                 ("e", "export"),
-                ("Enter/Esc", "close"),
+                ("Esc", "close"),
             ],
             theme.footer_key,
             theme.footer_text,
             theme.footer_separator,
         ))
         .alignment(Alignment::Center),
-        areas[2],
+        area,
     );
 }
 
@@ -1465,9 +1515,14 @@ struct DetailLayoutCache {
 }
 
 impl DetailLayoutCache {
-    fn new(detail: &SessionDetail, width: u16, theme: SessionDetailTheme) -> Self {
+    fn new(
+        detail: &SessionDetail,
+        width: u16,
+        theme: SessionDetailTheme,
+        scope: DetailScope,
+    ) -> Self {
         let width = width.max(1);
-        let content = session_detail_content(detail, theme);
+        let content = session_detail_content(detail, theme, scope);
         let mut lines = Vec::with_capacity(content.lines.len());
         let mut primary_line_indices = Vec::with_capacity(content.primary_line_indices.len());
         let mut primary_indices = content.primary_line_indices.into_iter().peekable();
@@ -1591,12 +1646,31 @@ fn fragment_detail_line(line: Line<'static>) -> Vec<Line<'static>> {
 fn session_detail_content(
     detail: &SessionDetail,
     theme: SessionDetailTheme,
+    scope: DetailScope,
 ) -> SessionDetailContent {
     let mut lines = session_metadata_lines(detail, theme);
     lines.extend(model_usage_lines(detail, theme));
+    let visible: Vec<&crate::session::SessionMessage> = detail.messages_in(scope).collect();
+    let hidden = detail.hidden_message_count(scope);
+    let header = if scope == DetailScope::Conversation {
+        format!(
+            "Conversation — {} shown (conversation only){}",
+            visible.len(),
+            if hidden > 0 {
+                format!(", {hidden} tool/system hidden")
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        format!(
+            "Conversation — {} messages (complete)",
+            detail.messages.len()
+        )
+    };
     lines.extend([
         Line::from(Span::styled(
-            format!("Conversation ({} messages)", detail.messages.len()),
+            header,
             Style::default()
                 .fg(theme.conversation_header)
                 .add_modifier(Modifier::BOLD),
@@ -1604,7 +1678,7 @@ fn session_detail_content(
         Line::from(""),
     ]);
     let mut primary_line_indices = Vec::new();
-    for message in &detail.messages {
+    for message in &visible {
         if matches!(
             message.kind,
             SessionMessageKind::User | SessionMessageKind::Assistant
@@ -1616,6 +1690,11 @@ fn session_detail_content(
     if detail.messages.is_empty() {
         lines.push(Line::from(Span::styled(
             "No persisted chat messages were found for this session.",
+            Style::default().fg(theme.empty_text),
+        )));
+    } else if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No user or assistant messages in this scope. Press Shift+P to show everything.",
             Style::default().fg(theme.empty_text),
         )));
     }
@@ -2223,7 +2302,7 @@ mod tests {
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
-        AgentSession, DeletionSummary, ResponseMetrics, SessionDetail, SessionMessage,
+        AgentSession, DeletionSummary, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
         SessionMessageKind, SessionMessageMetrics, TokenUsage,
     };
     use crate::settings::{ConfigColor, SessionDetailColorSettings};
@@ -2445,7 +2524,7 @@ mod tests {
             "125500000",
             "Cost",
             "$1.2500",
-            "Conversation (3 messages)",
+            "Conversation — 3 shown (conversation only)",
             "Model usage (1 models)",
             "gpt-5.6 · 1 responses · duration 2m 05.5s · avg TTFT 400ms",
             "ASSISTANT · gpt-5.5",
@@ -2455,11 +2534,13 @@ mod tests {
             "complete first question",
             "complete first answer",
             "complete second answer",
-            "Shift+↑/↓ message",
+            "Shift+↑/↓ msg",
+            "p chat",
+            "Shift+P all",
             "c copy",
             "r resume",
             "e export",
-            "Enter/Esc close",
+            "Esc close",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
@@ -2469,6 +2550,129 @@ mod tests {
                 "redundant detail hint remained: {redundant_hint:?}\n{screen}"
             );
         }
+    }
+
+    #[test]
+    fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
+        let session = report().session.expect("fixture session");
+        let messages = vec![
+            SessionMessage {
+                kind: SessionMessageKind::User,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "visible user question".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::ToolCall,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "hidden tool call body".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::ToolResult,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "hidden tool result body".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::Assistant,
+                timestamp: None,
+                model: Some("gpt-5.5".to_owned()),
+                metrics: SessionMessageMetrics::default(),
+                content: "visible assistant answer".to_owned(),
+            },
+        ];
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+        assert_eq!(app.preview_scope, DetailScope::Conversation);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw conversation-only details");
+
+        let screen = buffer_text(terminal.backend().buffer(), 80, 30);
+        assert!(screen.contains("visible user question"));
+        assert!(screen.contains("visible assistant answer"));
+        assert!(screen.contains("2 tool/system hidden"));
+        assert!(
+            !screen.contains("hidden tool call body"),
+            "tool calls must be hidden in the default preview\n{screen}"
+        );
+        assert!(
+            !screen.contains("hidden tool result body"),
+            "tool results must be hidden in the default preview\n{screen}"
+        );
+    }
+
+    #[test]
+    fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
+        let session = report().session.expect("fixture session");
+        let messages = vec![
+            SessionMessage {
+                kind: SessionMessageKind::User,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "conv user content".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::ToolCall,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "full-only tool content".to_owned(),
+            },
+        ];
+        let mut app = SessionsApp::new(
+            vec![session.clone()],
+            BTreeSet::default(),
+            BrowserPurpose::Manage,
+        );
+        app.open_detail(SessionDetail { session, messages });
+
+        // Shift+P (uppercase P) switches to the complete preview.
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+            None,
+            None,
+        );
+        assert_eq!(app.preview_scope, DetailScope::All);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw complete details");
+        let complete = buffer_text(terminal.backend().buffer(), 80, 30);
+        assert!(
+            complete.contains("full-only tool content"),
+            "Shift+P must reveal tool messages\n{complete}"
+        );
+        assert!(complete.contains("(complete)"));
+
+        // p returns to the conversation-only preview.
+        handle_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            None,
+            None,
+        );
+        assert_eq!(app.preview_scope, DetailScope::Conversation);
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw conversation details again");
+        let conv = buffer_text(terminal.backend().buffer(), 80, 30);
+        assert!(
+            !conv.contains("full-only tool content"),
+            "p must re-hide tool messages\n{conv}"
+        );
     }
 
     #[test]
@@ -2500,6 +2704,7 @@ mod tests {
             BrowserPurpose::Manage,
         );
         app.open_detail(SessionDetail { session, messages });
+        app.preview_scope = DetailScope::All;
         let mut terminal = Terminal::new(TestBackend::new(100, 42)).expect("test terminal");
 
         terminal
@@ -2569,7 +2774,10 @@ mod tests {
             ("Session details", Color::Blue),
             ("Target", Color::Magenta),
             ("codex:session-id", Color::Yellow),
-            ("Conversation (1 messages)", Color::LightBlue),
+            (
+                "Conversation — 1 shown (conversation only)",
+                Color::LightBlue,
+            ),
             ("USER", Color::Rgb(1, 2, 3)),
             ("custom user content", Color::Indexed(123)),
             ("custom status", Color::LightCyan),
@@ -2819,6 +3027,7 @@ mod tests {
             BrowserPurpose::Manage,
         );
         app.open_detail(SessionDetail { session, messages });
+        app.preview_scope = DetailScope::All;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
         terminal
             .draw(|frame| draw_sessions(frame, &mut app))
@@ -2932,7 +3141,9 @@ mod tests {
         app.detail_max_scroll = 20;
         app.detail_scroll = 7;
         let selected = app.table_state.selected();
-        let mut export = |_detail: &SessionDetail| Ok(PathBuf::from("/tmp/session-export.md"));
+        let mut export = |_detail: &SessionDetail, _scope: DetailScope| {
+            Ok(PathBuf::from("/tmp/session-export.md"))
+        };
 
         handle_detail_key(
             &mut app,
@@ -2946,7 +3157,7 @@ mod tests {
         assert_eq!(app.detail_scroll, 7);
         assert!(app.detail.is_some());
         assert!(app.detail_status.as_ref().is_some_and(|status| {
-            status.text == "Exported: /tmp/session-export.md"
+            status.text == "Exported conversation only: /tmp/session-export.md"
                 && status.style.fg == Some(Color::Green)
         }));
     }
@@ -2973,7 +3184,7 @@ mod tests {
         app.detail_scroll = 7;
         let selected = app.table_state.selected();
         let mut copied_tail = None;
-        let mut copy = |detail: &SessionDetail| {
+        let mut copy = |detail: &SessionDetail, _scope: DetailScope| {
             copied_tail = detail
                 .messages
                 .last()
@@ -2994,7 +3205,7 @@ mod tests {
         assert_eq!(app.detail_scroll, 7);
         assert!(app.detail.is_some());
         assert!(app.detail_status.as_ref().is_some_and(|status| {
-            status.text == "Copied complete detail to clipboard"
+            status.text == "Copied conversation only to clipboard"
                 && status.style.fg == Some(Color::Green)
         }));
     }
@@ -3012,7 +3223,7 @@ mod tests {
             messages: Vec::new(),
         });
         let mut copy_called = false;
-        let mut copy = |_detail: &SessionDetail| {
+        let mut copy = |_detail: &SessionDetail, _scope: DetailScope| {
             copy_called = true;
             Ok(())
         };
@@ -3043,8 +3254,9 @@ mod tests {
         app.detail_max_scroll = 20;
         app.detail_scroll = 7;
         let selected = app.table_state.selected();
-        let mut copy =
-            |_detail: &SessionDetail| -> Result<()> { anyhow::bail!("clipboard unavailable") };
+        let mut copy = |_detail: &SessionDetail, _scope: DetailScope| -> Result<()> {
+            anyhow::bail!("clipboard unavailable")
+        };
 
         handle_detail_key(
             &mut app,
@@ -3078,8 +3290,9 @@ mod tests {
         app.detail_max_scroll = 20;
         app.detail_scroll = 7;
         let selected = app.table_state.selected();
-        let mut export =
-            |_detail: &SessionDetail| -> Result<PathBuf> { anyhow::bail!("permission denied") };
+        let mut export = |_detail: &SessionDetail, _scope: DetailScope| -> Result<PathBuf> {
+            anyhow::bail!("permission denied")
+        };
 
         handle_detail_key(
             &mut app,

@@ -191,8 +191,8 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             active_targets,
             &settings.ui.session_detail.colors,
             |session| catalog.detail(session),
-            |detail| crate::export::export_session_detail(detail, &export_directory),
-            |detail| clipboard.copy_detail(detail),
+            |detail, scope| crate::export::export_session_detail(detail, &export_directory, scope),
+            |detail, scope| clipboard.copy_detail(detail, scope),
             |session| {
                 if active_session_targets(&catalog, settings)?.contains(&session.target()) {
                     bail!("cannot delete a session that may be attached to a running agent");

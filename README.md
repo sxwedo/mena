@@ -102,13 +102,18 @@ session, export it as Markdown, or permanently delete it.
 | `Enter` or `i` | Open session detail |
 | `r` | Resume with the native provider CLI |
 | `d`, then lowercase `y` | Permanently delete the selected session |
-| `c` / `e` | Copy / export complete detail as Markdown |
+| `c` / `e` | Copy / export the current detail as Markdown (follows the preview scope below) |
 | `Esc` or `q` | Close or quit |
 
 Inside the detail view, use arrows or `j`/`k` to scroll, `PgUp`/`PgDn` to move
 by page, `Home`/`End` to jump, and `Shift+↑`/`Shift+↓` to move between user and
-assistant messages. Mouse reporting remains disabled so native terminal text
-selection still works.
+assistant messages. The preview defaults to **conversation only** (user and
+assistant messages); press `p` to keep just the conversation, or `Shift+P` to
+reveal the complete transcript including tool calls, tool results, and system
+messages. Copy (`c`) and export (`e`) follow the active preview scope; exports
+are named `...-conv.md` (conversation) or `...-full.md` (complete). Metadata
+and model usage are always shown. Mouse reporting remains disabled so native
+terminal text selection still works.
 
 ## Commands
 

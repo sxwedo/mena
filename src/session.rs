@@ -258,7 +258,61 @@ pub struct SessionDetail {
     pub messages: Vec<SessionMessage>,
 }
 
+/// Which messages a detail view presents. `Conversation` shows only the
+/// user/assistant dialogue and hides tool calls, tool results, skills,
+/// system, and error messages; `All` shows everything. Metadata and model
+/// usage are always shown regardless of scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailScope {
+    /// All messages (the historical behavior).
+    All,
+    /// Only user and assistant messages.
+    #[default]
+    Conversation,
+}
+
+impl DetailScope {
+    /// Returns `true` when a message of this kind is visible under the scope.
+    #[must_use]
+    pub const fn keeps(self, kind: SessionMessageKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Conversation => matches!(
+                kind,
+                SessionMessageKind::User | SessionMessageKind::Assistant
+            ),
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "complete",
+            Self::Conversation => "conversation only",
+        }
+    }
+}
+
 impl SessionDetail {
+    /// Iterates the messages visible under `scope` without cloning.
+    pub fn messages_in(&self, scope: DetailScope) -> impl Iterator<Item = &SessionMessage> {
+        self.messages
+            .iter()
+            .filter(move |message| scope.keeps(message.kind))
+    }
+
+    /// Number of messages hidden by `scope` (always 0 for `All`).
+    #[must_use]
+    pub fn hidden_message_count(&self, scope: DetailScope) -> usize {
+        match scope {
+            DetailScope::All => 0,
+            DetailScope::Conversation => self
+                .messages
+                .iter()
+                .filter(|message| !scope.keeps(message.kind))
+                .count(),
+        }
+    }
+
     /// Returns exact persisted response metrics grouped by model.
     #[must_use]
     pub fn model_usage(&self) -> Vec<ModelUsageSummary> {

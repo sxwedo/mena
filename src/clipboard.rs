@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
 use crate::export::render_session_detail_markdown;
-use crate::session::SessionDetail;
+use crate::session::{DetailScope, SessionDetail};
 
 /// Lazily initialized system clipboard retained for the lifetime of the TUI.
 #[derive(Default)]
@@ -10,7 +10,7 @@ pub struct SessionClipboard {
 }
 
 impl SessionClipboard {
-    pub fn copy_detail(&mut self, detail: &SessionDetail) -> Result<()> {
+    pub fn copy_detail(&mut self, detail: &SessionDetail, scope: DetailScope) -> Result<()> {
         let clipboard = match self.clipboard.as_mut() {
             Some(clipboard) => clipboard,
             None => self.clipboard.insert(
@@ -18,7 +18,7 @@ impl SessionClipboard {
             ),
         };
         clipboard
-            .set_text(render_session_detail_markdown(detail))
+            .set_text(render_session_detail_markdown(detail, scope))
             .context("failed to copy the session detail to the system clipboard")
     }
 }
