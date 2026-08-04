@@ -241,7 +241,16 @@ fn run_session_browser(
         match input {
             Event::Key(key) if is_key_press(&key) => {
                 if app.mode == BrowserMode::Search {
-                    handle_search_key(&mut app, key);
+                    if key.code == KeyCode::Enter {
+                        // Enter commits the query: run a one-shot full-text search
+                        // over every session's transcript (bounded I/O per file,
+                        // same cost as opening each detail). Live per-keystroke
+                        // filtering above stays scalar-only.
+                        run_message_search(&mut app, callbacks.load_detail.as_mut());
+                        app.mode = BrowserMode::Browse;
+                    } else {
+                        handle_search_key(&mut app, key);
+                    }
                     continue;
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
@@ -335,12 +344,15 @@ fn handle_search_key(app: &mut SessionsApp, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.query.clear();
-            app.recompute_filter();
+            app.clear_message_search();
             app.mode = BrowserMode::Browse;
         }
-        KeyCode::Enter => app.mode = BrowserMode::Browse,
         KeyCode::Backspace => {
             app.query.pop();
+            // Editing the query invalidates a committed message search — the
+            // user is refining live, so fall back to scalar filtering until the
+            // next Enter.
+            app.clear_message_search();
             app.recompute_filter();
         }
         KeyCode::Char(character)
@@ -352,6 +364,61 @@ fn handle_search_key(app: &mut SessionsApp, key: KeyEvent) {
             app.recompute_filter();
         }
         _ => {}
+    }
+}
+
+/// Run a one-shot full-text search across all sessions' transcripts and commit
+/// the hits. Without a `load_detail` callback (e.g. the lightweight
+/// `pick_session` browser) this is a no-op that just falls back to Browse.
+fn run_message_search<F>(app: &mut SessionsApp, load_detail: Option<&mut F>)
+where
+    F: FnMut(&AgentSession) -> Result<SessionDetail> + ?Sized,
+{
+    let Some(load_detail) = load_detail else {
+        // No transcript loader available (e.g. pick_session). Still make sure
+        // the visible rows reflect the current scalar query.
+        app.message_search = None;
+        app.recompute_filter();
+        return;
+    };
+    let query = app.query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        app.clear_message_search();
+        return;
+    }
+    let mut hits: BTreeSet<usize> = BTreeSet::new();
+    let mut errors = 0u32;
+    for (index, session) in app.sessions.iter().enumerate() {
+        // A session that already matches on scalar fields need not be loaded.
+        if session_matches(session, &query) {
+            hits.insert(index);
+            continue;
+        }
+        match load_detail(session) {
+            Ok(detail)
+                if detail
+                    .messages
+                    .iter()
+                    .any(|message| message.content.to_ascii_lowercase().contains(&query)) =>
+            {
+                hits.insert(index);
+            }
+            Ok(_) => {}
+            Err(_) => errors += 1,
+        }
+    }
+    let matched = hits.len();
+    app.apply_message_search(hits);
+    app.status = Some(StatusMessage::success(format!(
+        "Searched transcripts — {matched} match{}",
+        if matched == 1 { "" } else { "es" }
+    )));
+    if errors > 0 {
+        app.status = Some(StatusMessage::error(format!(
+            "Searched transcripts — {matched} match{}, {errors} session{} failed to load",
+            if matched == 1 { "" } else { "es" },
+            if errors == 1 { "" } else { "s" }
+        )));
     }
 }
 
@@ -498,6 +565,10 @@ struct SessionsApp {
     detail_layout: Option<DetailLayoutCache>,
     detail_status: Option<StatusMessage>,
     status: Option<StatusMessage>,
+    /// Session indices whose messages contain the committed query. Populated only
+    /// after the user presses Enter in Search mode, so live per-keystroke filtering
+    /// stays on the cheap scalar fields while full-text search runs once on submit.
+    message_search: Option<BTreeSet<usize>>,
 }
 
 impl SessionsApp {
@@ -537,6 +608,7 @@ impl SessionsApp {
             detail_layout: None,
             detail_status: None,
             status: None,
+            message_search: None,
         };
         app.recompute_filter();
         app
@@ -544,11 +616,15 @@ impl SessionsApp {
 
     fn recompute_filter(&mut self) {
         let query = self.query.to_ascii_lowercase();
+        let scalar_hits = |session: &AgentSession| session_matches(session, &query);
+        let message_hits = self.message_search.as_ref();
         self.filtered = self
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, session)| session_matches(session, &query))
+            .filter(|(index, session)| {
+                scalar_hits(session) || message_hits.is_some_and(|hits| hits.contains(index))
+            })
             .map(|(index, _)| index)
             .collect();
         let selected = self.table_state.selected().unwrap_or_default();
@@ -563,6 +639,21 @@ impl SessionsApp {
     fn append_search(&mut self, value: &str) {
         self.query.push_str(value);
         self.recompute_filter();
+    }
+
+    /// Commit a full-text search over session transcripts. `hits` are the indices
+    /// of sessions whose messages contain the (already lowercased) query. Clears
+    /// any prior message search so a fresh Enter re-runs against current results.
+    fn apply_message_search(&mut self, hits: BTreeSet<usize>) {
+        self.message_search = Some(hits);
+        self.recompute_filter();
+    }
+
+    /// Drop any committed message search, returning to scalar-only filtering.
+    fn clear_message_search(&mut self) {
+        if self.message_search.take().is_some() {
+            self.recompute_filter();
+        }
     }
 
     fn selected_session(&self) -> Option<&AgentSession> {
@@ -1890,7 +1981,7 @@ mod tests {
     use super::{
         BrowserMode, BrowserPurpose, DetailAction, SessionDetailTheme, SessionsApp, StatusMessage,
         TopApp, coalesce_detail_events, configure_alternate_scroll, draw_sessions, draw_top,
-        handle_detail_event, handle_detail_key, session_columns,
+        handle_detail_event, handle_detail_key, run_message_search, session_columns,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -2852,6 +2943,99 @@ mod tests {
                 evidence: Some(crate::session::AssociationEvidence::NativeRuntime),
             },
         }
+    }
+
+    /// Build a minimal session with the given id/title and a distinct transcript path,
+    /// so `load_detail` can return different message bodies per session.
+    fn transcript_session(id: &str, title: &str, path: &str) -> AgentSession {
+        AgentSession {
+            kind: AgentKind::Codex,
+            id: id.to_owned(),
+            title: Some(title.to_owned()),
+            project: Some(PathBuf::from("/work/project")),
+            path: PathBuf::from(path),
+            started_at: None,
+            updated_at: 1,
+            tokens: None,
+            cost_usd: None,
+        }
+    }
+
+    #[test]
+    fn message_search_includes_sessions_whose_transcripts_match() {
+        // Neither session's scalar fields mention "rewrite"; only the first
+        // session's transcript does. Enter-style commit must surface it.
+        let sessions = vec![
+            transcript_session("a", "Alpha work", "/tmp/a.jsonl"),
+            transcript_session("b", "Beta work", "/tmp/b.jsonl"),
+        ];
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        app.query = "rewrite".to_owned();
+        app.recompute_filter();
+        // Scalar-only: no hits yet.
+        assert!(app.filtered.is_empty());
+
+        let mut load_detail = |session: &AgentSession| {
+            let content = if session.id == "a" {
+                "we should rewrite the parser"
+            } else {
+                "leave the parser as-is"
+            };
+            Ok(SessionDetail {
+                session: session.clone(),
+                messages: vec![SessionMessage {
+                    kind: SessionMessageKind::User,
+                    timestamp: None,
+                    model: None,
+                    metrics: SessionMessageMetrics::default(),
+                    content: content.to_owned(),
+                }],
+            })
+        };
+        run_message_search(&mut app, Some(&mut load_detail));
+
+        assert_eq!(app.filtered.len(), 1);
+        assert_eq!(app.filtered[0], 0);
+        assert_eq!(app.message_search.as_ref().map(BTreeSet::len), Some(1));
+        assert!(app.status.as_ref().is_some_and(|status| !status.is_error));
+    }
+
+    #[test]
+    fn editing_the_query_clears_committed_message_search() {
+        let sessions = vec![transcript_session("a", "Alpha", "/tmp/a.jsonl")];
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        app.query = "rewrite".to_owned();
+        let mut load_detail = |session: &AgentSession| {
+            Ok(SessionDetail {
+                session: session.clone(),
+                messages: vec![SessionMessage {
+                    kind: SessionMessageKind::User,
+                    timestamp: None,
+                    model: None,
+                    metrics: SessionMessageMetrics::default(),
+                    content: "rewrite the parser".to_owned(),
+                }],
+            })
+        };
+        run_message_search(&mut app, Some(&mut load_detail));
+        assert_eq!(app.filtered.len(), 1);
+
+        // Typing one more char should drop the stale transcript search and fall
+        // back to scalar-only filtering (which no longer matches).
+        app.query.push('!');
+        app.clear_message_search();
+        assert!(app.message_search.is_none());
+        assert!(app.filtered.is_empty());
+    }
+
+    #[test]
+    fn message_search_without_load_detail_is_a_noop() {
+        let sessions = vec![transcript_session("a", "Alpha", "/tmp/a.jsonl")];
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        app.query = "rewrite".to_owned();
+        run_message_search::<fn(&AgentSession) -> Result<SessionDetail>>(&mut app, None);
+        assert!(app.message_search.is_none());
+        assert!(app.filtered.is_empty());
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
