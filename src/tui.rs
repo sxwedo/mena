@@ -1423,7 +1423,7 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
         Row::new(
             columns
                 .iter()
-                .map(|column| Cell::from(session_value(session, column.kind, app))),
+                .map(|column| session_cell(session, column.kind, app)),
         )
     };
 
@@ -2253,6 +2253,18 @@ fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     }
 }
 
+fn session_cell(session: &AgentSession, column: SessionColumn, app: &SessionsApp) -> Cell<'static> {
+    match column {
+        SessionColumn::Active => {
+            if app.active_targets.contains(&session.target()) {
+                Cell::from(Span::styled("●", Style::default().fg(Color::Green)))
+            } else {
+                Cell::from("")
+            }
+        }
+        _ => Cell::from(session_value(session, column, app)),
+    }
+}
 fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsApp) -> String {
     match column {
         SessionColumn::Target => session.target(),
@@ -2415,6 +2427,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    use crate::AgentKind;
     use anyhow::Result;
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
@@ -2422,15 +2435,16 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
+    use ratatui::widgets::Cell;
 
     use super::{
-        BrowserMode, BrowserPurpose, DetailAction, Grouping, InProgressSearch, SessionDetailTheme,
-        SessionsApp, StatusMessage, TopApp, abort_message_search, coalesce_detail_events,
-        configure_alternate_scroll, draw_sessions, draw_top, format_project_display_path,
-        handle_detail_event, handle_detail_key, search_progress_text, session_columns,
-        session_project_label, start_message_search, step_message_search,
+        BrowserMode, BrowserPurpose, DetailAction, Grouping, InProgressSearch, SessionColumn,
+        SessionDetailTheme, SessionsApp, StatusMessage, TopApp, abort_message_search,
+        coalesce_detail_events, configure_alternate_scroll, draw_sessions, draw_top,
+        format_project_display_path, handle_detail_event, handle_detail_key, search_progress_text,
+        session_cell, session_columns, session_project_label, start_message_search,
+        step_message_search,
     };
-    use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
         AgentSession, DeletionSummary, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
@@ -3806,6 +3820,24 @@ mod tests {
             assert!(formatted_long.contains("..."));
             assert!(formatted_long.ends_with("my-project"));
         }
+    }
+    #[test]
+    fn active_session_renders_green_active_indicator() {
+        let session = transcript_session("a", "Alpha", "/tmp/a.jsonl");
+        let mut active_targets = BTreeSet::new();
+        active_targets.insert(session.target());
+        let app = SessionsApp::new(
+            vec![session.clone()],
+            active_targets,
+            BrowserPurpose::Manage,
+        );
+
+        let cell = session_cell(&session, SessionColumn::Active, &app);
+        let inactive_cell = session_cell(&session, SessionColumn::Agent, &app);
+
+        // Active indicator should not be empty
+        assert_ne!(cell, Cell::from(""));
+        assert_eq!(inactive_cell, Cell::from("Codex"));
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
