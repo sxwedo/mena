@@ -53,11 +53,8 @@ mena sessions --help
 ## 快速开始
 
 ```sh
-mena ps                         # 列出运行中的 Agent
-mena top                        # 监控 CPU、内存和状态
 mena sessions                   # 浏览全部已保存 Session
 mena ss                         # `mena sessions` 的完全等价简写
-mena inspect codex:session-id   # 检查一个进程或 Session
 ```
 
 Target 稳定且适合脚本使用：
@@ -109,11 +106,7 @@ mena ss --json
 
 | 命令 | 用途 |
 |---|---|
-| `mena ps [--json]` | 列出已识别的运行中进程 |
-| `mena top` | 打开实时资源监控界面 |
 | `mena sessions` / `mena ss` | 搜索并管理已保存 Session |
-| `mena inspect <target> [--json]` | 检查进程或 Session |
-| `mena logs <target> [-n N] [--raw]` | 读取有界的事件日志尾部 |
 | `mena config init` | 创建私有配置文件 |
 
 

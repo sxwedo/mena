@@ -51,6 +51,7 @@ pub enum AssociationStatus {
     Unsupported,
 }
 
+#[allow(dead_code)]
 impl AssociationStatus {
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
@@ -75,6 +76,7 @@ pub enum AssociationEvidence {
     ResumeArgument,
 }
 
+#[allow(dead_code)]
 impl AssociationEvidence {
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
@@ -103,11 +105,13 @@ impl AssociationSummary {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct ProcessSessionAssociation<'a> {
     session: Option<&'a AgentSession>,
     summary: AssociationSummary,
 }
 
+#[allow(dead_code)]
 impl<'a> ProcessSessionAssociation<'a> {
     #[must_use]
     pub(crate) const fn session(self) -> Option<&'a AgentSession> {
@@ -123,11 +127,13 @@ impl<'a> ProcessSessionAssociation<'a> {
 /// Batch association result. Matching is global so deletion protection and
 /// process reporting consume the same evidence and cannot drift apart.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SessionAssociations<'a> {
     by_pid: BTreeMap<u32, ProcessSessionAssociation<'a>>,
     protected_targets: BTreeSet<String>,
 }
 
+#[allow(dead_code)]
 impl<'a> SessionAssociations<'a> {
     #[must_use]
     pub(crate) fn for_process(&self, pid: u32) -> ProcessSessionAssociation<'a> {
@@ -438,6 +444,7 @@ pub struct SessionCatalog {
     sessions: Vec<AgentSession>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct CachedUsage {
     updated_at: u64,
@@ -445,11 +452,13 @@ struct CachedUsage {
     cost_usd: Option<f64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct UsageCache {
     entries: BTreeMap<PathBuf, CachedUsage>,
 }
 
+#[allow(dead_code)]
 impl UsageCache {
     pub fn enrich(
         &mut self,
@@ -1054,6 +1063,7 @@ fn visit_bounded_lines_limit(
     }
 }
 
+#[allow(dead_code)]
 pub fn tail_records(path: &Path, limit: usize) -> Result<Vec<String>> {
     if limit == 0 {
         return Ok(Vec::new());

@@ -8,6 +8,7 @@ use crate::session::{
     ToolMetrics,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReport {
     pub agent: LiveAgent,
@@ -16,83 +17,13 @@ pub struct AgentReport {
 }
 
 impl AgentReport {
+    #[allow(dead_code)]
     #[must_use]
     pub fn project(&self) -> Option<&std::path::Path> {
         self.session
             .as_ref()
             .and_then(|session| session.project.as_deref())
             .or(self.agent.process.cwd.as_deref())
-    }
-}
-
-pub fn render_process_table(
-    reports: &[AgentReport],
-    resources: bool,
-    selected: Option<usize>,
-) -> String {
-    if reports.is_empty() {
-        return "No running developer agents found.\n".to_owned();
-    }
-
-    let mut headers = vec!["ID", "AGENT", "PROJECT", "STATUS", "SESSION", "DURATION"];
-    if resources {
-        headers.extend(["CPU", "MEMORY"]);
-    }
-    headers.extend(["TOKENS", "COST"]);
-
-    let rows: Vec<Vec<String>> = reports
-        .iter()
-        .enumerate()
-        .map(|(index, report)| {
-            let agent = &report.agent;
-            let mut row = vec![
-                format!("{}:{}", agent.kind.slug(), agent.process.pid),
-                agent.kind.to_string(),
-                report
-                    .project()
-                    .map_or_else(|| "-".to_owned(), project_label),
-                agent.process.status.clone(),
-                report.association.status.label().to_owned(),
-                format_duration(agent.process.run_time),
-            ];
-            if let Some(selected) = selected {
-                row.insert(
-                    0,
-                    if selected == index {
-                        ">".to_owned()
-                    } else {
-                        " ".to_owned()
-                    },
-                );
-            }
-            if resources {
-                row.push(format!("{:.1}%", agent.process.cpu_percent));
-                row.push(format_bytes(agent.process.memory_bytes));
-            }
-            let tokens = report
-                .session
-                .as_ref()
-                .and_then(|session| session.tokens)
-                .map_or_else(|| "-".to_owned(), format_tokens);
-            let cost = report.session.as_ref().map_or_else(
-                || "-".to_owned(),
-                |session| {
-                    session
-                        .cost_usd
-                        .map_or_else(|| "n/a".to_owned(), |cost| format!("${cost:.4}"))
-                },
-            );
-            row.extend([tokens, cost]);
-            row
-        })
-        .collect();
-    if selected.is_some() {
-        let mut display_headers = Vec::with_capacity(headers.len() + 1);
-        display_headers.push("");
-        display_headers.extend(headers);
-        render_table(&display_headers, &rows)
-    } else {
-        render_table(&headers, &rows)
     }
 }
 
@@ -195,6 +126,7 @@ fn project_label(path: &std::path::Path) -> String {
         )
 }
 
+#[allow(dead_code)]
 fn format_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format_compact(tokens, 1_000_000, "M")
@@ -205,6 +137,7 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_compact(value: u64, unit: u64, suffix: &str) -> String {
     let mut whole = value / unit;
     let mut decimal = (value % unit * 10 + unit / 2) / unit;
@@ -403,6 +336,7 @@ fn response_status(response: &ResponseMetrics) -> Option<&'static str> {
     }
 }
 
+#[allow(dead_code)]
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1_024;
     const MIB: u64 = KIB * 1_024;
@@ -418,6 +352,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_scaled(bytes: u64, unit: u64, suffix: &str) -> String {
     let whole = bytes / unit;
     let decimal = bytes % unit * 10 / unit;

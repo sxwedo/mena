@@ -56,11 +56,8 @@ mena sessions --help
 ## Quick start
 
 ```sh
-mena ps                         # list running agents
-mena top                        # watch CPU, memory, and status
 mena sessions                   # browse all saved sessions
 mena ss                         # exact shorthand for `mena sessions`
-mena inspect codex:session-id   # inspect one process or session
 ```
 
 Targets are stable and script-friendly:
@@ -118,11 +115,7 @@ terminal text selection still works.
 
 | Command | Purpose |
 |---|---|
-| `mena ps [--json]` | List recognized live processes |
-| `mena top` | Open the live resource monitor |
 | `mena sessions` / `mena ss` | Search and manage saved sessions |
-| `mena inspect <target> [--json]` | Inspect a process or session |
-| `mena logs <target> [-n N] [--raw]` | Read a bounded event tail |
 | `mena config init` | Create the private configuration file |
 
 

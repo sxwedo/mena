@@ -31,14 +31,6 @@ pub enum AgentCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// List running developer-agent processes
-    Ps(PsArgs),
-    /// Refresh a live resource view of developer-agent processes
-    Top(TopArgs),
-    /// Show process and session details
-    Inspect(TargetArgs),
-    /// Show the tail of a local agent session log
-    Logs(LogsArgs),
     /// List saved sessions, including sessions without a running process
     #[command(visible_alias = "ss")]
     Sessions(SessionsArgs),
@@ -53,44 +45,6 @@ pub enum ConfigCommand {
         #[arg(long)]
         import_clix: bool,
     },
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct PsArgs {
-    /// Emit stable machine-readable JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct TopArgs {
-    /// Refresh interval in seconds
-    #[arg(short, long, default_value_t = 2)]
-    pub interval: u64,
-    /// Stop after this many refreshes (defaults to unlimited on a terminal)
-    #[arg(long)]
-    pub iterations: Option<u64>,
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct TargetArgs {
-    /// PID, provider:PID, session ID, or provider:session ID
-    pub target: String,
-    /// Emit stable machine-readable JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct LogsArgs {
-    /// PID, provider:PID, session ID, or provider:session ID
-    pub target: String,
-    /// Number of records to show
-    #[arg(short = 'n', long, default_value_t = 50)]
-    pub lines: usize,
-    /// Print original JSONL records instead of a redacted event summary
-    #[arg(long)]
-    pub raw: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -127,10 +81,6 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
                 Ok(())
             }
         },
-        AgentCommand::Ps(args) => controller::run_ps(&args, settings),
-        AgentCommand::Top(args) => controller::run_top(&args, settings),
-        AgentCommand::Inspect(args) => controller::run_inspect(&args, settings),
-        AgentCommand::Logs(args) => controller::run_logs(&args, settings),
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
     }
 }
@@ -140,11 +90,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{AgentKind, ProcessSnapshot};
-    use crate::process::{LiveAgent, recognize_agent};
-    use crate::session::{
-        AgentSession, AssociationEvidence, AssociationStatus, AssociationSummary,
-    };
-    use crate::view::{AgentReport, render_process_table};
+    use crate::process::recognize_agent;
 
     fn process(executable: &str, command: &[&str]) -> ProcessSnapshot {
         ProcessSnapshot {
@@ -223,47 +169,5 @@ mod tests {
             )),
             Some(AgentKind::OhMyPi)
         );
-    }
-
-    #[test]
-    fn process_table_exposes_stable_selectors_and_unknown_usage_honestly() {
-        let agent = LiveAgent {
-            kind: AgentKind::Codex,
-            process: process("/opt/bin/codex", &["codex"]),
-        };
-        let report = AgentReport {
-            agent,
-            session: Some(AgentSession {
-                kind: AgentKind::Codex,
-                id: "session-id".to_owned(),
-                title: Some("Fix rendering".to_owned()),
-                project: Some(PathBuf::from("/work/actual-project")),
-                path: PathBuf::from("/tmp/session.jsonl"),
-                started_at: None,
-                updated_at: 1,
-                tokens: Some(12_345),
-                cost_usd: None,
-            }),
-            association: AssociationSummary {
-                status: AssociationStatus::Exact,
-                evidence: Some(AssociationEvidence::NativeRuntime),
-            },
-        };
-
-        let rendered = render_process_table(&[report], false, None);
-
-        assert!(rendered.contains("ID"));
-        assert!(rendered.contains("AGENT"));
-        assert!(rendered.contains("PROJECT"));
-        assert!(rendered.contains("STATUS"));
-        assert!(rendered.contains("SESSION"));
-        assert!(rendered.contains("exact"));
-        assert!(rendered.contains("DURATION"));
-        assert!(rendered.contains("TOKENS"));
-        assert!(rendered.contains("COST"));
-        assert!(rendered.contains("codex:42"));
-        assert!(rendered.contains("actual-project"));
-        assert!(rendered.contains("12.3K"));
-        assert!(rendered.contains("n/a"));
     }
 }

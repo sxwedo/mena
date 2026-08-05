@@ -12,10 +12,6 @@ workspace and must not acquire a path dependency back to it.
 The user-facing command is `mena`:
 
 ```sh
-mena ps
-mena top
-mena inspect <target>
-mena logs <target>
 mena sessions
 mena config init [--import-clix]
 ```

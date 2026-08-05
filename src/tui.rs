@@ -18,13 +18,14 @@ use crate::session::{
 };
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::view::{
-    AgentReport, TOOL_TOKEN_ACCOUNTING_NOTE, format_bytes, format_duration, format_metric_error,
-    format_model_usage_summary, format_response_header_metrics, format_response_summary,
-    format_token_breakdown, format_tool_summary,
+    TOOL_TOKEN_ACCOUNTING_NOTE, format_duration, format_metric_error, format_model_usage_summary,
+    format_response_header_metrics, format_response_summary, format_token_breakdown,
+    format_tool_summary,
 };
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
+#[allow(dead_code)]
 const METADATA_KEY: Color = Color::LightMagenta;
 
 #[derive(Debug, Clone, Copy)]
@@ -128,50 +129,6 @@ struct SessionBrowserCallbacks<'a> {
     export: Option<ExportCallback<'a>>,
     copy: Option<CopyCallback<'a>>,
     delete: Option<DeleteCallback<'a>>,
-}
-
-pub fn run_top(
-    interval: Duration,
-    mut refresh: impl FnMut() -> Result<Vec<AgentReport>>,
-) -> Result<()> {
-    let reports = refresh()?;
-    let mut app = TopApp::new(reports);
-    let mut terminal = ManagedTerminal::enter()?;
-    let mut deadline = Instant::now() + interval;
-
-    loop {
-        terminal
-            .terminal
-            .draw(|frame| draw_top(frame, &mut app))
-            .context("failed to draw interactive agent view")?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero()
-            || !event::poll(remaining).context("failed to poll terminal input")?
-        {
-            app.replace(refresh()?);
-            deadline = Instant::now() + interval;
-            continue;
-        }
-        match event::read().context("failed to read terminal input")? {
-            Event::Key(key) if is_key_press(&key) => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(());
-                }
-                KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                KeyCode::Down | KeyCode::Char('j') => app.next(),
-                KeyCode::Home => app.first(),
-                KeyCode::End => app.last(),
-                KeyCode::Enter | KeyCode::Char('i') => app.show_details = !app.show_details,
-                KeyCode::Char('r') => {
-                    app.replace(refresh()?);
-                    deadline = Instant::now() + interval;
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
 }
 
 pub fn manage_sessions(
@@ -489,6 +446,7 @@ struct ManagedTerminal {
 }
 
 impl ManagedTerminal {
+    #[allow(dead_code)]
     fn enter() -> Result<Self> {
         Self::enter_internal(false)
     }
@@ -535,57 +493,6 @@ impl Drop for ManagedTerminal {
             let _ = configure_alternate_scroll(&mut std::io::stdout(), false);
         }
         let _ = ratatui::try_restore();
-    }
-}
-
-#[derive(Debug)]
-struct TopApp {
-    reports: Vec<AgentReport>,
-    table_state: TableState,
-    show_details: bool,
-}
-
-impl TopApp {
-    fn new(reports: Vec<AgentReport>) -> Self {
-        let mut app = Self {
-            reports,
-            table_state: TableState::default(),
-            show_details: false,
-        };
-        app.first();
-        app
-    }
-
-    fn replace(&mut self, reports: Vec<AgentReport>) {
-        let selected = self.table_state.selected().unwrap_or_default();
-        self.reports = reports;
-        self.table_state.select(
-            self.reports
-                .len()
-                .checked_sub(1)
-                .map(|last| selected.min(last)),
-        );
-    }
-
-    fn previous(&mut self) {
-        let selected = self.table_state.selected().unwrap_or_default();
-        self.table_state.select(Some(selected.saturating_sub(1)));
-    }
-
-    fn next(&mut self) {
-        let selected = self.table_state.selected().unwrap_or_default();
-        if selected + 1 < self.reports.len() {
-            self.table_state.select(Some(selected + 1));
-        }
-    }
-
-    fn first(&mut self) {
-        self.table_state
-            .select((!self.reports.is_empty()).then_some(0));
-    }
-
-    const fn last(&mut self) {
-        self.table_state.select(self.reports.len().checked_sub(1));
     }
 }
 
@@ -1188,120 +1095,6 @@ fn session_matches(session: &AgentSession, query: &str) -> bool {
 
 const fn is_key_press(key: &KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-}
-
-fn draw_top(frame: &mut Frame<'_>, app: &mut TopApp) {
-    let details_height = if app.show_details && frame.area().height >= 15 {
-        7
-    } else {
-        0
-    };
-    let areas = Layout::vertical([
-        Constraint::Min(5),
-        Constraint::Length(details_height),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
-
-    let columns = top_columns(areas[0].width);
-    let header = Row::new(columns.iter().map(|column| Cell::from(column.label)))
-        .style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .bottom_margin(1);
-    let rows = app.reports.iter().map(|report| {
-        Row::new(
-            columns
-                .iter()
-                .map(|column| Cell::from(top_value(report, column.kind))),
-        )
-        .style(status_style(&report.agent.process.status))
-    });
-    let widths = columns.iter().map(|column| column.constraint);
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::new().borders(Borders::ALL).title(Line::from(vec![
-            Span::styled(" mena top ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(" {} running ", app.reports.len()),
-                Style::default().fg(ACCENT),
-            ),
-        ])))
-        .column_spacing(1)
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("› ");
-    frame.render_stateful_widget(table, areas[0], &mut app.table_state);
-
-    if details_height > 0 {
-        render_top_details(frame, areas[1], selected_report(app));
-    }
-
-    render_top_footer(frame, areas[2]);
-}
-
-fn render_top_details(frame: &mut Frame<'_>, area: Rect, report: Option<&AgentReport>) {
-    let Some(report) = report else {
-        return;
-    };
-    let session = report
-        .session
-        .as_ref()
-        .map_or_else(|| "-".to_owned(), AgentSession::target);
-    let details = Text::from(vec![
-        detail_line(
-            "Process",
-            format!(
-                "{}:{}  PID {}  {}",
-                report.agent.kind,
-                report.agent.process.pid,
-                report.agent.process.pid,
-                report.agent.process.status
-            ),
-        ),
-        detail_line("Project", display_path(report.project())),
-        detail_line("Session", session),
-        detail_line(
-            "Usage",
-            format!(
-                "{} tokens  •  {}",
-                report
-                    .session
-                    .as_ref()
-                    .and_then(|session| session.tokens)
-                    .map_or_else(|| "-".to_owned(), |tokens| tokens.to_string()),
-                report.session.as_ref().map_or_else(
-                    || "cost -".to_owned(),
-                    |session| format!("cost {}", format_cost(session.cost_usd))
-                )
-            ),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(details)
-            .block(Block::new().borders(Borders::ALL).title(" Details "))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn render_top_footer(frame: &mut Frame<'_>, area: Rect) {
-    frame.render_widget(
-        Paragraph::new(key_hints(&[
-            ("↑/↓", "navigate"),
-            ("Enter", "details"),
-            ("r", "refresh"),
-            ("q", "quit"),
-        ]))
-        .alignment(Alignment::Center),
-        area,
-    );
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp) {
@@ -2086,82 +1879,6 @@ struct Column<T> {
     label: &'static str,
     constraint: Constraint,
 }
-
-#[derive(Debug, Clone, Copy)]
-enum TopColumn {
-    Id,
-    Agent,
-    Project,
-    Status,
-    Duration,
-    Cpu,
-    Memory,
-    Tokens,
-    Cost,
-}
-
-fn top_columns(width: u16) -> Vec<Column<TopColumn>> {
-    if width >= 120 {
-        vec![
-            column(TopColumn::Id, "ID", Constraint::Length(14)),
-            column(TopColumn::Agent, "AGENT", Constraint::Length(12)),
-            column(TopColumn::Project, "PROJECT", Constraint::Min(16)),
-            column(TopColumn::Status, "STATUS", Constraint::Length(9)),
-            column(TopColumn::Duration, "DURATION", Constraint::Length(9)),
-            column(TopColumn::Cpu, "CPU", Constraint::Length(6)),
-            column(TopColumn::Memory, "MEMORY", Constraint::Length(10)),
-            column(TopColumn::Tokens, "TOKENS", Constraint::Length(9)),
-            column(TopColumn::Cost, "COST", Constraint::Length(9)),
-        ]
-    } else if width >= 88 {
-        vec![
-            column(TopColumn::Id, "ID", Constraint::Length(14)),
-            column(TopColumn::Agent, "AGENT", Constraint::Length(11)),
-            column(TopColumn::Project, "PROJECT", Constraint::Min(13)),
-            column(TopColumn::Status, "STATUS", Constraint::Length(9)),
-            column(TopColumn::Cpu, "CPU", Constraint::Length(6)),
-            column(TopColumn::Memory, "MEMORY", Constraint::Length(10)),
-            column(TopColumn::Tokens, "TOKENS", Constraint::Length(9)),
-            column(TopColumn::Cost, "COST", Constraint::Length(8)),
-        ]
-    } else if width >= 60 {
-        vec![
-            column(TopColumn::Id, "ID", Constraint::Length(14)),
-            column(TopColumn::Project, "PROJECT", Constraint::Min(12)),
-            column(TopColumn::Status, "STATUS", Constraint::Length(9)),
-            column(TopColumn::Cpu, "CPU", Constraint::Length(6)),
-            column(TopColumn::Tokens, "TOKENS", Constraint::Length(9)),
-        ]
-    } else {
-        vec![
-            column(TopColumn::Id, "ID", Constraint::Length(14)),
-            column(TopColumn::Project, "PROJECT", Constraint::Min(8)),
-            column(TopColumn::Status, "STATUS", Constraint::Length(9)),
-        ]
-    }
-}
-
-fn top_value(report: &AgentReport, column: TopColumn) -> String {
-    match column {
-        TopColumn::Id => format!("{}:{}", report.agent.kind.slug(), report.agent.process.pid),
-        TopColumn::Agent => report.agent.kind.to_string(),
-        TopColumn::Project => project_label(report.project()),
-        TopColumn::Status => report.agent.process.status.clone(),
-        TopColumn::Duration => format_duration(report.agent.process.run_time),
-        TopColumn::Cpu => format!("{:.1}%", report.agent.process.cpu_percent),
-        TopColumn::Memory => format_bytes(report.agent.process.memory_bytes),
-        TopColumn::Tokens => report
-            .session
-            .as_ref()
-            .and_then(|session| session.tokens)
-            .map_or_else(|| "-".to_owned(), format_tokens_compact),
-        TopColumn::Cost => report
-            .session
-            .as_ref()
-            .map_or_else(|| "-".to_owned(), |session| format_cost(session.cost_usd)),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionColumn {
     Target,
@@ -2237,12 +1954,6 @@ const fn column<T>(kind: T, label: &'static str, constraint: Constraint) -> Colu
     }
 }
 
-fn selected_report(app: &TopApp) -> Option<&AgentReport> {
-    app.table_state
-        .selected()
-        .and_then(|selected| app.reports.get(selected))
-}
-
 fn project_label(project: Option<&std::path::Path>) -> String {
     project.map_or_else(
         || "-".to_owned(),
@@ -2259,6 +1970,7 @@ fn display_path(project: Option<&std::path::Path>) -> String {
     project.map_or_else(|| "-".to_owned(), |project| project.display().to_string())
 }
 
+#[allow(dead_code)]
 fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format_compact(tokens, 1_000_000, "M")
@@ -2269,6 +1981,7 @@ fn format_tokens_compact(tokens: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_compact(value: u64, unit: u64, suffix: &str) -> String {
     let mut whole = value / unit;
     let mut decimal = (value % unit * 10 + unit / 2) / unit;
@@ -2297,6 +2010,7 @@ fn format_unix_timestamp(timestamp: u64) -> String {
         .map_or_else(|| timestamp.to_string(), |value| value.to_rfc3339())
 }
 
+#[allow(dead_code)]
 fn status_style(status: &str) -> Style {
     match status {
         "running" => Style::default().fg(Color::Green),
@@ -2306,6 +2020,7 @@ fn status_style(status: &str) -> Style {
     }
 }
 
+#[allow(dead_code)]
 fn detail_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label:<8}"), Style::default().fg(METADATA_KEY)),
@@ -2382,68 +2097,20 @@ mod tests {
     use ratatui::widgets::Cell;
 
     use super::{
-        BrowserMode, DetailAction, Grouping, InProgressSearch, SessionColumn, SessionDetailTheme,
-        SessionsApp, StatusMessage, TopApp, abort_message_search, coalesce_detail_events,
-        configure_alternate_scroll, draw_sessions, draw_top, format_project_display_path,
+        BrowserMode, DetailAction, DetailScope, Grouping, InProgressSearch, SessionColumn,
+        SessionDetailColorSettings, SessionDetailTheme, SessionsApp, StatusMessage,
+        abort_message_search, coalesce_detail_events, draw_sessions, format_project_display_path,
         handle_detail_event, handle_detail_key, search_progress_text, session_cell,
         session_columns, session_project_label, start_message_search, step_message_search,
     };
-    use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
-        AgentSession, DeletionSummary, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
+        AgentSession, DeletionSummary, ResponseMetrics, SessionDetail, SessionMessage,
         SessionMessageKind, SessionMessageMetrics, TokenUsage,
     };
-    use crate::settings::{ConfigColor, SessionDetailColorSettings};
-    use crate::view::AgentReport;
-
-    #[test]
-    fn top_layout_stays_aligned_at_eighty_columns_with_details_open() {
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test terminal");
-        let mut app = TopApp::new(vec![report()]);
-        app.show_details = true;
-        terminal
-            .draw(|frame| draw_top(frame, &mut app))
-            .expect("draw top");
-
-        let screen = buffer_text(terminal.backend().buffer(), 80, 20);
-        assert!(screen.contains("mena top"));
-        assert!(screen.contains("codex:42"));
-        assert!(screen.contains("Details"));
-        assert!(screen.contains("q quit"));
-        assert!(screen.lines().all(|line| line.chars().count() == 80));
-    }
-
-    #[test]
-    fn session_terminal_protocol_preserves_native_selection_and_enables_alternate_scroll() {
-        let mut output = Vec::new();
-
-        configure_alternate_scroll(&mut output, true).expect("enable alternate scroll");
-        configure_alternate_scroll(&mut output, false).expect("disable alternate scroll");
-
-        assert_eq!(output, b"\x1b[?1007h\x1b[?1007l");
-        for mouse_capture_mode in [b"?1000".as_slice(), b"?1002", b"?1003", b"?1006"] {
-            assert!(
-                !output
-                    .windows(mouse_capture_mode.len())
-                    .any(|window| window == mouse_capture_mode),
-                "session input protocol must leave mouse selection to the terminal"
-            );
-        }
-    }
-
-    #[test]
-    fn top_refresh_can_transition_to_no_running_agents() {
-        let mut app = TopApp::new(vec![report()]);
-
-        app.replace(Vec::new());
-
-        assert!(app.reports.is_empty());
-        assert_eq!(app.table_state.selected(), None);
-    }
-
+    use crate::settings::ConfigColor;
     #[test]
     fn session_layout_displays_titles_and_filters_by_them() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session], BTreeSet::default());
         app.query = "rendering".to_owned();
         app.recompute_filter();
@@ -2461,7 +2128,7 @@ mod tests {
 
     #[test]
     fn session_target_is_first_and_visible_at_eighty_columns() {
-        let mut session = report().session.expect("fixture session");
+        let mut session = fixture_session();
         session.id = "019fbd66-e95f-7dd2-b9b4-37a27a61c272".to_owned();
         let target = session.target();
         let mut app = SessionsApp::new(vec![session], BTreeSet::default());
@@ -2481,7 +2148,7 @@ mod tests {
 
     #[test]
     fn detail_navigation_scrolls_without_changing_the_selected_session() {
-        let first = report().session.expect("first session");
+        let first = fixture_session();
         let mut second = first.clone();
         second.id = "second-session".to_owned();
         let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
@@ -2512,7 +2179,7 @@ mod tests {
 
     #[test]
     fn detail_resume_requests_the_same_selected_session_as_the_outer_list() {
-        let first = report().session.expect("first session");
+        let first = fixture_session();
         let mut second = first.clone();
         second.id = "second-session".to_owned();
         let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
@@ -2534,7 +2201,7 @@ mod tests {
 
     #[test]
     fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
-        let mut session = report().session.expect("fixture session");
+        let mut session = fixture_session();
         session.started_at = Some("2026-08-01T01:02:03Z".to_owned());
         session.cost_usd = Some(1.25);
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
@@ -2586,7 +2253,6 @@ mod tests {
             ],
         });
         let mut terminal = Terminal::new(TestBackend::new(100, 50)).expect("test terminal");
-
         terminal
             .draw(|frame| draw_sessions(frame, &mut app))
             .expect("draw details");
@@ -2630,7 +2296,7 @@ mod tests {
 
     #[test]
     fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let messages = vec![
             SessionMessage {
                 kind: SessionMessageKind::User,
@@ -2686,7 +2352,7 @@ mod tests {
 
     #[test]
     fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let messages = vec![
             SessionMessage {
                 kind: SessionMessageKind::User,
@@ -2745,7 +2411,7 @@ mod tests {
 
     #[test]
     fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let kinds = [
             (SessionMessageKind::User, Color::LightGreen),
             (SessionMessageKind::Assistant, Color::Cyan),
@@ -2796,7 +2462,7 @@ mod tests {
 
     #[test]
     fn detail_theme_can_customize_every_text_surface_independently() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let colors = SessionDetailColorSettings {
             border: ConfigColor::Red,
             popup_title: ConfigColor::Blue,
@@ -2855,7 +2521,7 @@ mod tests {
 
     #[test]
     fn detail_metadata_keys_are_pink_purple() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
@@ -2880,7 +2546,7 @@ mod tests {
 
     #[test]
     fn detail_mode_can_scroll_to_the_last_chat_message() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let messages = (0..40)
             .map(|index| SessionMessage {
                 kind: if index % 2 == 0 {
@@ -2920,7 +2586,7 @@ mod tests {
 
     #[test]
     fn detail_end_reaches_content_after_word_wrapped_lines() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let wrapped = "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc\n".repeat(20);
         let messages = vec![SessionMessage {
             kind: SessionMessageKind::Assistant,
@@ -2955,7 +2621,7 @@ mod tests {
 
     #[test]
     fn detail_reflows_and_keeps_the_end_reachable_after_terminal_resize() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let wrapped = "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc\n".repeat(20);
         let messages = vec![SessionMessage {
             kind: SessionMessageKind::Assistant,
@@ -2993,7 +2659,7 @@ mod tests {
 
     #[test]
     fn detail_scrolling_reaches_content_beyond_u16_scroll_range() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut content = "complete detail line\n".repeat(66_000);
         content.push_str("ABSOLUTE FINAL DETAIL LINE");
         let messages = vec![SessionMessage {
@@ -3033,7 +2699,7 @@ mod tests {
 
     #[test]
     fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let messages = vec![
             SessionMessage {
                 kind: SessionMessageKind::User,
@@ -3104,7 +2770,7 @@ mod tests {
 
     #[test]
     fn detail_scroll_bursts_are_coalesced_and_key_repeats_do_not_keep_scrolling() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
@@ -3161,7 +2827,7 @@ mod tests {
 
     #[test]
     fn exporting_from_detail_keeps_selection_scroll_and_popup_open() {
-        let first = report().session.expect("first session");
+        let first = fixture_session();
         let mut second = first.clone();
         second.id = "second-session".to_owned();
         let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
@@ -3195,7 +2861,7 @@ mod tests {
 
     #[test]
     fn copying_from_detail_copies_the_complete_session_and_keeps_context() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
@@ -3239,7 +2905,7 @@ mod tests {
 
     #[test]
     fn command_c_is_left_to_the_terminal_native_selection() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
@@ -3264,7 +2930,7 @@ mod tests {
 
     #[test]
     fn failed_detail_copy_keeps_context_and_reports_a_red_error() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
@@ -3296,7 +2962,7 @@ mod tests {
 
     #[test]
     fn failed_detail_export_keeps_context_and_reports_a_red_error() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
@@ -3328,7 +2994,7 @@ mod tests {
 
     #[test]
     fn running_sessions_cannot_enter_delete_confirmation() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let target = session.target();
         let mut app = SessionsApp::new(vec![session], BTreeSet::from([target]));
 
@@ -3344,7 +3010,7 @@ mod tests {
 
     #[test]
     fn confirmed_deletion_removes_all_duplicate_catalog_rows() {
-        let session = report().session.expect("fixture session");
+        let session = fixture_session();
         let mut duplicate = session.clone();
         duplicate.path = PathBuf::from("/tmp/duplicate-session.jsonl");
         let mut app = SessionsApp::new(vec![session.clone(), duplicate], BTreeSet::new());
@@ -3367,38 +3033,17 @@ mod tests {
         }));
     }
 
-    fn report() -> AgentReport {
-        AgentReport {
-            agent: LiveAgent {
-                kind: AgentKind::Codex,
-                process: ProcessSnapshot {
-                    pid: 42,
-                    parent_pid: Some(1),
-                    executable: PathBuf::from("/opt/bin/codex"),
-                    command: vec!["codex".to_owned()],
-                    cwd: Some(PathBuf::from("/work/project")),
-                    started_at: 1,
-                    run_time: 62,
-                    cpu_percent: 1.0,
-                    memory_bytes: 2_000_000,
-                    status: "running".to_owned(),
-                },
-            },
-            session: Some(AgentSession {
-                kind: AgentKind::Codex,
-                id: "session-id".to_owned(),
-                title: Some("Fix terminal rendering".to_owned()),
-                project: Some(PathBuf::from("/work/project")),
-                path: PathBuf::from("/tmp/session.jsonl"),
-                started_at: None,
-                updated_at: 1,
-                tokens: Some(125_500_000),
-                cost_usd: None,
-            }),
-            association: crate::session::AssociationSummary {
-                status: crate::session::AssociationStatus::Exact,
-                evidence: Some(crate::session::AssociationEvidence::NativeRuntime),
-            },
+    fn fixture_session() -> AgentSession {
+        AgentSession {
+            kind: AgentKind::Codex,
+            id: "session-id".to_owned(),
+            title: Some("Fix terminal rendering".to_owned()),
+            project: Some(PathBuf::from("/work/project")),
+            path: PathBuf::from("/tmp/session.jsonl"),
+            started_at: None,
+            updated_at: 1,
+            tokens: Some(125_500_000),
+            cost_usd: None,
         }
     }
 

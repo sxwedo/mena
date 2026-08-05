@@ -40,10 +40,6 @@ mod tests {
     fn documented_commands_parse() {
         for invocation in [
             vec!["mena", "config", "init", "--import-clix"],
-            vec!["mena", "ps", "--json"],
-            vec!["mena", "top", "--interval", "3", "--iterations", "1"],
-            vec!["mena", "inspect", "codex:42"],
-            vec!["mena", "logs", "session-id", "-n", "20"],
             vec!["mena", "sessions", "--plain"],
             vec!["mena", "ss", "--plain"],
             vec![
