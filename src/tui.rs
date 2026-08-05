@@ -1381,6 +1381,31 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
     );
 }
 
+fn format_project_display_path(path_str: &str, max_len: usize) -> String {
+    let mut formatted = path_str.to_owned();
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.to_string_lossy();
+        if formatted.starts_with(home_str.as_ref()) {
+            formatted = format!("~{}", &formatted[home_str.len()..]);
+        }
+    }
+    if formatted.chars().count() > max_len && max_len > 12 {
+        let components: Vec<&str> = formatted.split('/').collect();
+        if components.len() > 3 {
+            let prefix = components[0];
+            let first_dir = components[1];
+            let last_dir = components.last().copied().unwrap_or("");
+            let candidate = format!("{prefix}/{first_dir}/.../{last_dir}");
+            if candidate.chars().count() <= max_len {
+                return candidate;
+            }
+        }
+        let truncated: String = formatted.chars().take(max_len - 3).collect();
+        format!("{truncated}...")
+    } else {
+        formatted
+    }
+}
 fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut SessionsApp) {
     let columns = session_columns(area.width);
     let header = Row::new(columns.iter().map(|column| Cell::from(column.label)))
@@ -1409,27 +1434,37 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
                 count,
                 collapsed,
             } => {
-                let icon = if *collapsed { "▸ " } else { "▾ " };
-                let count_label = if *count == 1 {
-                    "1 session".to_owned()
-                } else {
-                    format!("{count} sessions")
-                };
-                let header_line = Line::from(vec![
-                    Span::styled(" ", Style::default()),
-                    Span::styled(
-                        icon,
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        project,
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("  ({count_label})"), Style::default().fg(MUTED)),
-                ]);
-                rows.push(Row::new(vec![Cell::from(header_line)]));
+                let mut cells: Vec<Cell<'_>> = Vec::with_capacity(columns.len());
+                for (i, _column) in columns.iter().enumerate() {
+                    if i == 0 {
+                        let icon = if *collapsed { "▸" } else { "▾" };
+                        let path_display = format_project_display_path(project, 52);
+                        let count_label = if *count == 1 {
+                            "(1 session)".to_owned()
+                        } else {
+                            format!("({count} sessions)")
+                        };
+                        let line = Line::from(vec![
+                            Span::styled(
+                                icon,
+                                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                path_display,
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(count_label, Style::default().fg(MUTED)),
+                        ]);
+                        cells.push(Cell::from(line));
+                    } else {
+                        cells.push(Cell::from(""));
+                    }
+                }
+                rows.push(Row::new(cells));
             }
             DisplayRow::Session { session_index } => {
                 rows.push(session_row(*session_index));
@@ -2183,7 +2218,7 @@ fn top_value(report: &AgentReport, column: TopColumn) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionColumn {
     Target,
     Active,
@@ -2196,22 +2231,22 @@ enum SessionColumn {
 fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     if width >= 120 {
         vec![
-            column(SessionColumn::Target, "TARGET", Constraint::Length(46)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(64)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Agent, "AGENT", Constraint::Length(11)),
+            column(SessionColumn::Agent, "AGENT", Constraint::Length(12)),
             column(SessionColumn::Project, "PROJECT", Constraint::Length(14)),
             column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
             column(SessionColumn::Updated, "UPDATED", Constraint::Length(11)),
         ]
     } else if width >= 80 {
         vec![
-            column(SessionColumn::Target, "TARGET", Constraint::Length(46)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(58)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
         ]
     } else {
         vec![
-            column(SessionColumn::Target, "TARGET", Constraint::Length(46)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(58)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(12)),
         ]
@@ -2391,9 +2426,9 @@ mod tests {
     use super::{
         BrowserMode, BrowserPurpose, DetailAction, Grouping, InProgressSearch, SessionDetailTheme,
         SessionsApp, StatusMessage, TopApp, abort_message_search, coalesce_detail_events,
-        configure_alternate_scroll, draw_sessions, draw_top, handle_detail_event,
-        handle_detail_key, search_progress_text, session_columns, session_project_label,
-        start_message_search, step_message_search,
+        configure_alternate_scroll, draw_sessions, draw_top, format_project_display_path,
+        handle_detail_event, handle_detail_key, search_progress_text, session_columns,
+        session_project_label, start_message_search, step_message_search,
     };
     use crate::AgentKind;
     use crate::process::{LiveAgent, ProcessSnapshot};
@@ -3697,8 +3732,9 @@ mod tests {
         let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
         // Both project headers should appear with session count.
-        assert!(screen.contains("▾ /work/p1  (2 sessions)"));
-        assert!(screen.contains("▾ /work/p2  (2 sessions)"));
+        assert!(screen.contains("▾ /work/p1"));
+        assert!(screen.contains("▾ /work/p2"));
+        assert!(screen.contains("(2 sessions)"));
         // Since header (index 0) is selected, selected_session() is None.
         assert_eq!(app.selected_session(), None);
     }
@@ -3739,7 +3775,8 @@ mod tests {
             .expect("draw sessions");
         let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
-        assert!(screen.contains("▸ /work/p1  (2 sessions)"));
+        assert!(screen.contains("▸ /work/p1"));
+        assert!(screen.contains("(2 sessions)"));
         assert!(!screen.contains("Alpha one"));
         // Toggle expand on /work/p1
         app.toggle_project_collapse("/work/p1");
@@ -3753,6 +3790,22 @@ mod tests {
         assert_eq!(session_project_label(&session), "(no project)");
         session.project = Some(PathBuf::from("/work/x"));
         assert_eq!(session_project_label(&session), "/work/x");
+    }
+    #[test]
+    fn format_project_display_path_abbreviates_home_and_truncates() {
+        if let Some(home) = dirs::home_dir() {
+            let full_path = home.join("code/my-project").display().to_string();
+            let formatted = format_project_display_path(&full_path, 40);
+            assert_eq!(formatted, "~/code/my-project");
+
+            let long_path = home
+                .join("code/deeply/nested/directory/structure/my-project")
+                .display()
+                .to_string();
+            let formatted_long = format_project_display_path(&long_path, 30);
+            assert!(formatted_long.contains("..."));
+            assert!(formatted_long.ends_with("my-project"));
+        }
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
