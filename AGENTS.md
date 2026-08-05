@@ -17,8 +17,6 @@ mena top
 mena inspect <target>
 mena logs <target>
 mena sessions
-mena stop <pid-target>
-mena resume [session-target]
 mena config init [--import-clix]
 ```
 

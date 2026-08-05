@@ -61,7 +61,6 @@ mena top                        # watch CPU, memory, and status
 mena sessions                   # browse all saved sessions
 mena ss                         # exact shorthand for `mena sessions`
 mena inspect codex:session-id   # inspect one process or session
-mena resume codex:session-id    # resume with the provider CLI
 ```
 
 Targets are stable and script-friendly:
@@ -124,17 +123,8 @@ terminal text selection still works.
 | `mena sessions` / `mena ss` | Search and manage saved sessions |
 | `mena inspect <target> [--json]` | Inspect a process or session |
 | `mena logs <target> [-n N] [--raw]` | Read a bounded event tail |
-| `mena resume [target]` | Pick or resume a native session |
-| `mena stop <pid-target> [--force]` | Stop a revalidated process |
 | `mena config init` | Create the private configuration file |
 
-Use `mena <command> --help` for all options. Useful resume forms include:
-
-```sh
-mena resume               # interactive picker
-mena resume --last        # most recently updated session
-mena resume --list        # non-interactive candidate list
-```
 
 ## Provider support
 

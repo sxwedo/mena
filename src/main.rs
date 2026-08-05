@@ -55,10 +55,6 @@ mod tests {
                 "10",
                 "--json",
             ],
-            vec!["mena", "stop", "claude:42"],
-            vec!["mena", "resume"],
-            vec!["mena", "resume", "--list"],
-            vec!["mena", "resume", "gemini:session-id"],
         ] {
             Cli::try_parse_from(&invocation)
                 .unwrap_or_else(|error| panic!("failed to parse {invocation:?}: {error}"));

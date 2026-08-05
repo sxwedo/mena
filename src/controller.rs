@@ -8,9 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::process::{
-    AgentKind, LiveAgent, discover_live_agents, discover_live_agents_with_cpu, stop_agent,
-};
+use crate::process::{AgentKind, LiveAgent, discover_live_agents, discover_live_agents_with_cpu};
 use crate::session::{
     AgentSession, NativeResumeCommand, SessionCatalog, UsageCache, native_resume_command,
     tail_records,
@@ -21,7 +19,7 @@ use crate::ui;
 use crate::view::{
     AgentReport, format_bytes, format_duration, render_process_table, render_session_table,
 };
-use crate::{LogsArgs, PsArgs, ResumeArgs, SessionsArgs, StopArgs, TargetArgs, TopArgs};
+use crate::{LogsArgs, PsArgs, SessionsArgs, TargetArgs, TopArgs};
 
 pub fn run_ps(args: &PsArgs, settings: &Settings) -> Result<()> {
     let agents = discover_live_agents(&settings.agent.custom)?;
@@ -207,64 +205,6 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         print!("{}", render_session_table(sessions, None));
     }
     Ok(())
-}
-
-pub fn run_stop(args: &StopArgs, settings: &Settings) -> Result<()> {
-    if !is_live_selector(&args.target, &settings.agent.custom) {
-        bail!("mena stop requires a PID or provider:PID selector");
-    }
-    let live = discover_live_agents(&settings.agent.custom)?;
-    let agent = resolve_live(&live, &args.target, &settings.agent.custom)
-        .with_context(|| format!("running agent not found: {}", args.target))?;
-    stop_agent(agent, args.force, &settings.agent.custom)?;
-    let signal = if args.force {
-        "force-stop"
-    } else {
-        "termination"
-    };
-    ui::success(format!(
-        "sent {signal} signal to {}:{}",
-        agent.kind.slug(),
-        agent.process.pid
-    ));
-    Ok(())
-}
-
-pub fn run_resume(args: &ResumeArgs, settings: &Settings) -> Result<()> {
-    if args.limit == 0 {
-        bail!("--limit must be at least 1");
-    }
-    if args.list {
-        let catalog = scan_sessions(None)?;
-        let sessions = &catalog.sessions()[..catalog.sessions().len().min(args.limit)];
-        print!("{}", render_session_table(sessions, None));
-        return Ok(());
-    }
-
-    let target = if let Some(target) = &args.target {
-        target.clone()
-    } else {
-        let catalog = scan_sessions(None)?;
-        let sessions = &catalog.sessions()[..catalog.sessions().len().min(args.limit)];
-        let selected = if args.last {
-            sessions.first().cloned()
-        } else {
-            if sessions.is_empty() {
-                bail!("no saved developer-agent sessions were found");
-            }
-            if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-                bail!(
-                    "interactive session selection requires a terminal; use `mena resume --list`"
-                );
-            }
-            tui::pick_session(sessions.to_vec())?
-        };
-        let Some(session) = selected else {
-            return Ok(());
-        };
-        session.target()
-    };
-    resume_target(&target, settings)
 }
 
 fn resume_target(target: &str, settings: &Settings) -> Result<()> {

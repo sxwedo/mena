@@ -42,10 +42,6 @@ pub enum AgentCommand {
     /// List saved sessions, including sessions without a running process
     #[command(visible_alias = "ss")]
     Sessions(SessionsArgs),
-    /// Gracefully terminate a running agent process
-    Stop(StopArgs),
-    /// Resume a saved agent session with its native CLI
-    Resume(ResumeArgs),
 }
 
 /// Mena configuration operations.
@@ -113,30 +109,6 @@ pub struct SessionsArgs {
     pub plain: bool,
 }
 
-#[derive(Debug, Clone, Args)]
-pub struct StopArgs {
-    /// PID or provider:PID of the live agent to stop
-    pub target: String,
-    /// Send a forceful kill signal instead of a graceful termination signal
-    #[arg(long)]
-    pub force: bool,
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct ResumeArgs {
-    /// Session ID or provider:session ID
-    pub target: Option<String>,
-    /// List recent resumable sessions without starting one
-    #[arg(long, conflicts_with_all = ["target", "last"])]
-    pub list: bool,
-    /// Resume the most recently updated session
-    #[arg(long, conflicts_with_all = ["target", "list"])]
-    pub last: bool,
-    /// Maximum number of sessions shown by the list or picker
-    #[arg(long, default_value_t = 30)]
-    pub limit: usize,
-}
-
 /// Execute one `mena` command.
 ///
 /// # Errors
@@ -160,8 +132,6 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
         AgentCommand::Inspect(args) => controller::run_inspect(&args, settings),
         AgentCommand::Logs(args) => controller::run_logs(&args, settings),
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
-        AgentCommand::Stop(args) => controller::run_stop(&args, settings),
-        AgentCommand::Resume(args) => controller::run_resume(&args, settings),
     }
 }
 

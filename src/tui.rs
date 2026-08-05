@@ -186,7 +186,6 @@ pub fn manage_sessions(
     run_session_browser(
         sessions,
         active_targets,
-        BrowserPurpose::Manage,
         SessionDetailTheme::from(detail_colors),
         SessionBrowserCallbacks {
             load_detail: Some(&mut load_detail),
@@ -194,16 +193,6 @@ pub fn manage_sessions(
             copy: Some(&mut copy),
             delete: Some(&mut delete),
         },
-    )
-}
-
-pub fn pick_session(sessions: Vec<AgentSession>) -> Result<Option<AgentSession>> {
-    run_session_browser(
-        sessions,
-        BTreeSet::new(),
-        BrowserPurpose::Pick,
-        SessionDetailTheme::default(),
-        SessionBrowserCallbacks::default(),
     )
 }
 
@@ -238,12 +227,10 @@ fn pump_search(
 fn run_session_browser(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
-    purpose: BrowserPurpose,
     detail_theme: SessionDetailTheme,
     mut callbacks: SessionBrowserCallbacks<'_>,
 ) -> Result<Option<AgentSession>> {
-    let mut app =
-        SessionsApp::new_with_detail_theme(sessions, active_targets, purpose, detail_theme);
+    let mut app = SessionsApp::new_with_detail_theme(sessions, active_targets, detail_theme);
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     loop {
         terminal
@@ -309,19 +296,10 @@ fn run_session_browser(
                     KeyCode::End => app.last(),
                     KeyCode::Char('/') => app.mode = BrowserMode::Search,
                     KeyCode::Char('g') => app.cycle_grouping(),
-                    KeyCode::Enter if app.purpose == BrowserPurpose::Pick => {
-                        if let Some(DisplayRow::GroupHeader { project, .. }) = app.selected_row() {
-                            app.toggle_project_collapse(&project);
-                        } else {
-                            return Ok(app.selected_session().cloned());
-                        }
-                    }
-                    KeyCode::Char('r') if app.purpose == BrowserPurpose::Manage => {
+                    KeyCode::Char('r') => {
                         return Ok(app.selected_session().cloned());
                     }
-                    KeyCode::Enter | KeyCode::Char('i')
-                        if app.purpose == BrowserPurpose::Manage =>
-                    {
+                    KeyCode::Enter | KeyCode::Char('i') => {
                         if let Some(DisplayRow::GroupHeader { project, .. }) = app.selected_row() {
                             app.toggle_project_collapse(&project);
                         } else if let Some(session) = app.selected_session().cloned()
@@ -337,7 +315,7 @@ fn run_session_browser(
                             }
                         }
                     }
-                    KeyCode::Char('d') if app.purpose == BrowserPurpose::Manage => {
+                    KeyCode::Char('d') => {
                         app.request_delete();
                     }
                     _ => {}
@@ -612,12 +590,6 @@ impl TopApp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserPurpose {
-    Manage,
-    Pick,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserMode {
     Browse,
     Search,
@@ -696,7 +668,6 @@ struct SessionsApp {
     table_state: TableState,
     query: String,
     mode: BrowserMode,
-    purpose: BrowserPurpose,
     detail_theme: SessionDetailTheme,
     detail: Option<SessionDetail>,
     detail_scroll: usize,
@@ -723,23 +694,13 @@ struct SessionsApp {
 
 impl SessionsApp {
     #[cfg(test)]
-    fn new(
-        sessions: Vec<AgentSession>,
-        active_targets: BTreeSet<String>,
-        purpose: BrowserPurpose,
-    ) -> Self {
-        Self::new_with_detail_theme(
-            sessions,
-            active_targets,
-            purpose,
-            SessionDetailTheme::default(),
-        )
+    fn new(sessions: Vec<AgentSession>, active_targets: BTreeSet<String>) -> Self {
+        Self::new_with_detail_theme(sessions, active_targets, SessionDetailTheme::default())
     }
 
     fn new_with_detail_theme(
         sessions: Vec<AgentSession>,
         active_targets: BTreeSet<String>,
-        purpose: BrowserPurpose,
         detail_theme: SessionDetailTheme,
     ) -> Self {
         let mut app = Self {
@@ -749,7 +710,6 @@ impl SessionsApp {
             table_state: TableState::default(),
             query: String::new(),
             mode: BrowserMode::Browse,
-            purpose,
             detail_theme,
             detail: None,
             detail_scroll: 0,
@@ -1473,19 +1433,12 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
     }
 
     let grouping_label = app.grouping.label();
-    let table_title = match app.purpose {
-        BrowserPurpose::Manage => format!(
-            " Sessions  {} shown / {} saved  ·  grouped: {} ",
-            app.filtered.len(),
-            app.sessions.len(),
-            grouping_label,
-        ),
-        BrowserPurpose::Pick => format!(
-            " Resume session  {} matches  ·  grouped: {} ",
-            app.filtered.len(),
-            grouping_label,
-        ),
-    };
+    let table_title = format!(
+        " Sessions  {} shown / {} saved  ·  grouped: {} ",
+        app.filtered.len(),
+        app.sessions.len(),
+        grouping_label,
+    );
 
     let table = Table::new(rows, columns.iter().map(|column| column.constraint))
         .header(header)
@@ -2047,10 +2000,11 @@ fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
 }
 
 fn footer_for_status(app: &SessionsApp) -> Line<'static> {
-    app.status.as_ref().map_or_else(
-        || session_key_hints(app.purpose),
-        |status| Line::from(Span::styled(status.text.clone(), status.style)),
-    )
+    app.status
+        .as_ref()
+        .map_or_else(session_key_hints, |status| {
+            Line::from(Span::styled(status.text.clone(), status.style))
+        })
 }
 
 fn searching_footer_line(progress: &InProgressSearch, app: &SessionsApp) -> Line<'static> {
@@ -2075,26 +2029,16 @@ fn search_progress_text(progress: &InProgressSearch, total: usize) -> String {
     )
 }
 
-fn session_key_hints(purpose: BrowserPurpose) -> Line<'static> {
-    if purpose == BrowserPurpose::Pick {
-        key_hints(&[
-            ("↑/↓", "navigate"),
-            ("/", "search"),
-            ("g", "group"),
-            ("Enter", "resume"),
-            ("q", "cancel"),
-        ])
-    } else {
-        key_hints(&[
-            ("↑/↓", "navigate"),
-            ("/", "search"),
-            ("g", "group"),
-            ("Enter", "details"),
-            ("r", "resume"),
-            ("d", "delete"),
-            ("q", "quit"),
-        ])
-    }
+fn session_key_hints() -> Line<'static> {
+    key_hints(&[
+        ("↑/↓", "navigate"),
+        ("/", "search"),
+        ("g", "group"),
+        ("Enter", "details"),
+        ("r", "resume"),
+        ("d", "delete"),
+        ("q", "quit"),
+    ])
 }
 
 fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
@@ -2438,12 +2382,11 @@ mod tests {
     use ratatui::widgets::Cell;
 
     use super::{
-        BrowserMode, BrowserPurpose, DetailAction, Grouping, InProgressSearch, SessionColumn,
-        SessionDetailTheme, SessionsApp, StatusMessage, TopApp, abort_message_search,
-        coalesce_detail_events, configure_alternate_scroll, draw_sessions, draw_top,
-        format_project_display_path, handle_detail_event, handle_detail_key, search_progress_text,
-        session_cell, session_columns, session_project_label, start_message_search,
-        step_message_search,
+        BrowserMode, DetailAction, Grouping, InProgressSearch, SessionColumn, SessionDetailTheme,
+        SessionsApp, StatusMessage, TopApp, abort_message_search, coalesce_detail_events,
+        configure_alternate_scroll, draw_sessions, draw_top, format_project_display_path,
+        handle_detail_event, handle_detail_key, search_progress_text, session_cell,
+        session_columns, session_project_label, start_message_search, step_message_search,
     };
     use crate::process::{LiveAgent, ProcessSnapshot};
     use crate::session::{
@@ -2501,7 +2444,7 @@ mod tests {
     #[test]
     fn session_layout_displays_titles_and_filters_by_them() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(vec![session], BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(vec![session], BTreeSet::default());
         app.query = "rendering".to_owned();
         app.recompute_filter();
         assert_eq!(app.filtered.len(), 1);
@@ -2521,7 +2464,7 @@ mod tests {
         let mut session = report().session.expect("fixture session");
         session.id = "019fbd66-e95f-7dd2-b9b4-37a27a61c272".to_owned();
         let target = session.target();
-        let mut app = SessionsApp::new(vec![session], BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(vec![session], BTreeSet::default());
         let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("test terminal");
 
         terminal
@@ -2541,11 +2484,7 @@ mod tests {
         let first = report().session.expect("first session");
         let mut second = first.clone();
         second.id = "second-session".to_owned();
-        let mut app = SessionsApp::new(
-            vec![first.clone(), second],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
         app.open_detail(SessionDetail {
             session: first,
             messages: vec![SessionMessage {
@@ -2576,11 +2515,7 @@ mod tests {
         let first = report().session.expect("first session");
         let mut second = first.clone();
         second.id = "second-session".to_owned();
-        let mut app = SessionsApp::new(
-            vec![first.clone(), second],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
         app.open_detail(SessionDetail {
             session: first.clone(),
             messages: Vec::new(),
@@ -2602,11 +2537,7 @@ mod tests {
         let mut session = report().session.expect("fixture session");
         session.started_at = Some("2026-08-01T01:02:03Z".to_owned());
         session.cost_usd = Some(1.25);
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: vec![
@@ -2730,11 +2661,7 @@ mod tests {
                 content: "visible assistant answer".to_owned(),
             },
         ];
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         assert_eq!(app.preview_scope, DetailScope::Conversation);
 
@@ -2776,11 +2703,7 @@ mod tests {
                 content: "full-only tool content".to_owned(),
             },
         ];
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
 
         // Shift+P (uppercase P) switches to the complete preview.
@@ -2843,11 +2766,7 @@ mod tests {
                 content: format!("plain-body-{index}"),
             })
             .collect();
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         app.preview_scope = DetailScope::All;
         let mut terminal = Terminal::new(TestBackend::new(100, 42)).expect("test terminal");
@@ -2894,7 +2813,6 @@ mod tests {
         let mut app = SessionsApp::new_with_detail_theme(
             vec![session.clone()],
             BTreeSet::default(),
-            BrowserPurpose::Manage,
             SessionDetailTheme::from(&colors),
         );
         app.open_detail(SessionDetail {
@@ -2938,11 +2856,7 @@ mod tests {
     #[test]
     fn detail_metadata_keys_are_pink_purple() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: Vec::new(),
@@ -2980,11 +2894,7 @@ mod tests {
                 content: format!("complete message number {index}"),
             })
             .collect();
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         let selected = app.table_state.selected();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
@@ -3019,11 +2929,7 @@ mod tests {
             metrics: SessionMessageMetrics::default(),
             content: format!("{wrapped}FINAL DETAIL CONTENT"),
         }];
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         let mut terminal = Terminal::new(TestBackend::new(36, 18)).expect("test terminal");
         terminal
@@ -3058,11 +2964,7 @@ mod tests {
             metrics: SessionMessageMetrics::default(),
             content: format!("{wrapped}FINAL CONTENT AFTER RESIZE"),
         }];
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
         terminal
@@ -3101,11 +3003,7 @@ mod tests {
             metrics: SessionMessageMetrics::default(),
             content,
         }];
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
         terminal
@@ -3166,11 +3064,7 @@ mod tests {
                 content: "assistant answer".to_owned(),
             },
         ];
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail { session, messages });
         app.preview_scope = DetailScope::All;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
@@ -3211,11 +3105,7 @@ mod tests {
     #[test]
     fn detail_scroll_bursts_are_coalesced_and_key_repeats_do_not_keep_scrolling() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: Vec::new(),
@@ -3274,11 +3164,7 @@ mod tests {
         let first = report().session.expect("first session");
         let mut second = first.clone();
         second.id = "second-session".to_owned();
-        let mut app = SessionsApp::new(
-            vec![first.clone(), second],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
         app.open_detail(SessionDetail {
             session: first,
             messages: Vec::new(),
@@ -3310,11 +3196,7 @@ mod tests {
     #[test]
     fn copying_from_detail_copies_the_complete_session_and_keeps_context() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: vec![SessionMessage {
@@ -3358,11 +3240,7 @@ mod tests {
     #[test]
     fn command_c_is_left_to_the_terminal_native_selection() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: Vec::new(),
@@ -3387,11 +3265,7 @@ mod tests {
     #[test]
     fn failed_detail_copy_keeps_context_and_reports_a_red_error() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: Vec::new(),
@@ -3423,11 +3297,7 @@ mod tests {
     #[test]
     fn failed_detail_export_keeps_context_and_reports_a_red_error() {
         let session = report().session.expect("fixture session");
-        let mut app = SessionsApp::new(
-            vec![session.clone()],
-            BTreeSet::default(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
         app.open_detail(SessionDetail {
             session,
             messages: Vec::new(),
@@ -3460,11 +3330,7 @@ mod tests {
     fn running_sessions_cannot_enter_delete_confirmation() {
         let session = report().session.expect("fixture session");
         let target = session.target();
-        let mut app = SessionsApp::new(
-            vec![session],
-            BTreeSet::from([target]),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session], BTreeSet::from([target]));
 
         app.request_delete();
 
@@ -3481,11 +3347,7 @@ mod tests {
         let session = report().session.expect("fixture session");
         let mut duplicate = session.clone();
         duplicate.path = PathBuf::from("/tmp/duplicate-session.jsonl");
-        let mut app = SessionsApp::new(
-            vec![session.clone(), duplicate],
-            BTreeSet::new(),
-            BrowserPurpose::Manage,
-        );
+        let mut app = SessionsApp::new(vec![session.clone(), duplicate], BTreeSet::new());
 
         app.deleted(
             &session,
@@ -3564,7 +3426,7 @@ mod tests {
             transcript_session("a", "Alpha work", "/tmp/a.jsonl"),
             transcript_session("b", "Beta work", "/tmp/b.jsonl"),
         ];
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         app.query = "rewrite".to_owned();
         app.recompute_filter();
         // Scalar-only: no hits yet.
@@ -3600,7 +3462,7 @@ mod tests {
     #[test]
     fn editing_the_query_clears_committed_message_search() {
         let sessions = vec![transcript_session("a", "Alpha", "/tmp/a.jsonl")];
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         app.query = "rewrite".to_owned();
         let mut load_detail = |session: &AgentSession| {
             Ok(SessionDetail {
@@ -3629,7 +3491,7 @@ mod tests {
     #[test]
     fn message_search_without_load_detail_is_a_noop() {
         let sessions = vec![transcript_session("a", "Alpha", "/tmp/a.jsonl")];
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         app.query = "rewrite".to_owned();
         // No loader: start_message_search returns false synchronously and never
         // spawns an incremental search.
@@ -3660,7 +3522,7 @@ mod tests {
             transcript_session("a", "Alpha", "/tmp/a.jsonl"),
             transcript_session("b", "Beta", "/tmp/b.jsonl"),
         ];
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         app.query = "rewrite".to_owned();
         assert!(start_message_search(&mut app, true));
         // Scan one session, then cancel before finishing.
@@ -3691,7 +3553,7 @@ mod tests {
             transcript_session("a", "Alpha", "/tmp/a.jsonl"),
             transcript_session("b", "Beta", "/tmp/b.jsonl"),
         ];
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         assert_eq!(app.grouping, Grouping::Flat);
 
         app.cycle_grouping();
@@ -3734,7 +3596,7 @@ mod tests {
         sessions[1].project = Some(PathBuf::from("/work/p1"));
         sessions[2].project = Some(PathBuf::from("/work/p2"));
         sessions[3].project = Some(PathBuf::from("/work/p2"));
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         app.grouping = Grouping::Project;
         // Select the first group header (index 0).
         app.table_state.select(Some(0));
@@ -3763,7 +3625,7 @@ mod tests {
         sessions[0].project = Some(PathBuf::from("/work/p1"));
         sessions[1].project = Some(PathBuf::from("/work/p1"));
         sessions[2].project = Some(PathBuf::from("/work/p2"));
-        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        let mut app = SessionsApp::new(sessions, BTreeSet::default());
         app.grouping = Grouping::Project;
 
         // Initially: Header p1 (0), a1 (1), a2 (2), Header p2 (3), b1 (4)
@@ -3826,11 +3688,7 @@ mod tests {
         let session = transcript_session("a", "Alpha", "/tmp/a.jsonl");
         let mut active_targets = BTreeSet::new();
         active_targets.insert(session.target());
-        let app = SessionsApp::new(
-            vec![session.clone()],
-            active_targets,
-            BrowserPurpose::Manage,
-        );
+        let app = SessionsApp::new(vec![session.clone()], active_targets);
 
         let cell = session_cell(&session, SessionColumn::Active, &app);
         let inactive_cell = session_cell(&session, SessionColumn::Agent, &app);

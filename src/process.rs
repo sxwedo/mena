@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
 
 use crate::settings::CustomAgentSettings;
@@ -225,58 +225,6 @@ pub fn discover_live_agents_with_cpu(
     Ok(agents)
 }
 
-pub fn stop_agent(
-    expected: &LiveAgent,
-    force: bool,
-    custom: &BTreeMap<String, CustomAgentSettings>,
-) -> Result<()> {
-    let pid = sysinfo::Pid::from_u32(expected.process.pid);
-    let refresh = ProcessRefreshKind::nothing()
-        .with_cwd(UpdateKind::OnlyIfNotSet)
-        .with_cmd(UpdateKind::OnlyIfNotSet)
-        .with_exe(UpdateKind::OnlyIfNotSet)
-        .without_tasks();
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
-    let process = system.process(pid).with_context(|| {
-        format!(
-            "agent process {} exited before it could be stopped",
-            expected.process.pid
-        )
-    })?;
-    let current_snapshot = snapshot(pid, process);
-    let current_kind =
-        recognize_agent_with_custom(&current_snapshot, custom)?.with_context(|| {
-            format!(
-                "PID {} is no longer a recognized developer agent",
-                expected.process.pid
-            )
-        })?;
-    if current_kind != expected.kind || !same_process_identity(&expected.process, &current_snapshot)
-    {
-        bail!(
-            "PID {} changed identity while stop was being prepared; no signal was sent",
-            expected.process.pid
-        );
-    }
-
-    let sent = if force {
-        process.kill()
-    } else {
-        process.kill_with(sysinfo::Signal::Term).with_context(
-            || "graceful termination is unsupported on this platform; retry with --force",
-        )?
-    };
-    if !sent {
-        bail!(
-            "failed to signal {}:{}; check process ownership and permissions",
-            expected.kind.slug(),
-            expected.process.pid
-        );
-    }
-    Ok(())
-}
-
 fn recognize_agent_with_custom(
     process: &ProcessSnapshot,
     custom: &BTreeMap<String, CustomAgentSettings>,
@@ -349,12 +297,6 @@ pub fn validate_custom_agents(custom: &BTreeMap<String, CustomAgentSettings>) ->
         }
     }
     Ok(())
-}
-
-fn same_process_identity(expected: &ProcessSnapshot, current: &ProcessSnapshot) -> bool {
-    expected.pid == current.pid
-        && expected.started_at == current.started_at
-        && expected.executable == current.executable
 }
 
 fn snapshot(pid: sysinfo::Pid, process: &sysinfo::Process) -> ProcessSnapshot {

@@ -58,7 +58,6 @@ mena top                        # 监控 CPU、内存和状态
 mena sessions                   # 浏览全部已保存 Session
 mena ss                         # `mena sessions` 的完全等价简写
 mena inspect codex:session-id   # 检查一个进程或 Session
-mena resume codex:session-id    # 使用 Provider CLI 恢复
 ```
 
 Target 稳定且适合脚本使用：
@@ -115,17 +114,8 @@ mena ss --json
 | `mena sessions` / `mena ss` | 搜索并管理已保存 Session |
 | `mena inspect <target> [--json]` | 检查进程或 Session |
 | `mena logs <target> [-n N] [--raw]` | 读取有界的事件日志尾部 |
-| `mena resume [target]` | 选择或恢复原生 Session |
-| `mena stop <pid-target> [--force]` | 重新验证进程后终止 |
 | `mena config init` | 创建私有配置文件 |
 
-使用 `mena <command> --help` 查看全部选项。常用恢复方式：
-
-```sh
-mena resume               # 交互式选择
-mena resume --last        # 恢复最近更新的 Session
-mena resume --list        # 非交互式候选列表
-```
 
 ## Provider 支持
 
