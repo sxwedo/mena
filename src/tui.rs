@@ -234,6 +234,7 @@ fn pump_search(
     Ok(true)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_session_browser(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
@@ -309,7 +310,11 @@ fn run_session_browser(
                     KeyCode::Char('/') => app.mode = BrowserMode::Search,
                     KeyCode::Char('g') => app.cycle_grouping(),
                     KeyCode::Enter if app.purpose == BrowserPurpose::Pick => {
-                        return Ok(app.selected_session().cloned());
+                        if let Some(DisplayRow::GroupHeader { project, .. }) = app.selected_row() {
+                            app.toggle_project_collapse(&project);
+                        } else {
+                            return Ok(app.selected_session().cloned());
+                        }
                     }
                     KeyCode::Char('r') if app.purpose == BrowserPurpose::Manage => {
                         return Ok(app.selected_session().cloned());
@@ -317,7 +322,9 @@ fn run_session_browser(
                     KeyCode::Enter | KeyCode::Char('i')
                         if app.purpose == BrowserPurpose::Manage =>
                     {
-                        if let Some(session) = app.selected_session().cloned()
+                        if let Some(DisplayRow::GroupHeader { project, .. }) = app.selected_row() {
+                            app.toggle_project_collapse(&project);
+                        } else if let Some(session) = app.selected_session().cloned()
                             && let Some(load_detail) = callbacks.load_detail.as_deref_mut()
                         {
                             match load_detail(&session) {
@@ -618,15 +625,26 @@ enum BrowserMode {
     ConfirmDelete,
 }
 
-/// How the session list is grouped in the table. `Flat` is the legacy single
-/// list; `Project` inserts a header row per project and keeps the original
-/// within-group order. Navigation still operates on the flat `filtered` index
-/// list — grouping only changes rendering.
+/// How the session list is grouped in the table. `Flat` is the single
+/// flat list; `Project` inserts selectable header rows per project, allows
+/// collapsing/expanding groups via Enter, and keeps original within-group order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Grouping {
     #[default]
     Flat,
     Project,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DisplayRow {
+    GroupHeader {
+        project: String,
+        count: usize,
+        collapsed: bool,
+    },
+    Session {
+        session_index: usize,
+    },
 }
 
 impl Grouping {
@@ -696,6 +714,8 @@ struct SessionsApp {
     search_in_progress: Option<InProgressSearch>,
     /// Whether the table renders flat or with per-project group headers.
     grouping: Grouping,
+    /// Set of project keys currently collapsed in Project grouping mode.
+    collapsed_projects: BTreeSet<String>,
     /// Which messages the detail preview shows. Defaults to `Conversation`
     /// (user/assistant only); toggled with `p`/`Shift+P` in detail mode.
     preview_scope: DetailScope,
@@ -741,6 +761,7 @@ impl SessionsApp {
             message_search: None,
             search_in_progress: None,
             grouping: Grouping::Flat,
+            collapsed_projects: BTreeSet::default(),
             preview_scope: DetailScope::Conversation,
         };
         app.recompute_filter();
@@ -760,13 +781,70 @@ impl SessionsApp {
             })
             .map(|(index, _)| index)
             .collect();
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
+        let len = self.display_rows().len();
         let selected = self.table_state.selected().unwrap_or_default();
-        self.table_state.select(
-            self.filtered
-                .len()
-                .checked_sub(1)
-                .map(|last| selected.min(last)),
-        );
+        self.table_state
+            .select(len.checked_sub(1).map(|last| selected.min(last)));
+    }
+
+    fn display_rows(&self) -> Vec<DisplayRow> {
+        match self.grouping {
+            Grouping::Flat => self
+                .filtered
+                .iter()
+                .map(|&session_index| DisplayRow::Session { session_index })
+                .collect(),
+            Grouping::Project => {
+                let mut seen: Vec<String> = Vec::new();
+                for &session_index in &self.filtered {
+                    let key = session_project_label(&self.sessions[session_index]);
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                    }
+                }
+                let mut rows = Vec::new();
+                for key in seen {
+                    let count = self
+                        .filtered
+                        .iter()
+                        .filter(|&&idx| session_project_label(&self.sessions[idx]) == key)
+                        .count();
+                    let collapsed = self.collapsed_projects.contains(&key);
+                    rows.push(DisplayRow::GroupHeader {
+                        project: key.clone(),
+                        count,
+                        collapsed,
+                    });
+                    if !collapsed {
+                        for &session_index in &self.filtered {
+                            if session_project_label(&self.sessions[session_index]) == key {
+                                rows.push(DisplayRow::Session { session_index });
+                            }
+                        }
+                    }
+                }
+                rows
+            }
+        }
+    }
+
+    fn selected_row(&self) -> Option<DisplayRow> {
+        let rows = self.display_rows();
+        let selected = self.table_state.selected()?;
+        rows.get(selected).cloned()
+    }
+
+    fn toggle_project_collapse(&mut self, project: &str) {
+        if self.collapsed_projects.contains(project) {
+            self.collapsed_projects.remove(project);
+        } else {
+            self.collapsed_projects.insert(project.to_owned());
+        }
+        self.clamp_selection();
     }
 
     fn append_search(&mut self, value: &str) {
@@ -774,9 +852,36 @@ impl SessionsApp {
         self.recompute_filter();
     }
 
+    fn collapse_all_projects(&mut self) {
+        self.collapsed_projects.clear();
+        for &session_index in &self.filtered {
+            let key = session_project_label(&self.sessions[session_index]);
+            self.collapsed_projects.insert(key);
+        }
+    }
+
     /// Toggle the list grouping (flat ↔ by project).
     fn cycle_grouping(&mut self) {
+        let current_session_index = match self.selected_row() {
+            Some(DisplayRow::Session { session_index }) => Some(session_index),
+            _ => None,
+        };
         self.grouping = self.grouping.cycle();
+        if self.grouping == Grouping::Project {
+            self.collapse_all_projects();
+        }
+        let display_rows = self.display_rows();
+        if let Some(target_index) = current_session_index {
+            if let Some(new_pos) = display_rows.iter().position(|r| {
+                matches!(r, DisplayRow::Session { session_index } if *session_index == target_index)
+            }) {
+                self.table_state.select(Some(new_pos));
+            } else {
+                self.clamp_selection();
+            }
+        } else {
+            self.clamp_selection();
+        }
         self.status = Some(StatusMessage::success(format!(
             "Grouped: {}",
             self.grouping.label(),
@@ -799,10 +904,10 @@ impl SessionsApp {
     }
 
     fn selected_session(&self) -> Option<&AgentSession> {
-        self.table_state
-            .selected()
-            .and_then(|selected| self.filtered.get(selected))
-            .and_then(|index| self.sessions.get(*index))
+        match self.selected_row()? {
+            DisplayRow::Session { session_index } => self.sessions.get(session_index),
+            DisplayRow::GroupHeader { .. } => None,
+        }
     }
 
     fn previous(&mut self) {
@@ -814,23 +919,24 @@ impl SessionsApp {
     }
 
     fn move_by(&mut self, amount: isize) {
-        if self.filtered.is_empty() {
+        let len = self.display_rows().len();
+        if len == 0 {
+            self.table_state.select(None);
             return;
         }
         let selected = self.table_state.selected().unwrap_or_default();
-        let selected = selected
-            .saturating_add_signed(amount)
-            .min(self.filtered.len() - 1);
+        let selected = selected.saturating_add_signed(amount).min(len - 1);
         self.table_state.select(Some(selected));
     }
 
     fn first(&mut self) {
-        self.table_state
-            .select((!self.filtered.is_empty()).then_some(0));
+        let len = self.display_rows().len();
+        self.table_state.select((len > 0).then_some(0));
     }
 
-    const fn last(&mut self) {
-        self.table_state.select(self.filtered.len().checked_sub(1));
+    fn last(&mut self) {
+        let len = self.display_rows().len();
+        self.table_state.select(len.checked_sub(1));
     }
 
     fn open_detail(&mut self, detail: SessionDetail) {
@@ -1285,15 +1391,8 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
         )
         .bottom_margin(1);
 
-    // Build the visible row sequence. In Project grouping each group gets a
-    // non-selectable header row; `filtered_to_display` maps the flat filtered
-    // index (what navigation/selection uses) to the actual table row so the
-    // highlight lands on a session row, never a header.
-    let mut rows: Vec<Row<'_>> = Vec::new();
-    let mut filtered_to_display: Vec<usize> = Vec::with_capacity(app.filtered.len());
-    let group_header_style = Style::default()
-        .fg(METADATA_KEY)
-        .add_modifier(Modifier::BOLD);
+    let display_rows = app.display_rows();
+    let mut rows: Vec<Row<'_>> = Vec::with_capacity(display_rows.len());
     let session_row = |session_index: usize| {
         let session = &app.sessions[session_index];
         Row::new(
@@ -1302,33 +1401,38 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
                 .map(|column| Cell::from(session_value(session, column.kind, app))),
         )
     };
-    match app.grouping {
-        Grouping::Flat => {
-            for &session_index in &app.filtered {
-                filtered_to_display.push(rows.len());
-                rows.push(session_row(session_index));
+
+    for item in &display_rows {
+        match item {
+            DisplayRow::GroupHeader {
+                project,
+                count,
+                collapsed,
+            } => {
+                let icon = if *collapsed { "▸ " } else { "▾ " };
+                let count_label = if *count == 1 {
+                    "1 session".to_owned()
+                } else {
+                    format!("{count} sessions")
+                };
+                let header_line = Line::from(vec![
+                    Span::styled(" ", Style::default()),
+                    Span::styled(
+                        icon,
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        project,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  ({count_label})"), Style::default().fg(MUTED)),
+                ]);
+                rows.push(Row::new(vec![Cell::from(header_line)]));
             }
-        }
-        Grouping::Project => {
-            let mut seen: Vec<String> = Vec::new();
-            // First pass: discover group order by first appearance.
-            for &session_index in &app.filtered {
-                let key = session_project_label(&app.sessions[session_index]);
-                if !seen.contains(&key) {
-                    seen.push(key);
-                }
-            }
-            // Second pass: emit header + members per group, in discovery order.
-            for key in &seen {
-                rows.push(
-                    Row::new(vec![Cell::from(format!(" ▾ {key} "))]).style(group_header_style),
-                );
-                for &session_index in &app.filtered {
-                    if session_project_label(&app.sessions[session_index]) == *key {
-                        filtered_to_display.push(rows.len());
-                        rows.push(session_row(session_index));
-                    }
-                }
+            DisplayRow::Session { session_index } => {
+                rows.push(session_row(*session_index));
             }
         }
     }
@@ -1348,13 +1452,6 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
         ),
     };
 
-    // Translate the flat selection to its table row so the highlight and scroll
-    // follow the user's intent, then restore the flat index after rendering so
-    // navigation keeps working on the filtered list.
-    let flat_selected = app.table_state.selected();
-    let display_selected = flat_selected.and_then(|index| filtered_to_display.get(index).copied());
-    app.table_state.select(display_selected);
-
     let table = Table::new(rows, columns.iter().map(|column| column.constraint))
         .header(header)
         .block(Block::new().borders(Borders::ALL).title(table_title))
@@ -1367,8 +1464,6 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
         )
         .highlight_symbol("› ");
     frame.render_stateful_widget(table, area, &mut app.table_state);
-
-    app.table_state.select(flat_selected);
 }
 
 /// Stable label used as the grouping key for project grouping. Sessions without
@@ -2281,6 +2376,7 @@ fn centered_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rec
 
 #[cfg(test)]
 mod tests {
+    use super::DisplayRow;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
@@ -3556,6 +3652,13 @@ mod tests {
                 .as_ref()
                 .is_some_and(|status| status.text.contains("by project"))
         );
+        assert!(app.display_rows().iter().all(|row| matches!(
+            row,
+            DisplayRow::GroupHeader {
+                collapsed: true,
+                ..
+            }
+        )));
 
         app.cycle_grouping();
         assert_eq!(app.grouping, Grouping::Flat);
@@ -3567,10 +3670,10 @@ mod tests {
     }
 
     #[test]
-    fn project_grouping_renders_header_rows_and_keeps_selection_on_a_session() {
+    fn project_grouping_renders_header_rows_and_allows_selectable_group_headers() {
         // Two projects (p1, p2) with two sessions each. With Project grouping on,
-        // each project renders a header row; the highlight must land on the
-        // selected session's table row, not on a header.
+        // each project renders a header row; selecting a header row makes selected_session()
+        // return None.
         let mut sessions = vec![
             transcript_session("a1", "Alpha one", "/tmp/p1/a1.jsonl"),
             transcript_session("a2", "Alpha two", "/tmp/p1/a2.jsonl"),
@@ -3584,8 +3687,8 @@ mod tests {
         sessions[3].project = Some(PathBuf::from("/work/p2"));
         let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
         app.grouping = Grouping::Project;
-        // Select the first session of the second project (flat filtered index 2).
-        app.table_state.select(Some(2));
+        // Select the first group header (index 0).
+        app.table_state.select(Some(0));
 
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
         terminal
@@ -3593,13 +3696,54 @@ mod tests {
             .expect("draw sessions");
         let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
-        // Both project headers should appear.
-        assert!(screen.contains("▾ /work/p1"));
-        assert!(screen.contains("▾ /work/p2"));
-        // Title of the selected session must be visible somewhere on screen.
-        assert!(screen.contains("Beta one"));
-        // Selection state is restored to the flat index after rendering.
-        assert_eq!(app.table_state.selected(), Some(2));
+        // Both project headers should appear with session count.
+        assert!(screen.contains("▾ /work/p1  (2 sessions)"));
+        assert!(screen.contains("▾ /work/p2  (2 sessions)"));
+        // Since header (index 0) is selected, selected_session() is None.
+        assert_eq!(app.selected_session(), None);
+    }
+
+    #[test]
+    fn project_grouping_allows_collapsing_and_expanding_groups() {
+        let mut sessions = vec![
+            transcript_session("a1", "Alpha one", "/tmp/p1/a1.jsonl"),
+            transcript_session("a2", "Alpha two", "/tmp/p1/a2.jsonl"),
+            transcript_session("b1", "Beta one", "/tmp/p2/b1.jsonl"),
+        ];
+        sessions[0].project = Some(PathBuf::from("/work/p1"));
+        sessions[1].project = Some(PathBuf::from("/work/p1"));
+        sessions[2].project = Some(PathBuf::from("/work/p2"));
+        let mut app = SessionsApp::new(sessions, BTreeSet::default(), BrowserPurpose::Manage);
+        app.grouping = Grouping::Project;
+
+        // Initially: Header p1 (0), a1 (1), a2 (2), Header p2 (3), b1 (4)
+        assert_eq!(app.display_rows().len(), 5);
+
+        // Toggle collapse on /work/p1
+        app.toggle_project_collapse("/work/p1");
+
+        // Now: Header p1 (0), Header p2 (1), b1 (2)
+        assert_eq!(app.display_rows().len(), 3);
+        assert_eq!(
+            app.display_rows()[0],
+            DisplayRow::GroupHeader {
+                project: "/work/p1".to_owned(),
+                count: 2,
+                collapsed: true
+            }
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app))
+            .expect("draw sessions");
+        let screen = buffer_text(terminal.backend().buffer(), 120, 20);
+
+        assert!(screen.contains("▸ /work/p1  (2 sessions)"));
+        assert!(!screen.contains("Alpha one"));
+        // Toggle expand on /work/p1
+        app.toggle_project_collapse("/work/p1");
+        assert_eq!(app.display_rows().len(), 5);
     }
 
     #[test]
