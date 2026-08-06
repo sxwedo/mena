@@ -1208,26 +1208,57 @@ pub(super) fn cursor_detail(db_path: &Path, session_id: &str) -> Result<LoadedSe
         json_str = row.get::<_, String>(0).ok();
     }
 
-    if let Some(json_str) = json_str
-        && let Ok(val) = serde_json::from_str::<Value>(&json_str)
-        && let Some(conversation) = val.get("conversation").and_then(Value::as_array)
-    {
-        for item in conversation {
-            let msg_type = item.get("type").and_then(Value::as_u64).unwrap_or(0);
-            let role = if msg_type == 1 { "user" } else { "assistant" };
-            let content = extract_cursor_message_content(item);
-            if !content.trim().is_empty() {
-                messages.push(SessionMessage {
-                    kind: SessionMessageKind::from_provider_role(role),
-                    timestamp: string_at(item, "/createdAt"),
-                    model: string_at(item, "/model"),
-                    metrics: SessionMessageMetrics::default(),
-                    content,
-                });
+    if let Some(json_str) = json_str {
+        if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+            if let Some(conversation) = val.get("conversation").and_then(Value::as_array) {
+                for item in conversation {
+                    let msg_type = item.get("type").and_then(Value::as_u64).unwrap_or(0);
+                    let role = if msg_type == 1 { "user" } else { "assistant" };
+                    let content = extract_cursor_message_content(item);
+                    if !content.trim().is_empty() {
+                        messages.push(SessionMessage {
+                            kind: SessionMessageKind::from_provider_role(role),
+                            timestamp: string_at(item, "/createdAt"),
+                            model: string_at(item, "/model"),
+                            metrics: SessionMessageMetrics::default(),
+                            content,
+                        });
+                    }
+                }
+            }
+
+            if messages.is_empty() {
+                if let Some(headers) = val
+                    .get("fullConversationHeadersOnly")
+                    .and_then(Value::as_array)
+                {
+                    for head in headers {
+                        let msg_type = head.get("type").and_then(Value::as_u64).unwrap_or(0);
+                        let role = if msg_type == 1 { "user" } else { "assistant" };
+                        let timestamp = string_at(head, "/createdAt");
+                        if let Some(bubble_id) = string_at(head, "/bubbleId") {
+                            let bubble_key = format!("bubbleId:{session_id}:{bubble_id}");
+                            if let Some(bubble_val) =
+                                load_cursor_bubble_value(&connection, &bubble_key)
+                            {
+                                let content = extract_cursor_message_content(&bubble_val);
+                                let model = string_at(&bubble_val, "/model");
+                                if !content.trim().is_empty() {
+                                    messages.push(SessionMessage {
+                                        kind: SessionMessageKind::from_provider_role(role),
+                                        timestamp,
+                                        model,
+                                        metrics: SessionMessageMetrics::default(),
+                                        content,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-
     Ok(LoadedSession {
         tokens: None,
         cost_usd: None,
@@ -1273,4 +1304,32 @@ fn collect_lexical_text(val: &Value, out: &mut String) {
             collect_lexical_text(child, out);
         }
     }
+}
+#[allow(clippy::collapsible_if)]
+fn load_cursor_bubble_value(connection: &rusqlite::Connection, bubble_key: &str) -> Option<Value> {
+    use rusqlite::params;
+    let mut bubble_json = None;
+    if sqlite_table_exists(connection, "cursorDiskKV") {
+        if let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1")
+        {
+            if let Ok(mut rows) = stmt.query(params![bubble_key]) {
+                if let Ok(Some(row)) = rows.next() {
+                    bubble_json = row.get::<_, String>(0).ok();
+                }
+            }
+        }
+    }
+    if bubble_json.is_none() && sqlite_table_exists(connection, "ItemTable") {
+        if let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?1")
+        {
+            if let Ok(mut rows) = stmt.query(params![bubble_key]) {
+                if let Ok(Some(row)) = rows.next() {
+                    bubble_json = row.get::<_, String>(0).ok();
+                }
+            }
+        }
+    }
+    bubble_json.and_then(|str_val| serde_json::from_str::<Value>(&str_val).ok())
 }
