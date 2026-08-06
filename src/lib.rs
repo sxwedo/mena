@@ -49,7 +49,7 @@ pub enum ConfigCommand {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionsArgs {
-    /// Filter by provider: claude, codex, gemini, opencode, pi, or omp
+    /// Filter by provider: claude, codex, cursor, gemini, opencode, pi, or omp
     #[arg(long)]
     pub provider: Option<String>,
     /// Show only the most recently updated N sessions
@@ -58,6 +58,9 @@ pub struct SessionsArgs {
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,
+    /// Include messageless empty draft sessions
+    #[arg(long)]
+    pub include_empty: bool,
 }
 
 /// Execute one `mena` command.

@@ -622,8 +622,10 @@ pub(super) fn scan_cursor(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
                         let (mut title, project, created_ms, updated_ms) =
                             parse_composer_json(value_str.as_deref());
                         if title.is_none() {
-                            title = load_cursor_first_user_message_preview(&connection, &id)
-                                .or_else(|| Some("(empty session)".to_owned()));
+                            title = load_cursor_first_user_message_preview(&connection, &id);
+                        }
+                        if title.is_none() {
+                            continue;
                         }
                         let updated_secs = updated_ms
                             .or(last_updated_at)
@@ -675,8 +677,10 @@ pub(super) fn scan_cursor(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
                                         title = load_cursor_first_user_message_preview(
                                             &connection,
                                             &id,
-                                        )
-                                        .or_else(|| Some("(empty session)".to_owned()));
+                                        );
+                                    }
+                                    if title.is_none() {
+                                        continue;
                                     }
                                     let project = comp
                                         .pointer("/workspaceIdentifier/uri/fsPath")

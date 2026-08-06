@@ -2664,4 +2664,88 @@ mod tests {
                 .all(|s| s.kind != AgentKind::Cursor || s.id != composer_id)
         );
     }
+
+    #[test]
+    fn automatically_hides_messageless_empty_cursor_sessions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let global_dir = home.join("Library/Application Support/Cursor/User/globalStorage");
+        fs::create_dir_all(&global_dir).expect("create global dir");
+        let db_path = global_dir.join("state.vscdb");
+
+        let connection = rusqlite::Connection::open(&db_path).expect("create test sqlite db");
+        connection
+            .execute_batch(
+                "CREATE TABLE composerHeaders (
+                    composerId TEXT PRIMARY KEY,
+                    workspaceId TEXT,
+                    createdAt INTEGER,
+                    lastUpdatedAt INTEGER,
+                    isArchived INTEGER,
+                    isSubagent INTEGER,
+                    recency INTEGER,
+                    checkpointAt INTEGER,
+                    value TEXT
+                );
+                CREATE TABLE cursorDiskKV (
+                    key TEXT UNIQUE ON CONFLICT REPLACE,
+                    value BLOB
+                );",
+            )
+            .expect("create tables");
+
+        // 1. Populated session
+        let populated_id = "cursor-populated-session";
+        let populated_header = serde_json::json!({
+            "type": "head",
+            "composerId": populated_id,
+            "createdAt": 1_783_300_000_000_u64,
+            "workspaceIdentifier": { "uri": { "fsPath": "/work/project-a" } }
+        })
+        .to_string();
+        let populated_data = serde_json::json!({
+            "composerId": populated_id,
+            "conversation": [{ "type": 1, "text": "Valid question" }]
+        })
+        .to_string();
+
+        // 2. Messageless empty draft session
+        let empty_id = "cursor-empty-draft-session";
+        let empty_header = serde_json::json!({
+            "type": "head",
+            "composerId": empty_id,
+            "createdAt": 1_783_300_000_000_u64,
+            "workspaceIdentifier": { "uri": { "fsPath": "/work/project-a" } }
+        })
+        .to_string();
+
+        connection
+            .execute(
+                "INSERT INTO composerHeaders (composerId, createdAt, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![populated_id, 1_783_300_000_000_i64, populated_header],
+            )
+            .expect("insert populated header");
+        connection
+            .execute(
+                "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+                rusqlite::params![format!("composerData:{populated_id}"), populated_data],
+            )
+            .expect("insert populated data");
+
+        connection
+            .execute(
+                "INSERT INTO composerHeaders (composerId, createdAt, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![empty_id, 1_783_300_000_000_i64, empty_header],
+            )
+            .expect("insert empty header");
+
+        drop(connection);
+
+        let catalog = SessionCatalog::scan_provider(home, None).expect("scan home");
+        let sessions = catalog.sessions();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, populated_id);
+        assert_eq!(sessions[0].title.as_deref(), Some("Valid question"));
+    }
 }
