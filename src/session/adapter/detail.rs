@@ -1158,3 +1158,119 @@ fn ensure_complete(path: &Path, skipped: bool) -> Result<()> {
     }
     Ok(())
 }
+#[allow(
+    clippy::unnecessary_wraps,
+    clippy::useless_let_if_seq,
+    clippy::collapsible_if
+)]
+pub(super) fn cursor_detail(db_path: &Path, session_id: &str) -> Result<LoadedSession> {
+    use rusqlite::{Connection, OpenFlags, params};
+
+    let mut messages = Vec::new();
+    if !db_path.is_file() {
+        return Ok(LoadedSession {
+            tokens: None,
+            cost_usd: None,
+            messages,
+        });
+    }
+
+    let Ok(connection) = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return Ok(LoadedSession {
+            tokens: None,
+            cost_usd: None,
+            messages,
+        });
+    };
+
+    let key = format!("composerData:{session_id}");
+    let mut json_str: Option<String> = None;
+
+    if sqlite_table_exists(&connection, "cursorDiskKV")
+        && let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1")
+        && let Ok(mut rows) = stmt.query(params![key])
+        && let Ok(Some(row)) = rows.next()
+    {
+        json_str = row.get::<_, String>(0).ok();
+    }
+
+    if json_str.is_none()
+        && sqlite_table_exists(&connection, "ItemTable")
+        && let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?1")
+        && let Ok(mut rows) = stmt.query(params![key])
+        && let Ok(Some(row)) = rows.next()
+    {
+        json_str = row.get::<_, String>(0).ok();
+    }
+
+    if let Some(json_str) = json_str
+        && let Ok(val) = serde_json::from_str::<Value>(&json_str)
+        && let Some(conversation) = val.get("conversation").and_then(Value::as_array)
+    {
+        for item in conversation {
+            let msg_type = item.get("type").and_then(Value::as_u64).unwrap_or(0);
+            let role = if msg_type == 1 { "user" } else { "assistant" };
+            let content = extract_cursor_message_content(item);
+            if !content.trim().is_empty() {
+                messages.push(SessionMessage {
+                    kind: SessionMessageKind::from_provider_role(role),
+                    timestamp: string_at(item, "/createdAt"),
+                    model: string_at(item, "/model"),
+                    metrics: SessionMessageMetrics::default(),
+                    content,
+                });
+            }
+        }
+    }
+
+    Ok(LoadedSession {
+        tokens: None,
+        cost_usd: None,
+        messages,
+    })
+}
+
+fn sqlite_table_exists(connection: &rusqlite::Connection, table: &str) -> bool {
+    use rusqlite::params;
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
+}
+
+fn extract_cursor_message_content(item: &Value) -> String {
+    if let Some(text) = item.get("text").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        return text.to_owned();
+    }
+    if let Some(rich) = item.get("richText").and_then(Value::as_str)
+        && let Ok(rich_val) = serde_json::from_str::<Value>(rich)
+    {
+        let mut extracted = String::new();
+        collect_lexical_text(&rich_val, &mut extracted);
+        if !extracted.is_empty() {
+            return extracted;
+        }
+    }
+    String::new()
+}
+
+fn collect_lexical_text(val: &Value, out: &mut String) {
+    if let Some(text) = val.get("text").and_then(Value::as_str) {
+        out.push_str(text);
+    }
+    if let Some(children) = val.get("children").and_then(Value::as_array) {
+        for child in children {
+            collect_lexical_text(child, out);
+        }
+    }
+}

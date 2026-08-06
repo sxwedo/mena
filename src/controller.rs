@@ -24,14 +24,11 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         .map(|provider| {
             AgentKind::from_slug(provider).with_context(|| {
                 format!(
-                    "unsupported session provider `{provider}`; use claude, codex, gemini, opencode, pi, or omp"
+                    "unsupported session provider `{provider}`; use claude, codex, cursor, gemini, opencode, pi, or omp"
                 )
             })
         })
         .transpose()?;
-    if provider == Some(AgentKind::Cursor) {
-        bail!("Cursor does not expose a supported local session catalog");
-    }
     let catalog = scan_sessions(provider.as_ref())?;
     let count = args
         .limit
@@ -77,17 +74,13 @@ fn resume_target(target: &str, settings: &Settings) -> Result<()> {
         return execute_resume(&spec, &AgentKind::Custom(name.to_owned()), session_id, None);
     }
     let provider_kind = provider.and_then(AgentKind::from_slug);
-    let (kind, id, project) = if provider_kind == Some(AgentKind::Cursor) {
-        (AgentKind::Cursor, session_id.to_owned(), None)
-    } else {
-        let catalog = scan_sessions(provider_kind.as_ref())?;
-        let session = catalog.resolve(provider, session_id)?;
-        (
-            session.kind.clone(),
-            session.id.clone(),
-            session.project.clone(),
-        )
-    };
+    let catalog = scan_sessions(provider_kind.as_ref())?;
+    let session = catalog.resolve(provider, session_id)?;
+    let (kind, id, project) = (
+        session.kind.clone(),
+        session.id.clone(),
+        session.project.clone(),
+    );
     let spec = native_resume_command(&kind, &id)?;
     execute_resume(&spec, &kind, &id, project)
 }

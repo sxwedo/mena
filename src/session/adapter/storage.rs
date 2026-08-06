@@ -571,11 +571,374 @@ fn codex_delete_statements(database_name: &str) -> &'static [(&'static str, &'st
 }
 
 fn sqlite_table_exists(transaction: &rusqlite::Transaction<'_>, table: &str) -> Result<bool> {
-    transaction
+    sqlite_table_exists_conn(transaction, table)
+}
+pub(super) fn cursor_global_storage_dirs(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join("Library/Application Support/Cursor/User/globalStorage"),
+        home.join(".config/Cursor/User/globalStorage"),
+        home.join("AppData/Roaming/Cursor/User/globalStorage"),
+    ]
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    clippy::collapsible_if
+)]
+pub(super) fn scan_cursor(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+    for global_dir in cursor_global_storage_dirs(home) {
+        let db_path = global_dir.join("state.vscdb");
+        if !db_path.is_file() {
+            continue;
+        }
+        let Ok(connection) = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+
+        let mut parsed = false;
+
+        if sqlite_table_exists_conn(&connection, "composerHeaders").unwrap_or(false) {
+            if let Ok(mut stmt) = connection.prepare(
+                "SELECT composerId, createdAt, lastUpdatedAt, isArchived, value FROM composerHeaders",
+            ) {
+                let rows = stmt.query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let created_at: Option<u64> =
+                        row.get::<_, Option<i64>>(1).ok().flatten().and_then(|v| u64::try_from(v).ok());
+                    let last_updated_at: Option<u64> =
+                        row.get::<_, Option<i64>>(2).ok().flatten().and_then(|v| u64::try_from(v).ok());
+                    let is_archived: Option<i64> = row.get(3).ok();
+                    let value_str: Option<String> = row.get(4).ok();
+                    Ok((id, created_at, last_updated_at, is_archived, value_str))
+                });
+
+                if let Ok(rows) = rows {
+                    for row in rows.flatten() {
+                        let (id, created_at, last_updated_at, _is_archived, value_str) = row;
+                        let (mut title, project, created_ms, updated_ms) =
+                            parse_composer_json(value_str.as_deref());
+                        if title.is_none() {
+                            title = load_cursor_first_user_message_preview(&connection, &id)
+                                .or_else(|| Some("(empty session)".to_owned()));
+                        }
+                        let updated_secs = updated_ms
+                            .or(last_updated_at)
+                            .or(created_ms)
+                            .or(created_at)
+                            .map(|ms| ms / 1000);
+
+                        if let Ok(session_obj) = session(
+                            AgentKind::Cursor,
+                            id,
+                            title,
+                            project,
+                            db_path.clone(),
+                            None,
+                            None,
+                            None,
+                        ) {
+                            let mut sess = session_obj;
+                            if let Some(updated) = updated_secs {
+                                sess.updated_at = updated;
+                            }
+                            sessions.push(sess);
+                            parsed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !parsed && sqlite_table_exists_conn(&connection, "ItemTable").unwrap_or(false) {
+            if let Ok(mut stmt) = connection.prepare(
+                "SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = 'composer.composerHeaders'",
+            ) {
+                if let Ok(mut rows) = stmt.query([]) {
+                    if let Ok(Some(row)) = rows.next() {
+                        let value_str: String = row.get(0).unwrap_or_default();
+                        if let Ok(value) = serde_json::from_str::<Value>(&value_str) {
+                            if let Some(composers) =
+                                value.get("allComposers").and_then(Value::as_array)
+                            {
+                                for comp in composers {
+                                    let Some(id) = string_at(comp, "/composerId") else {
+                                        continue;
+                                    };
+                                    let mut title = string_at(comp, "/name")
+                                        .or_else(|| string_at(comp, "/text"))
+                                        .or_else(|| string_at(comp, "/subtitle"));
+                                    if title.is_none() {
+                                        title = load_cursor_first_user_message_preview(
+                                            &connection,
+                                            &id,
+                                        )
+                                        .or_else(|| Some("(empty session)".to_owned()));
+                                    }
+                                    let project = comp
+                                        .pointer("/workspaceIdentifier/uri/fsPath")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| {
+                                            comp.pointer("/workspaceIdentifier/uri/path")
+                                                .and_then(Value::as_str)
+                                        })
+                                        .map(PathBuf::from);
+                                    let updated_secs = comp
+                                        .get("lastUpdatedAt")
+                                        .or_else(|| comp.get("createdAt"))
+                                        .and_then(Value::as_u64)
+                                        .map(|ms| ms / 1000);
+
+                                    if let Ok(session_obj) = session(
+                                        AgentKind::Cursor,
+                                        id,
+                                        title,
+                                        project,
+                                        db_path.clone(),
+                                        None,
+                                        None,
+                                        None,
+                                    ) {
+                                        let mut sess = session_obj;
+                                        if let Some(updated) = updated_secs {
+                                            sess.updated_at = updated;
+                                        }
+                                        sessions.push(sess);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
+pub(super) fn collect_cursor_artifacts(
+    _home: &Path,
+    _session: &AgentSession,
+    _files: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    Ok(())
+}
+
+#[allow(clippy::unnecessary_wraps, clippy::collapsible_if)]
+pub(super) fn delete_cursor_index_records(home: &Path, session_id: &str) -> Result<usize> {
+    let mut removed = 0_usize;
+    for global_dir in cursor_global_storage_dirs(home) {
+        let db_path = global_dir.join("state.vscdb");
+        if !db_path.is_file() {
+            continue;
+        }
+        let Ok(mut connection) = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+        let Ok(transaction) = connection.transaction() else {
+            continue;
+        };
+
+        if sqlite_table_exists_conn(&transaction, "composerHeaders").unwrap_or(false) {
+            if let Ok(cnt) = transaction.execute(
+                "DELETE FROM composerHeaders WHERE composerId = ?1",
+                params![session_id],
+            ) {
+                removed += cnt;
+            }
+        }
+
+        let composer_key = format!("composerData:{session_id}");
+        let bubble_pattern = format!("bubbleId:{session_id}:%");
+
+        if sqlite_table_exists_conn(&transaction, "cursorDiskKV").unwrap_or(false) {
+            if let Ok(cnt) = transaction.execute(
+                "DELETE FROM cursorDiskKV WHERE key = ?1 OR key LIKE ?2",
+                params![composer_key, bubble_pattern],
+            ) {
+                removed += cnt;
+            }
+        }
+
+        if sqlite_table_exists_conn(&transaction, "ItemTable").unwrap_or(false) {
+            if let Ok(cnt) = transaction.execute(
+                "DELETE FROM ItemTable WHERE key = ?1 OR key LIKE ?2",
+                params![composer_key, bubble_pattern],
+            ) {
+                removed += cnt;
+            }
+        }
+
+        let _ = transaction.commit();
+    }
+    Ok(removed)
+}
+
+fn parse_composer_json(
+    json_str: Option<&str>,
+) -> (Option<String>, Option<PathBuf>, Option<u64>, Option<u64>) {
+    let Some(json_str) = json_str else {
+        return (None, None, None, None);
+    };
+    let Ok(val) = serde_json::from_str::<Value>(json_str) else {
+        return (None, None, None, None);
+    };
+    let title = string_at(&val, "/name")
+        .or_else(|| string_at(&val, "/text"))
+        .or_else(|| string_at(&val, "/subtitle"));
+    let project = val
+        .pointer("/workspaceIdentifier/uri/fsPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            val.pointer("/workspaceIdentifier/uri/path")
+                .and_then(Value::as_str)
+        })
+        .map(PathBuf::from);
+    let created_ms = val.get("createdAt").and_then(Value::as_u64);
+    let updated_ms = val.get("lastUpdatedAt").and_then(Value::as_u64);
+    (title, project, created_ms, updated_ms)
+}
+
+fn sqlite_table_exists_conn(connection: &Connection, table: &str) -> Result<bool> {
+    connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
             params![table],
             |row| row.get(0),
         )
-        .context("failed to inspect a Codex state database schema")
+        .context("failed to inspect a database schema")
+}
+#[allow(clippy::collapsible_if)]
+fn load_cursor_first_user_message_preview(
+    connection: &Connection,
+    session_id: &str,
+) -> Option<String> {
+    let key = format!("composerData:{session_id}");
+    let mut json_str = None;
+
+    if sqlite_table_exists_conn(connection, "cursorDiskKV").unwrap_or(false) {
+        if let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1")
+        {
+            if let Ok(mut rows) = stmt.query(params![key]) {
+                if let Ok(Some(row)) = rows.next() {
+                    json_str = row.get::<_, String>(0).ok();
+                }
+            }
+        }
+    }
+
+    if json_str.is_none() && sqlite_table_exists_conn(connection, "ItemTable").unwrap_or(false) {
+        if let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?1")
+        {
+            if let Ok(mut rows) = stmt.query(params![key]) {
+                if let Ok(Some(row)) = rows.next() {
+                    json_str = row.get::<_, String>(0).ok();
+                }
+            }
+        }
+    }
+
+    if let Some(json_str) = json_str {
+        if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+            if let Some(text) = val.get("text").and_then(Value::as_str) {
+                if let Some(preview) = normalize_preview(text) {
+                    return Some(preview);
+                }
+            }
+            if let Some(conversation) = val.get("conversation").and_then(Value::as_array) {
+                for item in conversation {
+                    let msg_type = item.get("type").and_then(Value::as_u64).unwrap_or(0);
+                    if msg_type == 1 {
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            if let Some(preview) = normalize_preview(text) {
+                                return Some(preview);
+                            }
+                        }
+                        if let Some(rich) = item.get("richText").and_then(Value::as_str) {
+                            if let Ok(rich_val) = serde_json::from_str::<Value>(rich) {
+                                let mut extracted = String::new();
+                                collect_lexical_text_preview(&rich_val, &mut extracted);
+                                if let Some(preview) = normalize_preview(&extracted) {
+                                    return Some(preview);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(headers) = val
+                .get("fullConversationHeadersOnly")
+                .and_then(Value::as_array)
+            {
+                for head in headers {
+                    let is_user = head.get("type").and_then(Value::as_u64) == Some(1);
+                    if is_user {
+                        if let Some(bubble_id) = string_at(head, "/bubbleId") {
+                            let bubble_key = format!("bubbleId:{session_id}:{bubble_id}");
+                            if let Some(preview) = load_bubble_text_preview(connection, &bubble_key)
+                            {
+                                return Some(preview);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[allow(clippy::collapsible_if)]
+fn load_bubble_text_preview(connection: &Connection, bubble_key: &str) -> Option<String> {
+    let mut bubble_json = None;
+    if sqlite_table_exists_conn(connection, "cursorDiskKV").unwrap_or(false) {
+        if let Ok(mut stmt) =
+            connection.prepare("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1")
+        {
+            if let Ok(mut rows) = stmt.query(params![bubble_key]) {
+                if let Ok(Some(row)) = rows.next() {
+                    bubble_json = row.get::<_, String>(0).ok();
+                }
+            }
+        }
+    }
+    if let Some(json_str) = bubble_json {
+        if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+            if let Some(text) = val.get("text").and_then(Value::as_str) {
+                if let Some(preview) = normalize_preview(text) {
+                    return Some(preview);
+                }
+            }
+            if let Some(rich) = val.get("richText").and_then(Value::as_str) {
+                if let Ok(rich_val) = serde_json::from_str::<Value>(rich) {
+                    let mut extracted = String::new();
+                    collect_lexical_text_preview(&rich_val, &mut extracted);
+                    if let Some(preview) = normalize_preview(&extracted) {
+                        return Some(preview);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn collect_lexical_text_preview(val: &Value, out: &mut String) {
+    if let Some(text) = val.get("text").and_then(Value::as_str) {
+        out.push_str(text);
+    }
+    if let Some(children) = val.get("children").and_then(Value::as_array) {
+        for child in children {
+            collect_lexical_text_preview(child, out);
+        }
+    }
 }

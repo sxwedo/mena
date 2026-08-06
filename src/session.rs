@@ -2542,4 +2542,126 @@ mod tests {
             },
         }
     }
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn loads_cursor_session_catalog_detail_and_deletes_records() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let global_dir = home.join("Library/Application Support/Cursor/User/globalStorage");
+        fs::create_dir_all(&global_dir).expect("create global dir");
+        let db_path = global_dir.join("state.vscdb");
+
+        let connection = rusqlite::Connection::open(&db_path).expect("create test sqlite db");
+        connection
+            .execute_batch(
+                "CREATE TABLE composerHeaders (
+                    composerId TEXT PRIMARY KEY,
+                    workspaceId TEXT,
+                    createdAt INTEGER,
+                    lastUpdatedAt INTEGER,
+                    isArchived INTEGER,
+                    isSubagent INTEGER,
+                    recency INTEGER,
+                    checkpointAt INTEGER,
+                    value TEXT
+                );
+                CREATE TABLE cursorDiskKV (
+                    key TEXT UNIQUE ON CONFLICT REPLACE,
+                    value BLOB
+                );",
+            )
+            .expect("create tables");
+
+        let composer_id = "cursor-test-session-123";
+        let header_json = serde_json::json!({
+            "type": "head",
+            "composerId": composer_id,
+            "name": "Refactor Cursor Session Engine",
+            "createdAt": 1_783_300_000_000_u64,
+            "lastUpdatedAt": 1_783_300_000_000_u64,
+            "workspaceIdentifier": {
+                "uri": {
+                    "fsPath": "/work/cursor-project"
+                }
+            }
+        })
+        .to_string();
+
+        connection
+            .execute(
+                "INSERT INTO composerHeaders (composerId, createdAt, lastUpdatedAt, value) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![composer_id, 1_783_300_000_000_i64, 1_783_300_000_000_i64, header_json],
+            )
+            .expect("insert header");
+
+        let composer_data = serde_json::json!({
+            "composerId": composer_id,
+            "conversation": [
+                {
+                    "type": 1,
+                    "text": "Hello Cursor",
+                    "createdAt": "2026-08-06T10:00:00Z"
+                },
+                {
+                    "type": 2,
+                    "text": "Hello! I can help you with Rust.",
+                    "createdAt": "2026-08-06T10:00:01Z",
+                    "model": "claude-3.7-sonnet"
+                }
+            ]
+        })
+        .to_string();
+
+        connection
+            .execute(
+                "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+                rusqlite::params![format!("composerData:{composer_id}"), composer_data],
+            )
+            .expect("insert composerData");
+
+        drop(connection);
+
+        let catalog = SessionCatalog::scan_provider(home, None).expect("scan home");
+        let cursor_sessions: Vec<_> = catalog
+            .sessions()
+            .iter()
+            .filter(|s| s.kind == AgentKind::Cursor)
+            .collect();
+
+        assert_eq!(cursor_sessions.len(), 1);
+        let session = cursor_sessions[0];
+        assert_eq!(session.id, composer_id);
+        assert_eq!(
+            session.title.as_deref(),
+            Some("Refactor Cursor Session Engine")
+        );
+        assert_eq!(
+            session.project.as_deref(),
+            Some(std::path::Path::new("/work/cursor-project"))
+        );
+
+        let detail = catalog.detail(session).expect("load detail");
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].kind, SessionMessageKind::User);
+        assert_eq!(detail.messages[0].content, "Hello Cursor");
+        assert_eq!(detail.messages[1].kind, SessionMessageKind::Assistant);
+        assert_eq!(
+            detail.messages[1].content,
+            "Hello! I can help you with Rust."
+        );
+
+        let summary = catalog
+            .delete_session(session)
+            .expect("delete cursor session");
+        assert_eq!(summary.index_records, 2);
+        assert!(db_path.exists());
+
+        let rescan = SessionCatalog::scan_provider(home, None).expect("rescan home");
+        assert!(
+            rescan
+                .sessions()
+                .iter()
+                .all(|s| s.kind != AgentKind::Cursor || s.id != composer_id)
+        );
+    }
 }

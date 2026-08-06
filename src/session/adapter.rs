@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use super::{
     AgentSession, AssociationEvidence, DeletionSummary, SessionDetail, paths_equivalent,
@@ -15,9 +15,10 @@ mod storage;
 
 use crate::process::open_file_paths;
 use storage::{
-    collect_claude_artifacts, collect_codex_artifacts, collect_opencode_artifacts,
-    delete_claude_index_records, delete_codex_index_records, runtime_claude_session_ids,
-    scan_claude, scan_codex, scan_gemini, scan_oh_my_pi, scan_opencode, scan_pi,
+    collect_claude_artifacts, collect_codex_artifacts, collect_cursor_artifacts,
+    collect_opencode_artifacts, cursor_global_storage_dirs, delete_claude_index_records,
+    delete_codex_index_records, delete_cursor_index_records, runtime_claude_session_ids,
+    scan_claude, scan_codex, scan_cursor, scan_gemini, scan_oh_my_pi, scan_opencode, scan_pi,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,13 +60,14 @@ pub(super) enum ProviderAdapter {
 
 impl ProviderAdapter {
     /// Providers with a native local session catalog, in stable display order.
-    pub(super) const SESSION_CATALOG: [Self; 6] = [
+    pub(super) const SESSION_CATALOG: [Self; 7] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::GeminiCli,
         Self::OpenCode,
         Self::Pi,
         Self::OhMyPi,
+        Self::Cursor,
     ];
 
     pub(super) const fn from_kind(kind: &AgentKind) -> Option<Self> {
@@ -97,8 +99,9 @@ impl ProviderAdapter {
         Self::from_kind(kind) == Some(self)
     }
 
+    #[allow(clippy::unused_self)]
     pub(super) const fn has_session_catalog(self) -> bool {
-        !matches!(self, Self::Cursor)
+        true
     }
 
     pub(super) fn process_evidence(
@@ -162,7 +165,7 @@ impl ProviderAdapter {
             Self::OpenCode => scan_opencode(home, sessions),
             Self::Pi => scan_pi(home, sessions),
             Self::OhMyPi => scan_oh_my_pi(home, sessions),
-            Self::Cursor => bail!("Cursor does not expose a supported local session catalog"),
+            Self::Cursor => scan_cursor(home, sessions),
         }
     }
 
@@ -190,7 +193,7 @@ impl ProviderAdapter {
             }
             Self::GeminiCli => detail::gemini_detail(&selected.path)?,
             Self::OpenCode => detail::opencode_detail(home, &selected.id)?,
-            Self::Cursor => detail::LoadedSession::default(),
+            Self::Cursor => detail::cursor_detail(&selected.path, &selected.id)?,
         };
         let mut session = selected.clone();
         session.tokens = loaded.tokens;
@@ -217,8 +220,11 @@ impl ProviderAdapter {
             Self::OpenCode => {
                 collect_opencode_artifacts(home, selected, &mut files, &mut directories)?;
             }
+            Self::Cursor => {
+                collect_cursor_artifacts(home, selected, &mut files)?;
+                files.remove(&selected.path);
+            }
             Self::GeminiCli | Self::Pi | Self::OhMyPi => {}
-            Self::Cursor => bail!("Cursor sessions do not support local deletion"),
         }
 
         let roots = self.storage_roots(home);
@@ -226,7 +232,8 @@ impl ProviderAdapter {
         let index_records = match self {
             Self::Codex => delete_codex_index_records(home, &selected.id)?,
             Self::ClaudeCode => delete_claude_index_records(home, &selected.id)?,
-            Self::GeminiCli | Self::OpenCode | Self::Pi | Self::OhMyPi | Self::Cursor => 0,
+            Self::Cursor => delete_cursor_index_records(home, &selected.id)?,
+            Self::GeminiCli | Self::OpenCode | Self::Pi | Self::OhMyPi => 0,
         };
 
         let mut summary = DeletionSummary {
@@ -255,7 +262,7 @@ impl ProviderAdapter {
             Self::OpenCode => vec![home.join(".local/share/opencode/storage")],
             Self::Pi => vec![home.join(".pi/agent/sessions")],
             Self::OhMyPi => vec![home.join(".omp/agent/sessions")],
-            Self::Cursor => Vec::new(),
+            Self::Cursor => cursor_global_storage_dirs(home),
         }
     }
 
@@ -367,6 +374,7 @@ mod tests {
             AgentKind::OpenCode,
             AgentKind::Pi,
             AgentKind::OhMyPi,
+            AgentKind::Cursor,
         ];
         assert_eq!(ProviderAdapter::SESSION_CATALOG.len(), kinds.len());
         for (adapter, kind) in ProviderAdapter::SESSION_CATALOG.into_iter().zip(kinds) {
