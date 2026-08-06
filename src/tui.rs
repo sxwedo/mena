@@ -1892,7 +1892,7 @@ enum SessionColumn {
 fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     if width >= 120 {
         vec![
-            column(SessionColumn::Target, "TARGET", Constraint::Length(64)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Agent, "AGENT", Constraint::Length(12)),
             column(SessionColumn::Project, "PROJECT", Constraint::Length(14)),
@@ -1901,13 +1901,13 @@ fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
         ]
     } else if width >= 80 {
         vec![
-            column(SessionColumn::Target, "TARGET", Constraint::Length(58)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
         ]
     } else {
         vec![
-            column(SessionColumn::Target, "TARGET", Constraint::Length(58)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(12)),
         ]
@@ -1922,6 +1922,40 @@ fn session_cell(session: &AgentSession, column: SessionColumn, app: &SessionsApp
             } else {
                 Cell::from("")
             }
+        }
+        SessionColumn::Agent => {
+            let color = match session.kind {
+                crate::process::AgentKind::ClaudeCode => Color::Yellow,
+                crate::process::AgentKind::OhMyPi => Color::Cyan,
+                crate::process::AgentKind::Pi => Color::LightMagenta,
+                crate::process::AgentKind::Codex => Color::Green,
+                crate::process::AgentKind::GeminiCli => Color::LightBlue,
+                crate::process::AgentKind::OpenCode => Color::Blue,
+                _ => Color::White,
+            };
+            Cell::from(Span::styled(
+                session.kind.to_string(),
+                Style::default().fg(color),
+            ))
+        }
+        SessionColumn::Updated => {
+            let age_str = format_age(session.updated_at);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let age_secs = now.saturating_sub(session.updated_at);
+            let style = if age_secs < 3600 {
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD)
+            } else if age_secs < 86400 {
+                Style::default().fg(Color::Yellow)
+            } else if age_secs < 7 * 86400 {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Cell::from(Span::styled(age_str, style))
         }
         _ => Cell::from(session_value(session, column, app)),
     }
@@ -3340,7 +3374,13 @@ mod tests {
 
         // Active indicator should not be empty
         assert_ne!(cell, Cell::from(""));
-        assert_eq!(inactive_cell, Cell::from("Codex"));
+        assert_eq!(
+            inactive_cell,
+            Cell::from(ratatui::text::Span::styled(
+                "Codex",
+                ratatui::style::Style::default().fg(Color::Green)
+            ))
+        );
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
