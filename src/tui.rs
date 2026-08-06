@@ -2121,7 +2121,9 @@ fn centered_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rec
     )
 }
 
-use crate::skill::{AgentSkill, SkillDetail};
+use std::collections::HashSet;
+
+use crate::skill::{AgentSkill, SkillChildItem, SkillDetail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillFocus {
@@ -2132,20 +2134,50 @@ pub enum SkillFocus {
 /// A flat "visual row" in the skill tree list.
 #[derive(Debug, Clone)]
 enum SkillRow {
-    /// A top-level skill entry (directory or single-file).
+    /// A top-level skill entry.
     Skill {
         skill_idx: usize,
         has_children: bool,
         expanded: bool,
     },
-    /// A child item expanded from a skill directory.
-    Child { skill_idx: usize, child_idx: usize },
+    /// Any item inside the skill directory tree (file or directory at any depth).
+    Item {
+        skill_idx: usize,
+        full_path: PathBuf,
+        name: String,
+        is_dir: bool,
+        expanded: bool,
+        depth: usize,
+        is_last: bool,
+    },
+}
+
+/// Read a directory's children (dirs first, then files, each sorted).
+fn read_dir_children(dir: &std::path::Path) -> Vec<SkillChildItem> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut items: Vec<SkillChildItem> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_str()?.to_string();
+            let is_dir = p.is_dir();
+            Some(SkillChildItem {
+                name,
+                path: p,
+                is_dir,
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    items
 }
 
 struct SkillsApp {
     skills: Vec<AgentSkill>,
-    /// Per-skill expansion state (parallel to `skills`).
-    expanded: Vec<bool>,
+    /// Set of expanded directory paths.
+    expanded_dirs: HashSet<PathBuf>,
     /// Flat visible row list rebuilt by `rebuild_rows`.
     visible_rows: Vec<SkillRow>,
     selected_index: usize,
@@ -2153,7 +2185,7 @@ struct SkillsApp {
     is_searching: bool,
     current_detail: Option<SkillDetail>,
     /// Path of the file currently shown in the preview; used to detect stale cache.
-    preview_path: Option<std::path::PathBuf>,
+    preview_path: Option<PathBuf>,
     preview_scroll: u16,
     full_screen_preview: bool,
     focus: SkillFocus,
@@ -2163,10 +2195,9 @@ struct SkillsApp {
 
 impl SkillsApp {
     fn new(skills: Vec<AgentSkill>) -> Self {
-        let count = skills.len();
         let mut app = Self {
-            expanded: vec![false; count],
             skills,
+            expanded_dirs: HashSet::new(),
             visible_rows: Vec::new(),
             selected_index: 0,
             search_query: String::new(),
@@ -2189,12 +2220,10 @@ impl SkillsApp {
         self.visible_rows.clear();
 
         for (skill_idx, skill) in self.skills.iter().enumerate() {
-            // Symlink filter
             if !self.show_symlinks && skill.is_symlink {
                 continue;
             }
 
-            // Text filter
             if !q.is_empty() {
                 let hit = skill.name.to_lowercase().contains(&q)
                     || skill.provider.to_lowercase().contains(&q)
@@ -2212,8 +2241,13 @@ impl SkillsApp {
                 }
             }
 
-            let has_children = !skill.children.is_empty();
-            let expanded = has_children && self.expanded[skill_idx];
+            let skill_dir = skill.path.parent().map(PathBuf::from);
+            let has_children = skill_dir
+                .as_ref()
+                .is_some_and(|d| std::fs::read_dir(d).is_ok_and(|mut r| r.next().is_some()));
+            let expanded = skill_dir
+                .as_ref()
+                .is_some_and(|d| self.expanded_dirs.contains(d));
 
             self.visible_rows.push(SkillRow::Skill {
                 skill_idx,
@@ -2221,13 +2255,15 @@ impl SkillsApp {
                 expanded,
             });
 
-            if expanded {
-                for (child_idx, _) in skill.children.iter().enumerate() {
-                    self.visible_rows.push(SkillRow::Child {
-                        skill_idx,
-                        child_idx,
-                    });
-                }
+            if expanded && let Some(dir) = skill_dir {
+                let children = read_dir_children(&dir);
+                walk_children(
+                    &mut self.visible_rows,
+                    &self.expanded_dirs,
+                    skill_idx,
+                    &children,
+                    1,
+                );
             }
         }
 
@@ -2239,42 +2275,78 @@ impl SkillsApp {
         self.current_detail = None;
         self.preview_path = None;
     }
+}
 
-    /// Returns the filesystem path that should be shown in the preview pane.
-    /// For a top-level skill row this is the SKILL.md path.
-    /// For a child row this is the child file/dir path.
-    fn selected_preview_path(&self) -> Option<std::path::PathBuf> {
+/// Recursively walk children, adding visible rows for expanded directories.
+fn walk_children(
+    rows: &mut Vec<SkillRow>,
+    expanded_dirs: &HashSet<PathBuf>,
+    skill_idx: usize,
+    children: &[SkillChildItem],
+    depth: usize,
+) {
+    let total = children.len();
+    for (i, child) in children.iter().enumerate() {
+        let is_last = i + 1 == total;
+        let expanded = child.is_dir && expanded_dirs.contains(&child.path);
+
+        rows.push(SkillRow::Item {
+            skill_idx,
+            full_path: child.path.clone(),
+            name: child.name.clone(),
+            is_dir: child.is_dir,
+            expanded,
+            depth,
+            is_last,
+        });
+
+        if expanded {
+            let sub = read_dir_children(&child.path);
+            walk_children(rows, expanded_dirs, skill_idx, &sub, depth + 1);
+        }
+    }
+}
+
+impl SkillsApp {
+    /// Returns the filesystem path for the currently selected row.
+    fn selected_preview_path(&self) -> Option<PathBuf> {
         let row = self.visible_rows.get(self.selected_index)?;
         match row {
             SkillRow::Skill { skill_idx, .. } => Some(self.skills[*skill_idx].path.clone()),
-            SkillRow::Child {
+            SkillRow::Item { full_path, .. } => Some(full_path.clone()),
+        }
+    }
+
+    /// The directory path that controls expansion for the current row (if any).
+    fn selected_dir_path(&self) -> Option<PathBuf> {
+        let row = self.visible_rows.get(self.selected_index)?;
+        match row {
+            SkillRow::Skill {
                 skill_idx,
-                child_idx,
-            } => Some(self.skills[*skill_idx].children[*child_idx].path.clone()),
+                has_children: true,
+                ..
+            } => self.skills[*skill_idx].path.parent().map(PathBuf::from),
+            SkillRow::Item {
+                full_path, is_dir, ..
+            } if *is_dir => Some(full_path.clone()),
+            _ => None,
         }
     }
 
     fn toggle_expand(&mut self) {
-        let Some(row) = self.visible_rows.get(self.selected_index) else {
+        let Some(dir_path) = self.selected_dir_path() else {
             return;
         };
-        let SkillRow::Skill {
-            skill_idx,
-            has_children,
-            ..
-        } = *row
-        else {
-            return;
-        };
-        if !has_children {
-            return;
+        if self.expanded_dirs.contains(&dir_path) {
+            self.expanded_dirs.remove(&dir_path);
+        } else {
+            self.expanded_dirs.insert(dir_path);
         }
-        self.expanded[skill_idx] = !self.expanded[skill_idx];
         self.rebuild_rows();
     }
 
     fn collapse_current(&mut self) {
-        let Some(row) = self.visible_rows.get(self.selected_index) else {
+        let Some(row) = self.visible_rows.get(self.selected_index).cloned() else {
             return;
         };
         match row {
@@ -2283,47 +2355,88 @@ impl SkillsApp {
                 expanded: true,
                 ..
             } => {
-                let idx = *skill_idx;
-                self.expanded[idx] = false;
+                if let Some(dir) = self.skills[skill_idx].path.parent() {
+                    self.expanded_dirs.remove(dir);
+                    self.rebuild_rows();
+                }
+            }
+            SkillRow::Item {
+                full_path,
+                is_dir: true,
+                expanded: true,
+                ..
+            } => {
+                self.expanded_dirs.remove(&full_path);
                 self.rebuild_rows();
             }
-            SkillRow::Child { skill_idx, .. } => {
-                // Jump to parent and collapse
-                let parent = *skill_idx;
-                self.expanded[parent] = false;
-                self.rebuild_rows();
-                // Move selection to the parent row
-                for (i, r) in self.visible_rows.iter().enumerate() {
-                    if let SkillRow::Skill { skill_idx: si, .. } = r
-                        && *si == parent
-                    {
-                        self.selected_index = i;
-                        break;
-                    }
-                }
+            SkillRow::Item {
+                skill_idx, depth, ..
+            } => {
+                // On a file/deeper item: collapse the nearest expanded ancestor dir
+                // and move selection to it.
+                let target_depth = depth.saturating_sub(1);
+                self.collapse_ancestor(skill_idx, target_depth);
             }
             SkillRow::Skill { .. } => {}
         }
     }
 
-    fn select_next(&mut self) {
+    /// Find the expanded ancestor at `target_depth` for `skill_idx`,
+    /// collapse it, and move selection to that row.
+    fn collapse_ancestor(&mut self, skill_idx: usize, target_depth: usize) {
+        // Scan visible_rows for the ancestor Item (same skill, same depth) or the Skill row.
+        let mut found_idx: Option<usize> = None;
+        let mut collapse_path: Option<PathBuf> = None;
+
+        for (i, r) in self.visible_rows.iter().enumerate() {
+            match r {
+                SkillRow::Skill {
+                    skill_idx: si,
+                    expanded: true,
+                    ..
+                } if *si == skill_idx && target_depth == 0 => {
+                    found_idx = Some(i);
+                    collapse_path = self.skills[skill_idx].path.parent().map(PathBuf::from);
+                    break;
+                }
+                SkillRow::Item {
+                    skill_idx: si,
+                    full_path,
+                    depth: d,
+                    expanded: true,
+                    ..
+                } if *si == skill_idx && *d == target_depth => {
+                    found_idx = Some(i);
+                    collapse_path = Some(full_path.clone());
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(path) = collapse_path {
+            self.expanded_dirs.remove(&path);
+            self.rebuild_rows();
+        }
+        if let Some(i) = found_idx
+            && i < self.visible_rows.len()
+        {
+            self.selected_index = i;
+        }
+    }
+
+    const fn select_next(&mut self) {
         if !self.visible_rows.is_empty() {
             let max_idx = self.visible_rows.len() - 1;
             if self.selected_index < max_idx {
                 self.selected_index += 1;
-                self.preview_scroll = 0;
-                self.marquee_offset = 0;
-                self.current_detail = None;
             }
         }
     }
 
-    fn select_prev(&mut self) {
+    const fn select_prev(&mut self) {
         if !self.visible_rows.is_empty() && self.selected_index > 0 {
             self.selected_index -= 1;
-            self.preview_scroll = 0;
-            self.marquee_offset = 0;
-            self.current_detail = None;
         }
     }
 }
@@ -2346,32 +2459,33 @@ fn run_skill_browser(
         }
 
         if app.current_detail.is_none()
-            && let Some(path) = &current_path
+            && let Some(_path) = &current_path
         {
             app.current_detail = match app.visible_rows.get(app.selected_index) {
                 Some(SkillRow::Skill { skill_idx, .. }) => {
                     let skill = &app.skills[*skill_idx];
                     load_detail(skill).ok()
                 }
-                Some(SkillRow::Child {
+                Some(SkillRow::Item {
+                    full_path,
+                    name,
+                    is_dir,
                     skill_idx,
-                    child_idx,
+                    ..
                 }) => {
                     let skill = &app.skills[*skill_idx];
-                    let child = &skill.children[*child_idx];
-                    // Build a synthetic SkillDetail for the child file
-                    let content = if child.is_dir {
-                        format!("[ directory: {} ]", child.name)
+                    let content = if *is_dir {
+                        format!("[ directory: {name} ]")
                     } else {
-                        std::fs::read_to_string(path)
+                        std::fs::read_to_string(full_path)
                             .unwrap_or_else(|e| format!("(could not read: {e})"))
                     };
                     Some(SkillDetail {
                         skill: AgentSkill {
-                            name: child.name.clone(),
+                            name: name.clone(),
                             provider: skill.provider.clone(),
                             scope: skill.scope.clone(),
-                            path: child.path.clone(),
+                            path: full_path.clone(),
                             location: skill.location.clone(),
                             is_symlink: false,
                             description: None,
@@ -2782,40 +2896,50 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                     .style(row_bg),
                 );
             }
-            SkillRow::Child {
-                skill_idx,
-                child_idx,
+            SkillRow::Item {
+                name,
+                full_path,
+                is_dir,
+                expanded,
+                depth,
+                is_last,
+                ..
             } => {
-                let skill = &app.skills[*skill_idx];
-                let child = &skill.children[*child_idx];
+                // Build indentation + tree connector
+                let indent: String = "   ".repeat(depth.saturating_sub(1));
+                let connector = if *is_last { "└─ " } else { "├─ " };
 
-                // Is this the last child of its parent in the visible list?
-                let is_last = visible
-                    .get(list_idx + 1)
-                    .is_none_or(|next| !matches!(next, SkillRow::Child { skill_idx: si, .. } if *si == *skill_idx));
+                let expand_icon = if *is_dir {
+                    if *expanded { "▾ " } else { "▸ " }
+                } else {
+                    ""
+                };
 
-                let connector = if is_last { "└─" } else { "├─" };
-                let name_str = format!("    {connector} {}", child.name);
+                let name_str = format!("{indent}{connector}{expand_icon}{name}");
 
                 let name_style = if is_selected {
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD)
-                } else if child.is_dir {
+                } else if *is_dir {
                     Style::default().fg(Color::LightBlue)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
 
-                let (type_str, type_color) = if child.is_dir {
-                    ("dir", Color::LightBlue)
+                let type_str: String = if *is_dir {
+                    "dir".to_string()
                 } else {
-                    let ext = child
-                        .path
+                    full_path
                         .extension()
                         .and_then(|e| e.to_str())
-                        .unwrap_or("file");
-                    (ext, Color::DarkGray)
+                        .unwrap_or("file")
+                        .to_string()
+                };
+                let type_color = if *is_dir {
+                    Color::LightBlue
+                } else {
+                    Color::DarkGray
                 };
 
                 rows.push(
@@ -4336,5 +4460,97 @@ mod tests {
             }
         }
         None
+    }
+
+    fn fixture_skill(name: &str, dir: &std::path::Path) -> crate::skill::AgentSkill {
+        crate::skill::AgentSkill {
+            name: name.to_string(),
+            provider: "test".to_string(),
+            scope: "workspace".to_string(),
+            path: dir.join("SKILL.md"),
+            location: "~/.test/skills".to_string(),
+            is_symlink: false,
+            description: Some(format!("{name} skill description")),
+            triggers: vec![name.to_string()],
+            valid: true,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn multi_level_tree_expands_nested_directories() {
+        // Build: skill_dir/{references/guide.md, references/examples/demo.md, SKILL.md}
+        let tmp = std::env::temp_dir().join(format!("mena-tree-test-{}", std::process::id()));
+        let skill_dir = tmp.join("myskill");
+        let references = skill_dir.join("references");
+        let examples = references.join("examples");
+        std::fs::create_dir_all(&examples).expect("create dirs");
+        std::fs::write(skill_dir.join("SKILL.md"), "# My Skill\n").expect("write skill");
+        std::fs::write(references.join("guide.md"), "# Guide\n").expect("write guide");
+        std::fs::write(examples.join("demo.md"), "# Demo\n").expect("write demo");
+
+        let skill = fixture_skill("myskill", &skill_dir);
+        let mut app = super::SkillsApp::new(vec![skill]);
+
+        // Top-level collapsed: only the skill row.
+        assert_eq!(app.visible_rows.len(), 1);
+        assert!(matches!(app.visible_rows[0], super::SkillRow::Skill { .. }));
+
+        // Expand the skill: references/ + SKILL.md appear (dirs first).
+        app.selected_index = 0;
+        app.toggle_expand();
+        let rows = &app.visible_rows;
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(
+            rows[1],
+            super::SkillRow::Item {
+                is_dir: true,
+                depth: 1,
+                ..
+            }
+        ));
+
+        // Select references dir and expand: examples/ + guide.md appear (dirs first).
+        app.selected_index = 1;
+        app.toggle_expand();
+        let rows = &app.visible_rows;
+        assert!(rows.iter().any(|r| matches!(
+            r,
+            super::SkillRow::Item { depth: 2, is_dir: true, name, .. } if name == "examples"
+        )));
+        assert!(rows.iter().any(|r| matches!(
+            r,
+            super::SkillRow::Item { depth: 2, is_dir: false, name, .. } if name == "guide.md"
+        )));
+
+        // Expand examples: demo.md at depth 3 appears.
+        let examples_idx = rows
+            .iter()
+            .position(|r| matches!(r, super::SkillRow::Item { name, .. } if name == "examples"))
+            .expect("examples row");
+        app.selected_index = examples_idx;
+        app.toggle_expand();
+        let rows = &app.visible_rows;
+        assert!(rows.iter().any(|r| matches!(
+            r,
+            super::SkillRow::Item { depth: 3, is_dir: false, name, .. } if name == "demo.md"
+        )));
+
+        // Collapse references: its subtree disappears.
+        let references_idx = rows
+            .iter()
+            .position(|r| matches!(r, super::SkillRow::Item { name, .. } if name == "references"))
+            .expect("references row");
+        app.selected_index = references_idx;
+        app.collapse_current();
+        let rows = &app.visible_rows;
+        assert_eq!(rows.len(), 3);
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, super::SkillRow::Item { name, .. } if name == "demo.md"))
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
