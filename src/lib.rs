@@ -58,9 +58,6 @@ pub struct SessionsArgs {
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,
-    /// Print a non-interactive table even when attached to a terminal
-    #[arg(long, conflicts_with = "json")]
-    pub plain: bool,
 }
 
 /// Execute one `mena` command.

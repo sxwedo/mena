@@ -40,8 +40,8 @@ mod tests {
     fn documented_commands_parse() {
         for invocation in [
             vec!["mena", "config", "init", "--import-clix"],
-            vec!["mena", "sessions", "--plain"],
-            vec!["mena", "ss", "--plain"],
+            vec!["mena", "sessions"],
+            vec!["mena", "ss"],
             vec![
                 "mena",
                 "sessions",
@@ -76,6 +76,5 @@ mod tests {
         assert_eq!(args.provider.as_deref(), Some("codex"));
         assert_eq!(args.limit, Some(12));
         assert!(args.json);
-        assert!(!args.plain);
     }
 }

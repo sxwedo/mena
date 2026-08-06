@@ -77,7 +77,6 @@ Target 稳定且适合脚本使用：
 ```sh
 mena ss
 mena ss --provider claude --limit 20
-mena ss --plain
 mena ss --json
 ```
 

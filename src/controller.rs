@@ -41,7 +41,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
     if args.json {
         let values: Vec<_> = sessions.iter().map(session_list_json).collect();
         println!("{}", serde_json::to_string_pretty(&values)?);
-    } else if !args.plain && io::stdin().is_terminal() && io::stdout().is_terminal() {
+    } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
         let active_targets = active_session_targets(&catalog, settings)?;
         let export_directory =
             std::env::current_dir().context("failed to resolve the session export directory")?;

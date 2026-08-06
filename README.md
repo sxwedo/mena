@@ -83,7 +83,6 @@ form.
 ```sh
 mena ss
 mena ss --provider claude --limit 20
-mena ss --plain
 mena ss --json
 ```
 
