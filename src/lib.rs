@@ -7,6 +7,7 @@ mod fs;
 mod process;
 mod session;
 pub mod settings;
+mod skill;
 mod tui;
 pub mod ui;
 mod view;
@@ -15,6 +16,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 pub use process::{AgentKind, ProcessSnapshot};
 pub use settings::Settings;
+pub use skill::{AgentSkill, SkillCatalog, SkillDetail};
 
 /// Mena command-line arguments.
 #[derive(Debug, Args)]
@@ -34,6 +36,9 @@ pub enum AgentCommand {
     /// List saved sessions, including sessions without a running process
     #[command(visible_alias = "ss")]
     Sessions(SessionsArgs),
+    /// Inspect or list available developer agent skills
+    #[command(visible_alias = "sk")]
+    Skills(SkillsArgs),
 }
 
 /// Mena configuration operations.
@@ -63,6 +68,33 @@ pub struct SessionsArgs {
     pub include_empty: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct SkillsArgs {
+    #[command(subcommand)]
+    pub command: Option<SkillSubcommand>,
+    /// Filter by provider: claude, codex, cursor, opencode, omp, generic
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Filter by scope: global or workspace
+    #[arg(long)]
+    pub scope: Option<String>,
+    /// Emit stable machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum SkillSubcommand {
+    /// Inspect details of a specific skill by name
+    Inspect {
+        /// Skill name to inspect
+        name: String,
+        /// Emit stable machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Execute one `mena` command.
 ///
 /// # Errors
@@ -82,6 +114,7 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
             }
         },
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
+        AgentCommand::Skills(args) => controller::run_skills(&args, settings),
     }
 }
 

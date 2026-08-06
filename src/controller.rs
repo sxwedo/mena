@@ -6,14 +6,14 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::SessionsArgs;
 use crate::process::{AgentKind, discover_live_agents};
 use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
 use crate::settings::{CustomAgentSettings, Settings};
+use crate::skill::SkillCatalog;
 use crate::tui;
-use crate::ui;
-use crate::view::render_session_table;
-
+pub use crate::ui;
+use crate::view::{render_session_table, render_skill_detail, render_skill_table};
+use crate::{SessionsArgs, SkillSubcommand, SkillsArgs};
 pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
     if args.limit == Some(0) {
         bail!("--limit must be at least 1");
@@ -63,6 +63,47 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
     } else {
         print!("{}", render_session_table(sessions, None));
     }
+    Ok(())
+}
+/// Execute `mena skills` operations.
+///
+/// # Errors
+///
+/// Returns an error if scanning fails or a targeted skill is missing.
+pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<()> {
+    let home = dirs::home_dir();
+    let current_dir = std::env::current_dir().ok();
+    let catalog = SkillCatalog::scan(home.as_deref(), current_dir.as_deref())?;
+
+    match &args.command {
+        Some(SkillSubcommand::Inspect { name, json }) => {
+            let detail = catalog
+                .inspect(name)
+                .with_context(|| format!("skill `{name}` not found"))??;
+            if *json || args.json {
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                print!("{}", render_skill_detail(&detail));
+            }
+        }
+        None => {
+            let filtered = catalog.filter(args.provider.as_deref(), args.scope.as_deref());
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&filtered)?);
+            } else if filtered.is_empty() {
+                ui::info("no skills discovered");
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                tui::manage_skills(filtered, |skill| {
+                    catalog
+                        .inspect(&skill.name)
+                        .with_context(|| format!("skill `{}` missing detail", skill.name))?
+                })?;
+            } else {
+                print!("{}", render_skill_table(&filtered));
+            }
+        }
+    }
+
     Ok(())
 }
 

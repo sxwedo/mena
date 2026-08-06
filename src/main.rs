@@ -51,6 +51,18 @@ mod tests {
                 "10",
                 "--json",
             ],
+            vec!["mena", "skills"],
+            vec!["mena", "sk"],
+            vec![
+                "mena",
+                "sk",
+                "--provider",
+                "claude",
+                "--scope",
+                "workspace",
+                "--json",
+            ],
+            vec!["mena", "sk", "inspect", "ponytail", "--json"],
         ] {
             Cli::try_parse_from(&invocation)
                 .unwrap_or_else(|error| panic!("failed to parse {invocation:?}: {error}"));
@@ -75,6 +87,27 @@ mod tests {
         };
         assert_eq!(args.provider.as_deref(), Some("codex"));
         assert_eq!(args.limit, Some(12));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn sk_is_equivalent_to_skills() {
+        let cli = Cli::try_parse_from([
+            "mena",
+            "sk",
+            "--provider",
+            "claude",
+            "--scope",
+            "global",
+            "--json",
+        ])
+        .expect("sk should parse as the skills command");
+
+        let AgentCommand::Skills(args) = cli.args.command else {
+            panic!("sk did not resolve to skills");
+        };
+        assert_eq!(args.provider.as_deref(), Some("claude"));
+        assert_eq!(args.scope.as_deref(), Some("global"));
         assert!(args.json);
     }
 }

@@ -131,6 +131,13 @@ struct SessionBrowserCallbacks<'a> {
     delete: Option<DeleteCallback<'a>>,
 }
 
+pub fn manage_skills(
+    skills: Vec<AgentSkill>,
+    mut load_detail: impl FnMut(&AgentSkill) -> Result<SkillDetail>,
+) -> Result<()> {
+    run_skill_browser(skills, &mut load_detail)
+}
+
 pub fn manage_sessions(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
@@ -2114,6 +2121,922 @@ fn centered_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rec
     )
 }
 
+use crate::skill::{AgentSkill, SkillDetail};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillFocus {
+    List,
+    Detail,
+}
+
+/// A flat "visual row" in the skill tree list.
+#[derive(Debug, Clone)]
+enum SkillRow {
+    /// A top-level skill entry (directory or single-file).
+    Skill {
+        skill_idx: usize,
+        has_children: bool,
+        expanded: bool,
+    },
+    /// A child item expanded from a skill directory.
+    Child { skill_idx: usize, child_idx: usize },
+}
+
+struct SkillsApp {
+    skills: Vec<AgentSkill>,
+    /// Per-skill expansion state (parallel to `skills`).
+    expanded: Vec<bool>,
+    /// Flat visible row list rebuilt by `rebuild_rows`.
+    visible_rows: Vec<SkillRow>,
+    selected_index: usize,
+    search_query: String,
+    is_searching: bool,
+    current_detail: Option<SkillDetail>,
+    /// Path of the file currently shown in the preview; used to detect stale cache.
+    preview_path: Option<std::path::PathBuf>,
+    preview_scroll: u16,
+    full_screen_preview: bool,
+    focus: SkillFocus,
+    marquee_offset: usize,
+    show_symlinks: bool,
+}
+
+impl SkillsApp {
+    fn new(skills: Vec<AgentSkill>) -> Self {
+        let count = skills.len();
+        let mut app = Self {
+            expanded: vec![false; count],
+            skills,
+            visible_rows: Vec::new(),
+            selected_index: 0,
+            search_query: String::new(),
+            is_searching: false,
+            current_detail: None,
+            preview_path: None,
+            preview_scroll: 0,
+            full_screen_preview: false,
+            focus: SkillFocus::List,
+            marquee_offset: 0,
+            show_symlinks: false,
+        };
+        app.rebuild_rows();
+        app
+    }
+
+    /// Rebuild `visible_rows` from skills, filter, and expansion state.
+    fn rebuild_rows(&mut self) {
+        let q = self.search_query.to_lowercase();
+        self.visible_rows.clear();
+
+        for (skill_idx, skill) in self.skills.iter().enumerate() {
+            // Symlink filter
+            if !self.show_symlinks && skill.is_symlink {
+                continue;
+            }
+
+            // Text filter
+            if !q.is_empty() {
+                let hit = skill.name.to_lowercase().contains(&q)
+                    || skill.provider.to_lowercase().contains(&q)
+                    || skill.scope.to_lowercase().contains(&q)
+                    || skill.location.to_lowercase().contains(&q)
+                    || skill.triggers.iter().any(|t| t.to_lowercase().contains(&q))
+                    || skill
+                        .description
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q);
+                if !hit {
+                    continue;
+                }
+            }
+
+            let has_children = !skill.children.is_empty();
+            let expanded = has_children && self.expanded[skill_idx];
+
+            self.visible_rows.push(SkillRow::Skill {
+                skill_idx,
+                has_children,
+                expanded,
+            });
+
+            if expanded {
+                for (child_idx, _) in skill.children.iter().enumerate() {
+                    self.visible_rows.push(SkillRow::Child {
+                        skill_idx,
+                        child_idx,
+                    });
+                }
+            }
+        }
+
+        if self.selected_index >= self.visible_rows.len() {
+            self.selected_index = self.visible_rows.len().saturating_sub(1);
+        }
+        self.preview_scroll = 0;
+        self.marquee_offset = 0;
+        self.current_detail = None;
+        self.preview_path = None;
+    }
+
+    /// Returns the filesystem path that should be shown in the preview pane.
+    /// For a top-level skill row this is the SKILL.md path.
+    /// For a child row this is the child file/dir path.
+    fn selected_preview_path(&self) -> Option<std::path::PathBuf> {
+        let row = self.visible_rows.get(self.selected_index)?;
+        match row {
+            SkillRow::Skill { skill_idx, .. } => Some(self.skills[*skill_idx].path.clone()),
+            SkillRow::Child {
+                skill_idx,
+                child_idx,
+            } => Some(self.skills[*skill_idx].children[*child_idx].path.clone()),
+        }
+    }
+
+    fn toggle_expand(&mut self) {
+        let Some(row) = self.visible_rows.get(self.selected_index) else {
+            return;
+        };
+        let SkillRow::Skill {
+            skill_idx,
+            has_children,
+            ..
+        } = *row
+        else {
+            return;
+        };
+        if !has_children {
+            return;
+        }
+        self.expanded[skill_idx] = !self.expanded[skill_idx];
+        self.rebuild_rows();
+    }
+
+    fn collapse_current(&mut self) {
+        let Some(row) = self.visible_rows.get(self.selected_index) else {
+            return;
+        };
+        match row {
+            SkillRow::Skill {
+                skill_idx,
+                expanded: true,
+                ..
+            } => {
+                let idx = *skill_idx;
+                self.expanded[idx] = false;
+                self.rebuild_rows();
+            }
+            SkillRow::Child { skill_idx, .. } => {
+                // Jump to parent and collapse
+                let parent = *skill_idx;
+                self.expanded[parent] = false;
+                self.rebuild_rows();
+                // Move selection to the parent row
+                for (i, r) in self.visible_rows.iter().enumerate() {
+                    if let SkillRow::Skill { skill_idx: si, .. } = r
+                        && *si == parent
+                    {
+                        self.selected_index = i;
+                        break;
+                    }
+                }
+            }
+            SkillRow::Skill { .. } => {}
+        }
+    }
+
+    fn select_next(&mut self) {
+        if !self.visible_rows.is_empty() {
+            let max_idx = self.visible_rows.len() - 1;
+            if self.selected_index < max_idx {
+                self.selected_index += 1;
+                self.preview_scroll = 0;
+                self.marquee_offset = 0;
+                self.current_detail = None;
+            }
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if !self.visible_rows.is_empty() && self.selected_index > 0 {
+            self.selected_index -= 1;
+            self.preview_scroll = 0;
+            self.marquee_offset = 0;
+            self.current_detail = None;
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_skill_browser(
+    skills: Vec<AgentSkill>,
+    load_detail: &mut impl FnMut(&AgentSkill) -> Result<SkillDetail>,
+) -> Result<()> {
+    let mut app = SkillsApp::new(skills);
+    let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+
+    loop {
+        // Refresh preview when selection changes (path-keyed cache)
+        let current_path = app.selected_preview_path();
+        if app.preview_path != current_path {
+            app.preview_path.clone_from(&current_path);
+            app.current_detail = None;
+            app.preview_scroll = 0;
+        }
+
+        if app.current_detail.is_none()
+            && let Some(path) = &current_path
+        {
+            app.current_detail = match app.visible_rows.get(app.selected_index) {
+                Some(SkillRow::Skill { skill_idx, .. }) => {
+                    let skill = &app.skills[*skill_idx];
+                    load_detail(skill).ok()
+                }
+                Some(SkillRow::Child {
+                    skill_idx,
+                    child_idx,
+                }) => {
+                    let skill = &app.skills[*skill_idx];
+                    let child = &skill.children[*child_idx];
+                    // Build a synthetic SkillDetail for the child file
+                    let content = if child.is_dir {
+                        format!("[ directory: {} ]", child.name)
+                    } else {
+                        std::fs::read_to_string(path)
+                            .unwrap_or_else(|e| format!("(could not read: {e})"))
+                    };
+                    Some(SkillDetail {
+                        skill: AgentSkill {
+                            name: child.name.clone(),
+                            provider: skill.provider.clone(),
+                            scope: skill.scope.clone(),
+                            path: child.path.clone(),
+                            location: skill.location.clone(),
+                            is_symlink: false,
+                            description: None,
+                            triggers: Vec::new(),
+                            valid: true,
+                            children: Vec::new(),
+                        },
+                        content,
+                        extra: std::collections::BTreeMap::new(),
+                    })
+                }
+                None => None,
+            };
+        }
+
+        terminal
+            .terminal
+            .draw(|frame| draw_skills(frame, &app))
+            .context("failed to draw skill browser")?;
+
+        if event::poll(Duration::from_millis(90)).context("failed to poll terminal input")? {
+            let input = event::read().context("failed to read terminal input")?;
+            match input {
+                Event::Mouse(mouse_event) => match mouse_event.kind {
+                    MouseEventKind::ScrollDown => {
+                        if app.focus == SkillFocus::List && !app.full_screen_preview {
+                            app.select_next();
+                        } else {
+                            app.preview_scroll = app.preview_scroll.saturating_add(2);
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        if app.focus == SkillFocus::List && !app.full_screen_preview {
+                            app.select_prev();
+                        } else {
+                            app.preview_scroll = app.preview_scroll.saturating_sub(2);
+                        }
+                    }
+                    _ => {}
+                },
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    if app.is_searching {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Enter => {
+                                app.is_searching = false;
+                            }
+                            KeyCode::Backspace => {
+                                app.search_query.pop();
+                                app.rebuild_rows();
+                            }
+                            KeyCode::Char(c) => {
+                                app.search_query.push(c);
+                                app.rebuild_rows();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            if app.full_screen_preview {
+                                app.full_screen_preview = false;
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if app.full_screen_preview {
+                                app.full_screen_preview = false;
+                            } else if app.focus == SkillFocus::Detail {
+                                app.focus = SkillFocus::List;
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Char('s') => {
+                            app.show_symlinks = !app.show_symlinks;
+                            app.rebuild_rows();
+                        }
+                        KeyCode::Char('/') => {
+                            app.is_searching = true;
+                        }
+                        KeyCode::Enter => {
+                            if app.focus == SkillFocus::List && !app.full_screen_preview {
+                                // Enter on list: toggle expand for directory skills
+                                app.toggle_expand();
+                            } else {
+                                app.full_screen_preview = !app.full_screen_preview;
+                            }
+                        }
+                        KeyCode::Tab | KeyCode::Char('l') => {
+                            if !app.full_screen_preview {
+                                app.focus = match app.focus {
+                                    SkillFocus::List => SkillFocus::Detail,
+                                    SkillFocus::Detail => SkillFocus::List,
+                                };
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.focus == SkillFocus::List && !app.full_screen_preview {
+                                app.toggle_expand();
+                            } else if !app.full_screen_preview {
+                                app.focus = SkillFocus::List;
+                            }
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            if app.focus == SkillFocus::List && !app.full_screen_preview {
+                                app.collapse_current();
+                            } else if !app.full_screen_preview {
+                                app.focus = SkillFocus::List;
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            if app.focus == SkillFocus::List && !app.full_screen_preview {
+                                app.toggle_expand();
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if app.focus == SkillFocus::List && !app.full_screen_preview {
+                                app.select_next();
+                            } else {
+                                app.preview_scroll = app.preview_scroll.saturating_add(1);
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.focus == SkillFocus::List && !app.full_screen_preview {
+                                app.select_prev();
+                            } else {
+                                app.preview_scroll = app.preview_scroll.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            app.preview_scroll = app.preview_scroll.saturating_add(10);
+                        }
+                        KeyCode::PageUp => {
+                            app.preview_scroll = app.preview_scroll.saturating_sub(10);
+                        }
+                        KeyCode::Char('o') => {
+                            if let Some(path) = app.selected_preview_path() {
+                                open_in_editor(&path);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            app.marquee_offset = app.marquee_offset.wrapping_add(1);
+        }
+    }
+
+    Ok(())
+}
+/// Open `path` in the best available editor, degrading gracefully:
+/// $VISUAL → $EDITOR → `code` → `cursor` → `open` (macOS / xdg-open).
+fn open_in_editor(path: &std::path::Path) {
+    use std::process::Command;
+
+    // Try GUI editors from env and common installs
+    let candidates: &[&str] = &["VISUAL", "EDITOR"];
+    for var in candidates {
+        if let Ok(editor) = std::env::var(var)
+            && !editor.is_empty()
+        {
+            let _ = Command::new(&editor).arg(path).spawn();
+            return;
+        }
+    }
+
+    for bin in &["code", "cursor"] {
+        if Command::new(bin).arg("--version").output().is_ok() {
+            let _ = Command::new(bin).arg(path).spawn();
+            return;
+        }
+    }
+
+    // macOS fallback: open with Finder / default app
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(path).spawn();
+    }
+
+    // Linux fallback
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
+    let area = frame.area();
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // Header
+        Constraint::Min(10),   // Body
+        Constraint::Length(1), // Footer
+    ])
+    .split(area);
+
+    // 1. Header
+    let header_text = if app.is_searching {
+        format!(" MENA SKILLS  | Search: {}_ ", app.search_query)
+    } else if !app.search_query.is_empty() {
+        format!(
+            " MENA SKILLS  | Filter: \"{}\" ({}/{})",
+            app.search_query,
+            app.visible_rows
+                .iter()
+                .filter(|r| matches!(r, SkillRow::Skill { .. }))
+                .count(),
+            app.skills.len()
+        )
+    } else {
+        format!(
+            " MENA SKILLS  | {} skills ",
+            app.visible_rows
+                .iter()
+                .filter(|r| matches!(r, SkillRow::Skill { .. }))
+                .count()
+        )
+    };
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            " ⚡ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            header_text,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Developer Agent Skills Browser "),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    // 2. Body
+    if app.full_screen_preview {
+        render_skill_preview(frame, chunks[1], app);
+    } else {
+        let body_chunks = Layout::horizontal([
+            Constraint::Percentage(40), // List
+            Constraint::Percentage(60), // Preview
+        ])
+        .split(chunks[1]);
+
+        render_skill_list(frame, body_chunks[0], app);
+        render_skill_preview(frame, body_chunks[1], app);
+    }
+
+    // 3. Footer
+    let symlink_status = if app.show_symlinks {
+        " (on) "
+    } else {
+        " (off) "
+    };
+    let footer_spans = vec![
+        Span::styled(
+            " Space/→",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Expand ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " ←",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Collapse ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " Tab/l",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Focus ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " ↑/↓",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Move ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " s",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" Symlinks{symlink_status}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " /",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Search ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " o",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Open ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " q/Esc",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Quit", Style::default().fg(Color::DarkGray)),
+    ];
+    let footer = Paragraph::new(Line::from(footer_spans));
+    frame.render_widget(footer, chunks[2]);
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
+    let mut rows: Vec<Row> = Vec::new();
+
+    // Pre-compute per-skill child counts for proper ├─ / └─ connectors
+    let visible = &app.visible_rows;
+
+    for (list_idx, row) in visible.iter().enumerate() {
+        let is_selected = list_idx == app.selected_index;
+        let row_bg = if is_selected {
+            Style::default().bg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+
+        match row {
+            SkillRow::Skill {
+                skill_idx,
+                has_children,
+                expanded,
+            } => {
+                let skill = &app.skills[*skill_idx];
+
+                let expand_icon = if *has_children {
+                    if *expanded { "▾" } else { "▸" }
+                } else {
+                    " "
+                };
+
+                let cursor = if is_selected { "▶ " } else { "  " };
+                let name_str = format!("{cursor}{expand_icon} {}", skill.name);
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Reset)
+                };
+
+                let desc_raw = skill.description.as_deref().unwrap_or("-");
+                let desc_display =
+                    format_marquee_desc(desc_raw, 36, app.marquee_offset, is_selected);
+                let desc_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+
+                let (type_str, type_color) = if skill.is_symlink {
+                    ("⇢ link", Color::Yellow)
+                } else if *has_children {
+                    ("dir", Color::LightBlue)
+                } else {
+                    ("md", Color::DarkGray)
+                };
+
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(Span::styled(name_str, name_style)),
+                        Cell::from(Span::styled(desc_display, desc_style)),
+                        Cell::from(Span::styled(type_str, Style::default().fg(type_color))),
+                    ])
+                    .style(row_bg),
+                );
+            }
+            SkillRow::Child {
+                skill_idx,
+                child_idx,
+            } => {
+                let skill = &app.skills[*skill_idx];
+                let child = &skill.children[*child_idx];
+
+                // Is this the last child of its parent in the visible list?
+                let is_last = visible
+                    .get(list_idx + 1)
+                    .is_none_or(|next| !matches!(next, SkillRow::Child { skill_idx: si, .. } if *si == *skill_idx));
+
+                let connector = if is_last { "└─" } else { "├─" };
+                let name_str = format!("    {connector} {}", child.name);
+
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else if child.is_dir {
+                    Style::default().fg(Color::LightBlue)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let (type_str, type_color) = if child.is_dir {
+                    ("dir", Color::LightBlue)
+                } else {
+                    let ext = child
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("file");
+                    (ext, Color::DarkGray)
+                };
+
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(Span::styled(name_str, name_style)),
+                        Cell::from(""),
+                        Cell::from(Span::styled(type_str, Style::default().fg(type_color))),
+                    ])
+                    .style(row_bg),
+                );
+            }
+        }
+    }
+
+    let is_active_focus = app.focus == SkillFocus::List && !app.full_screen_preview;
+    let (border_color, title_text) = if is_active_focus {
+        (Color::Cyan, "▸ Skills Roster [ACTIVE] ")
+    } else {
+        (Color::DarkGray, " Skills Roster ")
+    };
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(20),   // NAME (with tree prefix)
+            Constraint::Min(30),   // DESCRIPTION (wider)
+            Constraint::Length(7), // TYPE (last, narrow)
+        ],
+    )
+    .header(
+        Row::new(vec!["NAME", "DESCRIPTION", "TYPE"]).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(title_text),
+    );
+
+    let mut state = TableState::default();
+    if !app.visible_rows.is_empty() {
+        state.select(Some(app.selected_index));
+    }
+
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn format_marquee_desc(desc: &str, max_len: usize, offset: usize, is_selected: bool) -> String {
+    let clean = desc.split('\n').next().unwrap_or("-").trim();
+    let char_count = clean.chars().count();
+    if char_count <= max_len {
+        return clean.to_string();
+    }
+
+    if !is_selected {
+        let truncated: String = clean.chars().take(max_len.saturating_sub(3)).collect();
+        return format!("{truncated}...");
+    }
+
+    let padded = format!("{clean}    ★    {clean}");
+    let padded_chars: Vec<char> = padded.chars().collect();
+    let cycle_len = char_count + 9;
+    let start_pos = offset % cycle_len;
+
+    if start_pos + max_len <= padded_chars.len() {
+        padded_chars[start_pos..start_pos + max_len]
+            .iter()
+            .collect()
+    } else {
+        clean.chars().take(max_len).collect()
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
+    let is_active_focus = app.focus == SkillFocus::Detail && !app.full_screen_preview;
+    let (border_color, title_text) = if app.full_screen_preview {
+        (
+            Color::Yellow,
+            "▸ Skill Inspector & Details [FULLSCREEN] (Enter to exit) ",
+        )
+    } else if is_active_focus {
+        (Color::Cyan, "▸ Skill Inspector & Details [ACTIVE] ")
+    } else {
+        (Color::DarkGray, " Skill Inspector & Details ")
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(title_text);
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(detail) = &app.current_detail else {
+        let empty_p = Paragraph::new("No skill selected or failed to load content")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty_p, inner_area);
+        return;
+    };
+
+    let skill = &detail.skill;
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Name:        ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                &skill.name,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Provider:    ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(&skill.provider, Style::default().fg(Color::Yellow)),
+            Span::raw("   "),
+            Span::styled("Scope: ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(&skill.scope, Style::default().fg(Color::Cyan)),
+            Span::raw("   "),
+            Span::styled("Type: ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                if skill.is_symlink { "symlink" } else { "file" },
+                Style::default().fg(if skill.is_symlink {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::raw("   "),
+            Span::styled("Valid: ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                if skill.valid { "✓ true" } else { "✗ false" },
+                Style::default().fg(if skill.valid {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Location:    ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(&skill.location, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled("Path:        ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                skill.path.display().to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ];
+
+    if !skill.triggers.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Triggers:    ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                skill.triggers.join(", "),
+                Style::default().fg(Color::LightGreen),
+            ),
+        ]));
+    }
+
+    if let Some(desc) = &skill.description {
+        lines.push(Line::from(vec![
+            Span::styled("Description: ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(desc, Style::default().fg(Color::Gray)),
+        ]));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "─────────────────────────────────────────────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    for content_line in detail.content.lines() {
+        if content_line.starts_with("# ") {
+            lines.push(Line::from(Span::styled(
+                content_line,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if content_line.starts_with("## ") || content_line.starts_with("### ") {
+            lines.push(Line::from(Span::styled(
+                content_line,
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if content_line.starts_with("---") {
+            lines.push(Line::from(Span::styled(
+                content_line,
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if content_line.starts_with("- ") || content_line.starts_with("* ") {
+            lines.push(Line::from(vec![
+                Span::styled("• ", Style::default().fg(Color::Cyan)),
+                Span::raw(&content_line[2..]),
+            ]));
+        } else {
+            lines.push(Line::from(content_line.to_string()));
+        }
+    }
+
+    let total_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let visible_height = inner_area.height;
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll = app.preview_scroll.min(max_scroll);
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, inner_area);
+}
 #[cfg(test)]
 mod tests {
     use super::DisplayRow;

@@ -7,6 +7,7 @@ use crate::session::{
     AgentSession, AssociationSummary, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage,
     ToolMetrics,
 };
+use crate::skill::{AgentSkill, SkillDetail};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +79,140 @@ pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) 
     } else {
         render_table(&headers, &rows)
     }
+}
+
+pub fn render_skill_table(skills: &[AgentSkill]) -> String {
+    let bold_cyan = anstyle::Style::new()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+        .bold();
+    let green =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)));
+    let cyan = anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)));
+    let magenta =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)));
+    let yellow =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Yellow)));
+    let reset = anstyle::Style::new();
+
+    let headers = [
+        "NAME",
+        "PROVIDER",
+        "TYPE",
+        "LOCATION",
+        "SCOPE",
+        "TRIGGERS",
+        "DESCRIPTION",
+    ];
+    let rows: Vec<Vec<String>> = skills
+        .iter()
+        .map(|skill| {
+            let triggers = if skill.triggers.is_empty() {
+                "-".to_string()
+            } else {
+                skill.triggers.join(", ")
+            };
+            let description = skill
+                .description
+                .as_deref()
+                .unwrap_or("-")
+                .split('\n')
+                .next()
+                .unwrap_or("-")
+                .to_string();
+
+            let scope_styled = if skill.scope == "global" {
+                format!("{cyan}[{}]{reset}", skill.scope)
+            } else {
+                format!("{green}[{}]{reset}", skill.scope)
+            };
+
+            let provider_styled = match skill.provider.as_str() {
+                "claude" => format!("{magenta}[{}]{reset}", skill.provider),
+                "codex" => format!("{yellow}[{}]{reset}", skill.provider),
+                _ => format!("[{}]", skill.provider),
+            };
+
+            let type_styled = if skill.is_symlink {
+                format!("{yellow}[symlink]{reset}")
+            } else {
+                "[file]".to_string()
+            };
+
+            vec![
+                format!("{bold_cyan}{}{reset}", skill.name),
+                provider_styled,
+                type_styled,
+                skill.location.clone(),
+                scope_styled,
+                triggers,
+                description,
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows)
+}
+
+pub fn render_skill_detail(detail: &SkillDetail) -> String {
+    let bold_magenta = anstyle::Style::new()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)))
+        .bold();
+    let bold_cyan = anstyle::Style::new()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+        .bold();
+    let green =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)));
+    let red = anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Red)));
+    let dim = anstyle::Style::new().dimmed();
+    let reset = anstyle::Style::new();
+
+    let mut out = String::new();
+    let s = &detail.skill;
+
+    let _ = writeln!(
+        out,
+        "╭─────────────────────────────────────────────────────────────"
+    );
+    let _ = writeln!(out, "│ {bold_cyan}Skill Inspector:{reset} {}", s.name);
+    let _ = writeln!(
+        out,
+        "├─────────────────────────────────────────────────────────────"
+    );
+    let _ = writeln!(out, "│ {bold_magenta}Provider:{reset}    {}", s.provider);
+    let _ = writeln!(out, "│ {bold_magenta}Scope:{reset}       {}", s.scope);
+    let _ = writeln!(
+        out,
+        "│ {bold_magenta}Path:{reset}        {dim}{}{reset}",
+        s.path.display()
+    );
+    let _ = writeln!(
+        out,
+        "│ {bold_magenta}Valid:{reset}       {}",
+        if s.valid {
+            format!("{green}✓ true{reset}")
+        } else {
+            format!("{red}✗ false{reset}")
+        }
+    );
+    if !s.triggers.is_empty() {
+        let _ = writeln!(
+            out,
+            "│ {bold_magenta}Triggers:{reset}    {}",
+            s.triggers.join(", ")
+        );
+    }
+    if let Some(desc) = &s.description {
+        let _ = writeln!(out, "│ {bold_magenta}Description:{reset} {desc}");
+    }
+    let _ = writeln!(
+        out,
+        "╰─────────────────────────────────────────────────────────────\n"
+    );
+    let _ = writeln!(
+        out,
+        "{dim}--- Content Preview ---{reset}\n{}",
+        detail.content
+    );
+    out
 }
 
 fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
