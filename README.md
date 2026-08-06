@@ -82,7 +82,8 @@ form.
 
 ```sh
 mena ss
-mena ss --provider claude --limit 20
+mena ss --provider cursor --limit 20
+mena ss --include-empty
 mena ss --json
 ```
 
@@ -128,12 +129,10 @@ terminal text selection still works.
 | OpenCode | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | ✓ |
 | Oh My Pi | ✓ | ✓ | ✓ | ✓ |
-| Cursor Agent | ✓ | - | ✓ | - |
+| Cursor Agent | ✓ | ✓ | ✓ | ✓ |
 | Custom recognizer | ✓ | - | configurable | - |
 
-Cursor Agent and custom recognizers do not have a generic supported local
-session catalog. `mena` returns an explicit unsupported error instead of
-guessing a storage path.
+Custom recognizers do not have a generic supported local session catalog. `mena` returns an explicit unsupported error instead of guessing a storage path.
 
 ### Live session association
 

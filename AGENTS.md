@@ -88,7 +88,7 @@ main.rs
 - Validate session IDs and canonical paths before deletion. Traversal and
   symlink escapes outside provider-owned roots must fail closed.
 - Keep destructive confirmation explicit and lowercase-`y` only.
-- Cursor and custom agents have no generic local session catalog. Do not guess
+- Custom agents have no generic local session catalog. Do not guess
   storage paths; return an actionable unsupported-operation error.
 
 ## Configuration

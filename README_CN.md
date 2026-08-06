@@ -76,7 +76,8 @@ Target 稳定且适合脚本使用：
 
 ```sh
 mena ss
-mena ss --provider claude --limit 20
+mena ss --provider cursor --limit 20
+mena ss --include-empty
 mena ss --json
 ```
 
@@ -119,11 +120,10 @@ mena ss --json
 | OpenCode | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | ✓ |
 | Oh My Pi | ✓ | ✓ | ✓ | ✓ |
-| Cursor Agent | ✓ | - | ✓ | - |
+| Cursor Agent | ✓ | ✓ | ✓ | ✓ |
 | 自定义识别规则 | ✓ | - | 可配置 | - |
 
-Cursor Agent 和自定义识别规则没有通用且受支持的本地 Session 目录。`mena` 会
-返回明确的“不支持”错误，而不是猜测存储路径。
+自定义识别规则没有通用且受支持的本地 Session 目录。`mena` 会返回明确的“不支持”错误，而不是猜测存储路径。
 
 ### 运行进程与 Session 的关联
 
