@@ -2,11 +2,11 @@ pub(crate) mod app;
 pub(crate) mod event;
 pub(crate) mod render;
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::session::{AgentSession, DeletionSummary, DetailScope, SessionDetail};
 use crate::settings::SessionDetailColorSettings;
@@ -46,11 +46,15 @@ fn run_session_browser(
 ) -> Result<Option<AgentSession>> {
     let mut app = SessionsApp::new_with_detail_theme(sessions, active_targets, detail_theme);
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+    let mut tick: usize = 0;
     loop {
         terminal
             .terminal
-            .draw(|frame| draw_sessions(frame, &mut app))
+            .draw(|frame| draw_sessions(frame, &mut app, tick))
             .context("failed to draw session browser")?;
+
+        tick = tick.wrapping_add(1);
+
         // While a transcript search runs incrementally, drive it one batch per
         // frame instead of blocking on event::read. Esc cancels; any other key
         // is swallowed until the scan finishes. Each tick redraws the spinner.
@@ -59,6 +63,13 @@ fn run_session_browser(
         {
             continue;
         }
+
+        if !crossterm::event::poll(Duration::from_millis(40))
+            .context("failed to poll terminal input")?
+        {
+            continue;
+        }
+
         let input = crossterm::event::read().context("failed to read terminal input")?;
         if app.mode == BrowserMode::Detail {
             for input in read_detail_event_batch(input)? {

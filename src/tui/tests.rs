@@ -30,7 +30,7 @@ fn session_layout_displays_titles_and_filters_by_them() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 100, 18);
     assert!(screen.contains("Fix terminal rendering"));
@@ -47,7 +47,7 @@ fn session_target_is_first_and_visible_at_eighty_columns() {
     let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("test terminal");
 
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw sessions");
 
     let screen = buffer_text(terminal.backend().buffer(), 80, 18);
@@ -166,7 +166,7 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
     });
     let mut terminal = Terminal::new(TestBackend::new(100, 50)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     let screen = buffer_text(terminal.backend().buffer(), 100, 50);
@@ -245,7 +245,7 @@ fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
 
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw conversation-only details");
 
     let screen = buffer_text(terminal.backend().buffer(), 80, 30);
@@ -294,7 +294,7 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
     assert_eq!(app.preview_scope, DetailScope::All);
     let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw complete details");
     let complete = buffer_text(terminal.backend().buffer(), 80, 30);
     assert!(
@@ -312,7 +312,7 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
     );
     assert_eq!(app.preview_scope, DetailScope::Conversation);
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw conversation details again");
     let conv = buffer_text(terminal.backend().buffer(), 80, 30);
     assert!(
@@ -350,7 +350,7 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
     let mut terminal = Terminal::new(TestBackend::new(100, 42)).expect("test terminal");
 
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     let buffer = terminal.backend().buffer();
@@ -407,7 +407,7 @@ fn detail_theme_can_customize_every_text_surface_independently() {
     let mut terminal = Terminal::new(TestBackend::new(100, 35)).expect("test terminal");
 
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw custom details");
 
     let buffer = terminal.backend().buffer();
@@ -442,7 +442,7 @@ fn detail_metadata_keys_are_pink_purple() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
 
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     let buffer = terminal.backend().buffer();
@@ -477,7 +477,7 @@ fn detail_mode_can_scroll_to_the_last_chat_message() {
     let selected = app.table_state.selected();
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     handle_detail_key(
@@ -487,7 +487,7 @@ fn detail_mode_can_scroll_to_the_last_chat_message() {
         None,
     );
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw scrolled details");
 
     let screen = buffer_text(terminal.backend().buffer(), 80, 24);
@@ -511,7 +511,7 @@ fn detail_end_reaches_content_after_word_wrapped_lines() {
     app.open_detail(SessionDetail { session, messages });
     let mut terminal = Terminal::new(TestBackend::new(36, 18)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     handle_detail_key(
@@ -521,7 +521,7 @@ fn detail_end_reaches_content_after_word_wrapped_lines() {
         None,
     );
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw end of details");
 
     let screen = buffer_text(terminal.backend().buffer(), 36, 18);
@@ -546,13 +546,13 @@ fn detail_reflows_and_keeps_the_end_reachable_after_terminal_resize() {
     app.open_detail(SessionDetail { session, messages });
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw wide details");
     let wide_max_scroll = app.detail_max_scroll;
 
     terminal.backend_mut().resize(36, 18);
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw narrow details");
     assert!(app.detail_max_scroll > wide_max_scroll);
     handle_detail_key(
@@ -562,7 +562,7 @@ fn detail_reflows_and_keeps_the_end_reachable_after_terminal_resize() {
         None,
     );
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw resized detail end");
 
     let screen = buffer_text(terminal.backend().buffer(), 36, 18);
@@ -585,7 +585,7 @@ fn detail_scrolling_reaches_content_beyond_u16_scroll_range() {
     app.open_detail(SessionDetail { session, messages });
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     for _ in 0..7_000 {
@@ -599,7 +599,7 @@ fn detail_scrolling_reaches_content_beyond_u16_scroll_range() {
     assert_eq!(app.detail_scroll, app.detail_max_scroll);
     assert!(app.detail_scroll > usize::from(u16::MAX));
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw end of details");
 
     let screen = buffer_text(terminal.backend().buffer(), 80, 24);
@@ -647,7 +647,7 @@ fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
     app.preview_scope = DetailScope::All;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
     handle_detail_key(
@@ -1159,7 +1159,7 @@ fn project_grouping_renders_header_rows_and_allows_selectable_group_headers() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
@@ -1203,7 +1203,7 @@ fn project_grouping_allows_collapsing_and_expanding_groups() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
     terminal
-        .draw(|frame| draw_sessions(frame, &mut app))
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 

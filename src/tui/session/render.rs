@@ -9,8 +9,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
 use crate::tui::common::{
-    ACCENT, METADATA_KEY, MUTED, SessionDetailTheme, centered_rect, key_hints, themed_key_hints,
-    thinking_orb_spans,
+    ACCENT, METADATA_KEY, MUTED, SessionDetailTheme, centered_rect, key_hints, render_border_beam,
+    themed_key_hints, thinking_orb_spans,
 };
 use crate::view::{
     TOOL_TOKEN_ACCOUNTING_NOTE, format_duration, format_metric_error, format_model_usage_summary,
@@ -18,7 +18,7 @@ use crate::view::{
     format_tool_summary,
 };
 
-pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp) {
+pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, tick: usize) {
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
@@ -26,35 +26,43 @@ pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     ])
     .split(frame.area());
 
-    render_session_search(frame, areas[0], app);
+    render_session_search(frame, areas[0], app, tick);
     render_session_table_widget(frame, areas[1], app);
     render_session_footer(frame, areas[2], app);
     render_session_detail_popup(frame, app);
     render_delete_confirmation(frame, app);
 }
 
-fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
-    let (style, title) = if app.mode == BrowserMode::Search {
+fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp, tick: usize) {
+    let (beam_color, title) = if app.mode == BrowserMode::Search {
         (
-            Style::default().fg(Color::Black).bg(ACCENT),
+            Color::Yellow,
             " Search — type to filter, Enter apply, Esc clear ",
         )
     } else {
-        (Style::default().fg(MUTED), " Search — press / to filter ")
+        (Color::Rgb(56, 189, 248), " Search — press / to filter ")
     };
     let query = if app.query.is_empty() {
         "All sessions"
     } else {
         &app.query
     };
+
+    render_border_beam(frame, area, tick, title, MUTED, beam_color);
+
+    let query_style = if app.mode == BrowserMode::Search {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if app.query.is_empty() {
+        Style::default().fg(MUTED)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
     frame.render_widget(
-        Paragraph::new(query).style(style).block(
-            Block::new()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(title),
-        ),
-        area,
+        Paragraph::new(query).style(query_style),
+        Block::new().inner(area),
     );
 }
 

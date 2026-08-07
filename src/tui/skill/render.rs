@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::app::*;
+use crate::tui::common::render_border_beam;
 
 // ── Design Tokens ─────────────────────────────────────────────────────────────
 
@@ -86,13 +87,16 @@ pub(crate) fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
         ]
     };
 
-    let header = Paragraph::new(Line::from(header_spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_ACTIVE_BORDER))
-            .title(" Developer Agent Skills Browser "),
+    render_border_beam(
+        frame,
+        chunks[0],
+        app.marquee_offset,
+        " Developer Agent Skills Browser ",
+        COLOR_INACTIVE_BORDER,
+        COLOR_ACCENT,
     );
+
+    let header = Paragraph::new(Line::from(header_spans));
     frame.render_widget(header, chunks[0]);
 
     // 2. Body
@@ -501,8 +505,13 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
 
         if in_code_block {
             lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-                Span::styled(content_line, Style::default().fg(Color::Rgb(180, 190, 200))),
+                Span::styled("│ ", Style::default().fg(Color::Rgb(80, 140, 200))),
+                Span::styled(
+                    content_line.to_string(),
+                    Style::default()
+                        .fg(Color::Rgb(200, 210, 225))
+                        .bg(Color::Rgb(30, 35, 45)),
+                ),
             ]));
         } else if let Some(rest) = content_line.strip_prefix("# ") {
             lines.push(Line::from(vec![
@@ -543,12 +552,11 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
             .strip_prefix("- ")
             .or_else(|| content_line.strip_prefix("* "))
         {
-            lines.push(Line::from(vec![
-                Span::styled("  • ", Style::default().fg(COLOR_ACCENT)),
-                Span::styled(rest, Style::default().fg(Color::Reset)),
-            ]));
+            let mut line_spans = vec![Span::styled("  • ", Style::default().fg(COLOR_ACCENT))];
+            line_spans.extend(parse_inline_spans(rest));
+            lines.push(Line::from(line_spans));
         } else {
-            lines.push(Line::from(content_line.to_string()));
+            lines.push(Line::from(parse_inline_spans(content_line)));
         }
     }
 
@@ -589,4 +597,51 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
         );
         frame.render_widget(info_paragraph, info_rect);
     }
+}
+fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut current = text;
+
+    while !current.is_empty() {
+        if let Some(start) = current.find('`')
+            && let Some(end) = current[start + 1..].find('`')
+        {
+            let actual_end = start + 1 + end;
+            if start > 0 {
+                spans.push(Span::raw(current[..start].to_string()));
+            }
+            let code_content = &current[start + 1..actual_end];
+            spans.push(Span::styled(
+                format!(" {code_content} "),
+                Style::default()
+                    .fg(Color::Rgb(56, 189, 248))
+                    .bg(Color::Rgb(30, 35, 45)),
+            ));
+            current = &current[actual_end + 1..];
+            continue;
+        }
+
+        if let Some(start) = current.find("**")
+            && let Some(end) = current[start + 2..].find("**")
+        {
+            let actual_end = start + 2 + end;
+            if start > 0 {
+                spans.push(Span::raw(current[..start].to_string()));
+            }
+            let bold_content = &current[start + 2..actual_end];
+            spans.push(Span::styled(
+                bold_content.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            current = &current[actual_end + 2..];
+            continue;
+        }
+
+        spans.push(Span::raw(current.to_string()));
+        break;
+    }
+
+    spans
 }
