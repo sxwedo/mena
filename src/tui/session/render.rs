@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
@@ -48,9 +48,12 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
         &app.query
     };
     frame.render_widget(
-        Paragraph::new(query)
-            .style(style)
-            .block(Block::new().borders(Borders::ALL).title(title)),
+        Paragraph::new(query).style(style).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(title),
+        ),
         area,
     );
 }
@@ -156,15 +159,20 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
 
     let table = Table::new(rows, columns.iter().map(|column| column.constraint))
         .header(header)
-        .block(Block::new().borders(Borders::ALL).title(table_title))
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(table_title),
+        )
         .column_spacing(1)
         .row_highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(Color::Rgb(40, 44, 52))
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("› ");
+        .highlight_symbol("▶ ");
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
@@ -191,11 +199,24 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         frame.area().height.saturating_sub(2),
     );
     let theme = app.detail_theme;
+    let max_scroll = app.detail_max_scroll;
+    let scroll_percent = (app.detail_scroll * 100)
+        .checked_div(max_scroll)
+        .unwrap_or(100);
+    let total_h = app
+        .detail_layout
+        .as_ref()
+        .map_or(0, DetailLayoutCache::total_height);
+    let title_text = format!(
+        " Session details [Scroll: {scroll_percent}% | Line {}/{total_h}] ",
+        app.detail_scroll + 1,
+    );
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
         .title_style(Style::default().fg(theme.popup_title))
-        .title(" Session details ");
+        .title(title_text);
     let inner = block.inner(popup);
     let detail_status_height = app.detail_status.as_ref().map_or(0, |status| {
         let desired = wrapped_text_height(&Text::from(status.text.as_str()), inner.width.max(1));
@@ -701,8 +722,9 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
             .block(
                 Block::new()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Red))
-                    .title(" Confirm deletion "),
+                    .title(" Confirm Deletion "),
             ),
         popup,
     );

@@ -63,16 +63,19 @@ pub(crate) fn draw_agent_selector(
         Constraint::Length(1), // Footer
     ])
     .split(area);
-    // 1. Header
+    let selected_brand_color = items
+        .get(selected_index)
+        .map_or(COLOR_SKY, |item| agent_icon(&item.kind).1);
+
+    // 1. Header with dynamic brand-color Border Beam
     render_border_beam(
         frame,
         chunks[0],
         tick,
         " Developer Agent Launcher ",
         COLOR_INACTIVE_BORDER,
-        Color::Rgb(56, 189, 248),
+        selected_brand_color,
     );
-
     let title_paragraph = Paragraph::new(Line::from(vec![
         Span::styled(
             " ⚡ MENA LAUNCHER ",
@@ -278,13 +281,15 @@ pub(crate) fn draw_mode_selector<T>(
     let popup_area = centered_rect(area, popup_w, popup_h);
     frame.render_widget(Clear, popup_area);
 
+    let (_, kind_color) = agent_icon(kind);
+
     render_border_beam(
         frame,
         popup_area,
         tick,
         &format!(" Select Session Mode: {kind} "),
         COLOR_INACTIVE_BORDER,
-        Color::Rgb(56, 189, 248),
+        kind_color,
     );
 
     let chunks = Layout::vertical([
