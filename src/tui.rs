@@ -2317,6 +2317,19 @@ impl SkillsApp {
         }
     }
 
+    /// Returns the directory path to open for the currently selected row.
+    /// If the selected item is a file (e.g. `SKILL.md`), returns its parent directory.
+    fn selected_open_path(&self) -> Option<PathBuf> {
+        let path = self.selected_preview_path()?;
+        if path.is_dir() {
+            Some(path)
+        } else if let Some(parent) = path.parent() {
+            Some(parent.to_path_buf())
+        } else {
+            Some(path)
+        }
+    }
+
     /// The directory path that controls expansion for the current row (if any).
     fn selected_dir_path(&self) -> Option<PathBuf> {
         let row = self.visible_rows.get(self.selected_index)?;
@@ -2629,7 +2642,7 @@ fn run_skill_browser(
                             app.preview_scroll = app.preview_scroll.saturating_sub(10);
                         }
                         KeyCode::Char('o') => {
-                            if let Some(path) = app.selected_preview_path() {
+                            if let Some(path) = app.selected_open_path() {
                                 open_in_editor(&path);
                             }
                         }
@@ -4550,6 +4563,45 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, super::SkillRow::Item { name, .. } if name == "demo.md"))
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn selected_open_path_returns_containing_directory() {
+        let tmp = std::env::temp_dir().join(format!("mena-open-path-test-{}", std::process::id()));
+        let skill_dir = tmp.join("myskill");
+        let references = skill_dir.join("references");
+        std::fs::create_dir_all(&references).expect("create dirs");
+        std::fs::write(skill_dir.join("SKILL.md"), "# My Skill\n").expect("write skill");
+        std::fs::write(references.join("guide.md"), "# Guide\n").expect("write guide");
+
+        let skill = fixture_skill("myskill", &skill_dir);
+        let mut app = super::SkillsApp::new(vec![skill]);
+
+        // 1. Top-level Skill row (SKILL.md file): opens skill_dir
+        assert_eq!(app.selected_open_path(), Some(skill_dir.clone()));
+
+        // Expand tree
+        app.toggle_expand();
+
+        // 2. Select references directory item: opens references directory
+        let ref_idx = app
+            .visible_rows
+            .iter()
+            .position(|r| matches!(r, super::SkillRow::Item { name, .. } if name == "references"))
+            .expect("references row");
+        app.selected_index = ref_idx;
+        assert_eq!(app.selected_open_path(), Some(references));
+
+        // 3. Select SKILL.md file item: opens skill_dir
+        let skill_md_idx = app
+            .visible_rows
+            .iter()
+            .position(|r| matches!(r, super::SkillRow::Item { name, .. } if name == "SKILL.md"))
+            .expect("SKILL.md row");
+        app.selected_index = skill_md_idx;
+        assert_eq!(app.selected_open_path(), Some(skill_dir));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
