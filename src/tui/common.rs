@@ -220,6 +220,11 @@ pub(super) fn centered_rect(area: Rect, preferred_width: u16, preferred_height: 
 // ── Animation: Border Beam (流光边框) ─────────────────────────────────────────
 
 /// Render a glowing border beam animated around `area` at tick `tick`.
+/// Covers **all four borders** using buffer-level cell overrides.
+///
+/// The base border is rendered in `beam_color` at ~15% luminosity so the
+/// entire frame is always faintly glowing, then a bright beam head sweeps
+/// around at high contrast — much more visible than a dark base + spot beam.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -232,81 +237,99 @@ pub(crate) fn render_border_beam(
     area: Rect,
     tick: usize,
     title: &str,
-    base_color: Color,
+    _base_color: Color,
     beam_color: Color,
 ) {
-    if area.width < 3 || area.height < 3 {
+    if area.width < 4 || area.height < 4 {
         return;
     }
-
-    let w = usize::from(area.width);
-    let h = usize::from(area.height);
-    let perimeter = (w * 2) + (h * 2) - 4;
-    if perimeter == 0 {
-        return;
-    }
-
-    let beam_length = (perimeter / 4).max(6);
-    let speed = 2;
-    let head = (tick * speed) % perimeter;
-
-    let calc_fade = |pos: usize| -> Option<f32> {
-        let dist = if pos <= head {
-            head - pos
-        } else {
-            perimeter + head - pos
-        };
-        if dist <= beam_length {
-            Some(1.0 - (dist as f32 / beam_length as f32))
-        } else {
-            None
-        }
-    };
 
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(base_color))
+        .border_style(Style::default().fg(beam_color))
         .title(title);
-
     frame.render_widget(block, area);
 
-    let mut top_spans = Vec::with_capacity(w);
-    for x in 0..w {
-        let pos = x;
-        let ch = if x == 0 {
+    let w = area.width;
+    let h = area.height;
+
+    let mut perimeter: Vec<(u16, u16, &str)> = Vec::with_capacity(usize::from(w * 2 + h * 2));
+
+    for dx in 0..w {
+        let sym = if dx == 0 {
             "╭"
-        } else if x == w - 1 {
+        } else if dx == w - 1 {
             "╮"
         } else {
             "─"
         };
-        if let Some(intensity) = calc_fade(pos) {
-            let (br, bg, bb) = match beam_color {
-                Color::Cyan => (0.0, 255.0, 255.0),
-                Color::Yellow => (255.0, 220.0, 0.0),
-                Color::Green => (0.0, 255.0, 120.0),
-                _ => (255.0, 255.0, 255.0),
-            };
-            let r = (br * intensity + 40.0 * (1.0 - intensity)) as u8;
-            let g = (bg * intensity + 45.0 * (1.0 - intensity)) as u8;
-            let b = (bb * intensity + 55.0 * (1.0 - intensity)) as u8;
-            top_spans.push(Span::styled(
-                ch,
-                Style::default()
-                    .fg(Color::Rgb(r, g, b))
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            top_spans.push(Span::styled(ch, Style::default().fg(base_color)));
+        perimeter.push((area.x + dx, area.y, sym));
+    }
+    for dy in 1..h {
+        let sym = if dy == h - 1 { "╯" } else { "│" };
+        perimeter.push((area.x + w - 1, area.y + dy, sym));
+    }
+    if h > 1 {
+        for dx in (0..w - 1).rev() {
+            let sym = if dx == 0 { "╰" } else { "─" };
+            perimeter.push((area.x + dx, area.y + h - 1, sym));
+        }
+    }
+    if w > 1 {
+        for dy in (1..h - 1).rev() {
+            perimeter.push((area.x, area.y + dy, "│"));
         }
     }
 
-    let top_rect = Rect::new(area.x, area.y, area.width, 1);
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(Line::from(top_spans)),
-        top_rect,
-    );
+    let total = perimeter.len();
+    if total == 0 {
+        return;
+    }
+
+    let (br, bg, bb) = match beam_color {
+        Color::Cyan => (0.0, 255.0, 255.0),
+        Color::Rgb(56, 189, 248) => (56.0, 189.0, 248.0),
+        Color::Yellow => (255.0, 220.0, 0.0),
+        Color::Green => (0.0, 255.0, 120.0),
+        _ => (255.0, 255.0, 255.0),
+    };
+
+    // Base glow floor — the entire perimeter always glows faintly at this level.
+    let glow_floor = 0.12_f32;
+
+    // Beam covers half the perimeter with a smooth quadratic falloff.
+    let beam_len = (total / 2).max(10);
+    let speed = 2;
+    let head = (tick * speed) % total;
+
+    let buf = frame.buffer_mut();
+
+    for (pos, (px, py, sym)) in perimeter.iter().enumerate() {
+        let dist = if pos <= head {
+            head - pos
+        } else {
+            total + head - pos
+        };
+
+        // Start from the glow floor, boost toward 1.0 along the beam trail.
+        let beam_strength = if dist <= beam_len {
+            // Quadratic falloff for a more "laser-like" bright head + soft tail.
+            let linear = 1.0 - (dist as f32 / beam_len as f32);
+            glow_floor + (1.0 - glow_floor) * linear * linear
+        } else {
+            glow_floor
+        };
+
+        let r = (br * beam_strength) as u8;
+        let g = (bg * beam_strength) as u8;
+        let b = (bb * beam_strength) as u8;
+
+        if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(*px, *py)) {
+            cell.set_symbol(sym);
+            cell.set_style(Style::default().fg(Color::Rgb(r, g, b)));
+        }
+    }
 }
 
 // ── Animation: Thinking Orbs (AI 思考/脉冲点阵球) ─────────────────────────────────

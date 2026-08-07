@@ -9,25 +9,43 @@ use crate::AgentKind;
 use crate::tui::common::{ACCENT, MUTED, centered_rect, render_border_beam};
 
 // ── Design Tokens ─────────────────────────────────────────────────────────────
-
 const COLOR_ACCENT: Color = Color::Cyan;
 const COLOR_ACTIVE_BORDER: Color = Color::Cyan;
 const COLOR_INACTIVE_BORDER: Color = Color::Rgb(60, 65, 75);
 const COLOR_SELECTION_BG: Color = Color::Rgb(40, 44, 52);
 const COLOR_LABEL_KEY: Color = Color::Rgb(150, 160, 190);
 const COLOR_SEPARATOR: Color = Color::Rgb(50, 55, 65);
+const COLOR_SKY: Color = Color::Rgb(56, 189, 248);
+const COLOR_CLAUDE: Color = Color::Rgb(217, 119, 87);
+const COLOR_OPENAI: Color = Color::Rgb(134, 200, 118);
+const COLOR_GEMINI: Color = Color::Rgb(66, 133, 244);
+const COLOR_PI: Color = Color::Rgb(200, 150, 255);
+const COLOR_CURSOR: Color = Color::Rgb(120, 170, 255);
+const COLOR_GOOSE: Color = Color::Rgb(250, 204, 21);
+const COLOR_CUSTOM: Color = Color::Rgb(168, 162, 158);
 
-const fn agent_icon(kind: &AgentKind) -> &'static str {
+/// Returns `(symbol, brand_color)` for each agent — no emoji, pure Unicode
+/// geometric shapes that evoke each brand's visual identity.
+const fn agent_icon(kind: &AgentKind) -> (&'static str, Color) {
     match kind {
-        AgentKind::ClaudeCode => "🤖 ",
-        AgentKind::Codex => "🧠 ",
-        AgentKind::GeminiCli => "💎 ",
-        AgentKind::OpenCode => "🔓 ",
-        AgentKind::Pi => "🥧 ",
-        AgentKind::OhMyPi => "⚡ ",
-        AgentKind::Cursor => "💻 ",
-        AgentKind::Goose => "🪶 ",
-        AgentKind::Custom(_) => "🛠️  ",
+        // ✳ sunburst — evokes Anthropic Claude's logo
+        AgentKind::ClaudeCode => ("✳", COLOR_CLAUDE),
+        // ❂ — evokes OpenAI's hexagonal flower bloom
+        AgentKind::Codex => ("❂", COLOR_OPENAI),
+        // ✦ 4-point star — matches Google Gemini's sparkle
+        AgentKind::GeminiCli => ("✦", COLOR_GEMINI),
+        // ▣ filled checked box — "open code" concept
+        AgentKind::OpenCode => ("▣", COLOR_SKY),
+        // π — the actual Greek letter IS the Pi brand
+        AgentKind::Pi => ("π", COLOR_PI),
+        // ⚡ lightning bolt — Oh My Pi's energy identity
+        AgentKind::OhMyPi => ("⚡", Color::Yellow),
+        // ❯ prompt cursor — matches Cursor editor's brand
+        AgentKind::Cursor => ("❯", COLOR_CURSOR),
+        // ◈ diamond — Goose's geometric identity
+        AgentKind::Goose => ("◈", COLOR_GOOSE),
+        // ⚙ gear — universal tool/custom symbol
+        AgentKind::Custom(_) => ("⚙", COLOR_CUSTOM),
     }
 }
 
@@ -52,7 +70,7 @@ pub(crate) fn draw_agent_selector(
         tick,
         " Developer Agent Launcher ",
         COLOR_INACTIVE_BORDER,
-        Color::Cyan,
+        Color::Rgb(56, 189, 248),
     );
 
     let title_paragraph = Paragraph::new(Line::from(vec![
@@ -78,7 +96,7 @@ pub(crate) fn draw_agent_selector(
             let selected = idx == selected_index;
             let slug = item.kind.slug();
             let label = format!("{}", item.kind);
-            let icon = agent_icon(&item.kind);
+            let (icon, icon_color) = agent_icon(&item.kind);
 
             let cursor = if selected { "▶ " } else { "  " };
 
@@ -126,10 +144,13 @@ pub(crate) fn draw_agent_selector(
             };
 
             Row::new(vec![
-                Cell::from(Span::styled(
-                    format!("{cursor}{icon}{slug} ({label})"),
-                    name_style,
-                )),
+                Cell::from(Line::from(vec![
+                    Span::styled(
+                        cursor,
+                        Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("{icon} {slug} ({label})"), name_style),
+                ])),
                 Cell::from(Span::styled(status_text, Style::default().fg(status_color))),
                 Cell::from(Span::styled(session_info, session_style)),
             ])
@@ -249,7 +270,12 @@ pub(crate) fn draw_mode_selector<T>(
     let area = frame.area();
 
     // Render as a centered floating modal card (not full-screen)
-    let popup_area = centered_rect(area, 66, 12);
+    let popup_w = u16::min(85, area.width.saturating_sub(4));
+    let popup_h = u16::min(
+        u16::try_from(options.len() + 7).unwrap_or(20),
+        area.height.saturating_sub(4),
+    );
+    let popup_area = centered_rect(area, popup_w, popup_h);
     frame.render_widget(Clear, popup_area);
 
     render_border_beam(
@@ -258,7 +284,7 @@ pub(crate) fn draw_mode_selector<T>(
         tick,
         &format!(" Select Session Mode: {kind} "),
         COLOR_INACTIVE_BORDER,
-        Color::Yellow,
+        Color::Rgb(56, 189, 248),
     );
 
     let chunks = Layout::vertical([
@@ -268,14 +294,20 @@ pub(crate) fn draw_mode_selector<T>(
     ])
     .split(popup_area);
 
-    let icon = agent_icon(kind);
+    let (icon, icon_color) = agent_icon(kind);
 
-    let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
-        format!(" {icon} Launch Options: {kind} "),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )]))
+    let title_paragraph = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(" {icon} "),
+            Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("Launch Options: {kind} "),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
