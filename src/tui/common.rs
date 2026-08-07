@@ -217,3 +217,124 @@ pub(super) fn centered_rect(area: Rect, preferred_width: u16, preferred_height: 
         height,
     )
 }
+// ── Animation: Border Beam (流光边框) ─────────────────────────────────────────
+
+/// Render a glowing border beam animated around `area` at tick `tick`.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names,
+    clippy::suboptimal_flops
+)]
+pub(crate) fn render_border_beam(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    tick: usize,
+    title: &str,
+    base_color: Color,
+    beam_color: Color,
+) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+
+    let w = usize::from(area.width);
+    let h = usize::from(area.height);
+    let perimeter = (w * 2) + (h * 2) - 4;
+    if perimeter == 0 {
+        return;
+    }
+
+    let beam_length = (perimeter / 4).max(6);
+    let speed = 2;
+    let head = (tick * speed) % perimeter;
+
+    let calc_fade = |pos: usize| -> Option<f32> {
+        let dist = if pos <= head {
+            head - pos
+        } else {
+            perimeter + head - pos
+        };
+        if dist <= beam_length {
+            Some(1.0 - (dist as f32 / beam_length as f32))
+        } else {
+            None
+        }
+    };
+
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(base_color))
+        .title(title);
+
+    frame.render_widget(block, area);
+
+    let mut top_spans = Vec::with_capacity(w);
+    for x in 0..w {
+        let pos = x;
+        let ch = if x == 0 {
+            "╭"
+        } else if x == w - 1 {
+            "╮"
+        } else {
+            "─"
+        };
+        if let Some(intensity) = calc_fade(pos) {
+            let (br, bg, bb) = match beam_color {
+                Color::Cyan => (0.0, 255.0, 255.0),
+                Color::Yellow => (255.0, 220.0, 0.0),
+                Color::Green => (0.0, 255.0, 120.0),
+                _ => (255.0, 255.0, 255.0),
+            };
+            let r = (br * intensity + 40.0 * (1.0 - intensity)) as u8;
+            let g = (bg * intensity + 45.0 * (1.0 - intensity)) as u8;
+            let b = (bb * intensity + 55.0 * (1.0 - intensity)) as u8;
+            top_spans.push(Span::styled(
+                ch,
+                Style::default()
+                    .fg(Color::Rgb(r, g, b))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            top_spans.push(Span::styled(ch, Style::default().fg(base_color)));
+        }
+    }
+
+    let top_rect = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(Line::from(top_spans)),
+        top_rect,
+    );
+}
+
+// ── Animation: Thinking Orbs (AI 思考/脉冲点阵球) ─────────────────────────────────
+
+const ORB_PULSE_FRAMES: &[&str] = &[" ⠂⠄⠂ ", " ⠅⠤⠅ ", " ⣁⠶⣁ ", " ⣾⠽⣷ ", " ⣴⠾⣦ ", " ⠅⠤⠅ "];
+
+pub(crate) fn thinking_orb_spans(tick: usize, label: &str) -> Vec<Span<'static>> {
+    let pulse_idx = tick % ORB_PULSE_FRAMES.len();
+    let orb_symbol = ORB_PULSE_FRAMES[pulse_idx];
+
+    let color_cycle = match tick % 3 {
+        0 => Color::Cyan,
+        1 => Color::Yellow,
+        _ => Color::Green,
+    };
+
+    vec![
+        Span::styled(
+            orb_symbol.to_string(),
+            Style::default()
+                .fg(color_cycle)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]
+}

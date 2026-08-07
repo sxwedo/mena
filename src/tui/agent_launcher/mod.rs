@@ -1,5 +1,7 @@
 mod render;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode};
 
@@ -38,12 +40,19 @@ pub fn select_and_launch_agent(
     items.sort_by_key(|item| !item.installed);
 
     let mut selected_index = 0;
+    let mut tick: usize = 0;
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
 
     loop {
         terminal.terminal.draw(|frame| {
-            draw_agent_selector(frame, &items, selected_index);
+            draw_agent_selector(frame, &items, selected_index, tick);
         })?;
+
+        tick = tick.wrapping_add(1);
+
+        if !event::poll(Duration::from_millis(40)).context("failed to poll terminal input")? {
+            continue;
+        }
 
         let input = event::read().context("failed to read terminal input")?;
         if let Event::Key(key) = input
@@ -119,12 +128,19 @@ pub fn select_launch_mode_for_agent(
     }
 
     let mut selected_index = 0;
+    let mut tick: usize = 0;
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
 
     loop {
         terminal.terminal.draw(|frame| {
-            draw_mode_selector(frame, kind, &options, selected_index);
+            draw_mode_selector(frame, kind, &options, selected_index, tick);
         })?;
+
+        tick = tick.wrapping_add(1);
+
+        if !event::poll(Duration::from_millis(40)).context("failed to poll terminal input")? {
+            continue;
+        }
 
         let input = event::read().context("failed to read terminal input")?;
         if let Event::Key(key) = input

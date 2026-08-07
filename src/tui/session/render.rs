@@ -10,6 +10,7 @@ use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
 use crate::tui::common::{
     ACCENT, METADATA_KEY, MUTED, SessionDetailTheme, centered_rect, key_hints, themed_key_hints,
+    thinking_orb_spans,
 };
 use crate::view::{
     TOOL_TOKEN_ACCOUNTING_NOTE, format_duration, format_metric_error, format_model_usage_summary,
@@ -628,16 +629,23 @@ fn footer_for_status(app: &SessionsApp) -> Line<'static> {
 }
 
 fn searching_footer_line(progress: &InProgressSearch, app: &SessionsApp) -> Line<'static> {
-    Line::from(Span::styled(
-        search_progress_text(progress, app.sessions.len()),
-        Style::default().fg(ACCENT),
-    ))
+    let tick = (progress.started.elapsed().as_millis() / 80) as usize;
+    let text = format!(
+        "Scanning transcripts — {}/{} scanned, {} match{} (Esc cancel)",
+        progress.cursor.min(app.sessions.len()),
+        app.sessions.len(),
+        progress.hits.len(),
+        if progress.hits.len() == 1 { "" } else { "es" }
+    );
+    Line::from(thinking_orb_spans(tick, &text))
 }
 
 /// Braille spinner frames; advanced by elapsed time so the animation ticks even
 /// when each transcript loads faster than a frame.
+#[allow(dead_code)]
 const SEARCH_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+#[allow(dead_code)]
 pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) -> String {
     let frame = SEARCH_SPINNER
         [progress.started.elapsed().as_millis() as usize / 100 % SEARCH_SPINNER.len()];

@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 
 use super::AgentLauncherItem;
 use crate::AgentKind;
-use crate::tui::common::{ACCENT, MUTED, centered_rect};
+use crate::tui::common::{ACCENT, MUTED, centered_rect, render_border_beam};
 
 // ── Design Tokens ─────────────────────────────────────────────────────────────
 
@@ -35,6 +35,7 @@ pub(crate) fn draw_agent_selector(
     frame: &mut Frame<'_>,
     items: &[AgentLauncherItem],
     selected_index: usize,
+    tick: usize,
 ) {
     let area = frame.area();
 
@@ -44,8 +45,16 @@ pub(crate) fn draw_agent_selector(
         Constraint::Length(1), // Footer
     ])
     .split(area);
-
     // 1. Header
+    render_border_beam(
+        frame,
+        chunks[0],
+        tick,
+        " Developer Agent Launcher ",
+        COLOR_INACTIVE_BORDER,
+        Color::Cyan,
+    );
+
     let title_paragraph = Paragraph::new(Line::from(vec![
         Span::styled(
             " ⚡ MENA LAUNCHER ",
@@ -58,14 +67,7 @@ pub(crate) fn draw_agent_selector(
             "Select & Launch Developer Agent in Current Directory",
             Style::default().fg(COLOR_LABEL_KEY),
         ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_ACTIVE_BORDER))
-            .title(" Developer Agent Launcher "),
-    );
+    ]));
     frame.render_widget(title_paragraph, chunks[0]);
 
     // 2. Table Rows
@@ -242,12 +244,22 @@ pub(crate) fn draw_mode_selector<T>(
     kind: &AgentKind,
     options: &[(T, String)],
     selected_index: usize,
+    tick: usize,
 ) {
     let area = frame.area();
 
     // Render as a centered floating modal card (not full-screen)
     let popup_area = centered_rect(area, 66, 12);
     frame.render_widget(Clear, popup_area);
+
+    render_border_beam(
+        frame,
+        popup_area,
+        tick,
+        &format!(" Select Session Mode: {kind} "),
+        COLOR_INACTIVE_BORDER,
+        Color::Yellow,
+    );
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
