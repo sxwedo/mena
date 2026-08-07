@@ -56,7 +56,7 @@ fn resolve_agent_kind(
         Ok(AgentKind::Custom(slug.to_owned()))
     } else {
         bail!(
-            "unsupported agent provider `{slug}`; available providers: claude, codex, omp, opencode, pi, cursor, gemini{}",
+            "unsupported agent provider `{slug}`; available providers: claude, codex, goose, omp, opencode, pi, cursor, gemini{}",
             if custom.is_empty() {
                 String::new()
             } else {
@@ -80,6 +80,10 @@ pub fn fresh_launch_spec(
         }),
         AgentKind::Codex => Ok(NativeResumeCommand {
             program: "codex".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::Goose => Ok(NativeResumeCommand {
+            program: "goose".to_owned(),
             args: Vec::new(),
         }),
         AgentKind::GeminiCli => Ok(NativeResumeCommand {
@@ -198,6 +202,31 @@ pub fn execute_launch(spec: &NativeResumeCommand) -> Result<()> {
         }
         Ok(())
     }
+}
+pub fn open_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        bail!("no URL associated with this agent");
+    }
+    ui::info(format!("opening homepage: {url}"));
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", "start", ""]);
+        cmd
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = Command::new("xdg-open");
+
+    command.arg(url);
+    let status = command
+        .status()
+        .with_context(|| format!("failed to open URL `{url}`"))?;
+    if !status.success() {
+        bail!("browser command exited with status {status}");
+    }
+    Ok(())
 }
 
 fn print_agent_launch_help(

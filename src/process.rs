@@ -15,6 +15,7 @@ use crate::settings::CustomAgentSettings;
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    Goose,
     GeminiCli,
     OpenCode,
     Pi,
@@ -29,6 +30,7 @@ impl AgentKind {
         match self {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+            Self::Goose => "goose",
             Self::GeminiCli => "gemini",
             Self::OpenCode => "opencode",
             Self::Pi => "pi",
@@ -43,6 +45,7 @@ impl AgentKind {
         match value {
             "claude" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
+            "goose" => Some(Self::Goose),
             "gemini" => Some(Self::GeminiCli),
             "opencode" => Some(Self::OpenCode),
             "pi" => Some(Self::Pi),
@@ -53,6 +56,20 @@ impl AgentKind {
     }
 
     #[must_use]
+    pub const fn homepage_url(&self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "https://docs.anthropic.com/en/docs/agents-and-tools/claude-code",
+            Self::Codex => "https://github.com/openai/codex",
+            Self::Goose => "https://block.github.io/goose/",
+            Self::GeminiCli => "https://github.com/google-gemini/gemini-cli",
+            Self::OpenCode => "https://opencode.ai",
+            Self::Pi => "https://github.com/pi-agent",
+            Self::OhMyPi => "https://github.com/sxwedo/oh-my-pi",
+            Self::Cursor => "https://cursor.com",
+            Self::Custom(_) => "",
+        }
+    }
+    #[must_use]
     pub fn executable_name<'a>(
         &'a self,
         custom: &'a BTreeMap<String, CustomAgentSettings>,
@@ -60,6 +77,7 @@ impl AgentKind {
         match self {
             Self::ClaudeCode => Some("claude"),
             Self::Codex => Some("codex"),
+            Self::Goose => Some("goose"),
             Self::GeminiCli => Some("gemini"),
             Self::OpenCode => Some("opencode"),
             Self::Pi => Some("pi"),
@@ -76,6 +94,7 @@ impl AgentKind {
         match self {
             Self::ClaudeCode => is_executable_in_path("claude"),
             Self::Codex => is_executable_in_path("codex"),
+            Self::Goose => is_executable_in_path("goose"),
             Self::GeminiCli => is_executable_in_path("gemini"),
             Self::OpenCode => is_executable_in_path("opencode"),
             Self::Pi => is_executable_in_path("pi"),
@@ -88,7 +107,6 @@ impl AgentKind {
                 .is_some_and(|c| c.executables.iter().any(|exe| is_executable_in_path(exe))),
         }
     }
-
     #[must_use]
     pub fn all_kinds(custom: &BTreeMap<String, CustomAgentSettings>) -> Vec<Self> {
         let mut kinds = vec![
@@ -98,6 +116,7 @@ impl AgentKind {
             Self::OpenCode,
             Self::Pi,
             Self::Cursor,
+            Self::Goose,
             Self::GeminiCli,
         ];
         for name in custom.keys() {
@@ -112,6 +131,7 @@ impl fmt::Display for AgentKind {
         let label = match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Goose => "Goose",
             Self::GeminiCli => "Gemini CLI",
             Self::OpenCode => "OpenCode",
             Self::Pi => "Pi",

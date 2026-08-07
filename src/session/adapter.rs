@@ -1,14 +1,13 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-
 use super::{
     AgentSession, AssociationEvidence, DeletionSummary, SessionDetail, paths_equivalent,
     read_json_file, remove_file_if_present, remove_tree_if_present, validate_deletion_targets,
     validate_storage_identifier,
 };
 use crate::{AgentKind, ProcessSnapshot};
+use anyhow::{Result, bail};
 
 mod detail;
 mod storage;
@@ -51,6 +50,7 @@ enum ProcessSelector {
 pub(super) enum ProviderAdapter {
     ClaudeCode,
     Codex,
+    Goose,
     GeminiCli,
     OpenCode,
     Pi,
@@ -60,9 +60,10 @@ pub(super) enum ProviderAdapter {
 
 impl ProviderAdapter {
     /// Providers with a native local session catalog, in stable display order.
-    pub(super) const SESSION_CATALOG: [Self; 7] = [
+    pub(super) const SESSION_CATALOG: [Self; 8] = [
         Self::Codex,
         Self::ClaudeCode,
+        Self::Goose,
         Self::GeminiCli,
         Self::OpenCode,
         Self::Pi,
@@ -74,6 +75,7 @@ impl ProviderAdapter {
         match kind {
             AgentKind::ClaudeCode => Some(Self::ClaudeCode),
             AgentKind::Codex => Some(Self::Codex),
+            AgentKind::Goose => Some(Self::Goose),
             AgentKind::GeminiCli => Some(Self::GeminiCli),
             AgentKind::OpenCode => Some(Self::OpenCode),
             AgentKind::Pi => Some(Self::Pi),
@@ -87,6 +89,7 @@ impl ProviderAdapter {
         match self {
             Self::ClaudeCode => AgentKind::ClaudeCode,
             Self::Codex => AgentKind::Codex,
+            Self::Goose => AgentKind::Goose,
             Self::GeminiCli => AgentKind::GeminiCli,
             Self::OpenCode => AgentKind::OpenCode,
             Self::Pi => AgentKind::Pi,
@@ -133,7 +136,7 @@ impl ProviderAdapter {
                     AssociationEvidence::OpenSessionFile,
                 )
             }
-            Self::Codex | Self::GeminiCli | Self::OpenCode | Self::Cursor => {
+            Self::Codex | Self::Goose | Self::GeminiCli | Self::OpenCode | Self::Cursor => {
                 (Vec::new(), AssociationEvidence::NativeRuntime)
             }
         };
@@ -161,6 +164,7 @@ impl ProviderAdapter {
         match self {
             Self::ClaudeCode => scan_claude(home, sessions),
             Self::Codex => scan_codex(home, sessions),
+            Self::Goose => Ok(()),
             Self::GeminiCli => scan_gemini(home, sessions),
             Self::OpenCode => scan_opencode(home, sessions),
             Self::Pi => scan_pi(home, sessions),
@@ -181,7 +185,7 @@ impl ProviderAdapter {
                 Ok(usage)
             }
             Self::OpenCode => detail::opencode_usage(home, &session.id),
-            Self::Cursor => Ok((None, None)),
+            Self::Cursor | Self::Goose => Ok((None, None)),
         }
     }
 
@@ -194,6 +198,7 @@ impl ProviderAdapter {
             Self::GeminiCli => detail::gemini_detail(&selected.path)?,
             Self::OpenCode => detail::opencode_detail(home, &selected.id)?,
             Self::Cursor => detail::cursor_detail(&selected.path, &selected.id)?,
+            Self::Goose => bail!("Goose session detail loading is not implemented"),
         };
         let mut session = selected.clone();
         session.tokens = loaded.tokens;
@@ -224,7 +229,7 @@ impl ProviderAdapter {
                 collect_cursor_artifacts(home, selected, &mut files)?;
                 files.remove(&selected.path);
             }
-            Self::GeminiCli | Self::Pi | Self::OhMyPi => {}
+            Self::GeminiCli | Self::Pi | Self::OhMyPi | Self::Goose => {}
         }
 
         let roots = self.storage_roots(home);
@@ -233,7 +238,7 @@ impl ProviderAdapter {
             Self::Codex => delete_codex_index_records(home, &selected.id)?,
             Self::ClaudeCode => delete_claude_index_records(home, &selected.id)?,
             Self::Cursor => delete_cursor_index_records(home, &selected.id)?,
-            Self::GeminiCli | Self::OpenCode | Self::Pi | Self::OhMyPi => 0,
+            Self::GeminiCli | Self::OpenCode | Self::Pi | Self::OhMyPi | Self::Goose => 0,
         };
 
         let mut summary = DeletionSummary {
@@ -258,6 +263,7 @@ impl ProviderAdapter {
                 home.join(".codex/shell_snapshots"),
             ],
             Self::ClaudeCode => vec![home.join(".claude")],
+            Self::Goose => vec![home.join(".goose")],
             Self::GeminiCli => vec![home.join(".gemini/tmp")],
             Self::OpenCode => vec![home.join(".local/share/opencode/storage")],
             Self::Pi => vec![home.join(".pi/agent/sessions")],
@@ -270,6 +276,10 @@ impl ProviderAdapter {
         let (program, args): (&str, Vec<String>) = match self {
             Self::ClaudeCode => ("claude", vec!["--resume".to_owned(), id.to_owned()]),
             Self::Codex => ("codex", vec!["resume".to_owned(), id.to_owned()]),
+            Self::Goose => (
+                "goose",
+                vec!["session".to_owned(), "resume".to_owned(), id.to_owned()],
+            ),
             Self::GeminiCli => ("gemini", vec!["--resume".to_owned(), id.to_owned()]),
             Self::OpenCode => ("opencode", vec!["--session".to_owned(), id.to_owned()]),
             Self::Pi => ("pi", vec!["--session".to_owned(), id.to_owned()]),
@@ -292,7 +302,7 @@ impl ProviderAdapter {
                 .cloned()
                 .into_iter()
                 .collect(),
-            Self::ClaudeCode | Self::GeminiCli | Self::OhMyPi | Self::Cursor => {
+            Self::ClaudeCode | Self::GeminiCli | Self::OhMyPi | Self::Cursor | Self::Goose => {
                 flag_values(arguments, "--resume")
             }
             Self::OpenCode | Self::Pi => flag_values(arguments, "--session"),
@@ -370,6 +380,7 @@ mod tests {
         let kinds = [
             AgentKind::Codex,
             AgentKind::ClaudeCode,
+            AgentKind::Goose,
             AgentKind::GeminiCli,
             AgentKind::OpenCode,
             AgentKind::Pi,
@@ -393,6 +404,11 @@ mod tests {
                 vec!["--resume", "session-id"],
             ),
             (AgentKind::Codex, "codex", vec!["resume", "session-id"]),
+            (
+                AgentKind::Goose,
+                "goose",
+                vec!["session", "resume", "session-id"],
+            ),
             (
                 AgentKind::GeminiCli,
                 "gemini",
