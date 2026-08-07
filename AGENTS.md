@@ -12,6 +12,8 @@ workspace and must not acquire a path dependency back to it.
 The user-facing command is `mena`:
 
 ```sh
+mena agent [provider] [--fresh] [--resume] [--session <id>]
+mena ag [provider]
 mena sessions
 mena config init [--import-clix]
 ```

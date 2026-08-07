@@ -13,8 +13,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::AgentKind;
 use crate::session::{
-    AgentSession, DeletionSummary, DetailScope, SessionDetail, SessionMessageKind,
+    AgentSession, DeletionSummary, DetailScope, NativeResumeCommand, SessionDetail,
+    SessionMessageKind,
 };
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::view::{
@@ -3173,6 +3175,346 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, inner_area);
+}
+pub struct AgentLauncherItem {
+    pub kind: AgentKind,
+    pub installed: bool,
+    pub session_count: usize,
+    pub latest_session_id: Option<String>,
+    pub latest_session_title: Option<String>,
+}
+
+pub fn select_and_launch_agent(
+    custom: &std::collections::BTreeMap<String, crate::settings::CustomAgentSettings>,
+    cwd_sessions: &[AgentSession],
+) -> Result<Option<NativeResumeCommand>> {
+    let kinds = AgentKind::all_kinds(custom);
+    let mut items = Vec::new();
+    for kind in kinds {
+        let installed = kind.is_installed(custom);
+        let matching: Vec<&AgentSession> = cwd_sessions.iter().filter(|s| s.kind == kind).collect();
+        let session_count = matching.len();
+        let latest = matching.first();
+        items.push(AgentLauncherItem {
+            kind,
+            installed,
+            session_count,
+            latest_session_id: latest.map(|s| s.id.clone()),
+            latest_session_title: latest.and_then(|s| s.title.clone()),
+        });
+    }
+
+    let mut selected_index = 0;
+    let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+
+    loop {
+        terminal.terminal.draw(|frame| {
+            draw_agent_selector(frame, &items, selected_index);
+        })?;
+
+        let input = event::read().context("failed to read terminal input")?;
+        if let Event::Key(key) = input
+            && is_key_press(&key)
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected_index = selected_index.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !items.is_empty() {
+                        selected_index = (selected_index + 1).min(items.len() - 1);
+                    }
+                }
+                KeyCode::Char('n') => {
+                    if let Some(item) = items.get(selected_index) {
+                        return crate::controller::fresh_launch_spec(&item.kind, custom).map(Some);
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if let Some(item) = items.get(selected_index) {
+                        if let Some(ref id) = item.latest_session_id {
+                            return crate::controller::resume_launch_spec(&item.kind, id, custom)
+                                .map(Some);
+                        }
+                        return crate::controller::fresh_launch_spec(&item.kind, custom).map(Some);
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(item) = items.get(selected_index) {
+                        let matching: Vec<&AgentSession> = cwd_sessions
+                            .iter()
+                            .filter(|s| s.kind == item.kind)
+                            .collect();
+                        if matching.is_empty() {
+                            return crate::controller::fresh_launch_spec(&item.kind, custom)
+                                .map(Some);
+                        }
+                        drop(terminal);
+                        return select_launch_mode_for_agent(&item.kind, custom, &matching);
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+pub fn select_launch_mode_for_agent(
+    kind: &AgentKind,
+    custom: &std::collections::BTreeMap<String, crate::settings::CustomAgentSettings>,
+    matching_sessions: &[&AgentSession],
+) -> Result<Option<NativeResumeCommand>> {
+    #[derive(Clone)]
+    enum ModeOption {
+        Fresh,
+        ResumeSession(String),
+    }
+
+    let mut options = vec![(ModeOption::Fresh, "✨ Start New Session".to_owned())];
+    for session in matching_sessions {
+        let title = session.title.as_deref().unwrap_or("Untitled session");
+        let label = format!("⚡ Resume: {} ({title})", session.id);
+        options.push((ModeOption::ResumeSession(session.id.clone()), label));
+    }
+
+    let mut selected_index = 0;
+    let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+
+    loop {
+        terminal.terminal.draw(|frame| {
+            draw_mode_selector(frame, kind, &options, selected_index);
+        })?;
+
+        let input = event::read().context("failed to read terminal input")?;
+        if let Event::Key(key) = input
+            && is_key_press(&key)
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected_index = selected_index.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !options.is_empty() {
+                        selected_index = (selected_index + 1).min(options.len() - 1);
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some((opt, _)) = options.get(selected_index) {
+                        match opt {
+                            ModeOption::Fresh => {
+                                return crate::controller::fresh_launch_spec(kind, custom)
+                                    .map(Some);
+                            }
+                            ModeOption::ResumeSession(id) => {
+                                return crate::controller::resume_launch_spec(kind, id, custom)
+                                    .map(Some);
+                            }
+                        }
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn draw_agent_selector(frame: &mut Frame<'_>, items: &[AgentLauncherItem], selected_index: usize) {
+    let area = frame.area();
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    let title_paragraph = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "mena agent ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("— Select Developer Agent for Current Directory"),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(ACCENT)),
+    );
+    frame.render_widget(title_paragraph, chunks[0]);
+
+    let rows: Vec<Row> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let selected = idx == selected_index;
+            let slug = item.kind.slug();
+            let label = format!("{}", item.kind);
+
+            let status_cell = if item.installed {
+                Cell::from("✓ in PATH").style(Style::default().fg(Color::Green))
+            } else {
+                Cell::from("✗ not in PATH").style(Style::default().fg(MUTED))
+            };
+
+            let session_info = if item.session_count > 0 {
+                let title = item.latest_session_title.as_deref().unwrap_or("Untitled");
+                format!("{} session(s) in cwd (latest: {title})", item.session_count)
+            } else {
+                "no saved sessions in cwd".to_owned()
+            };
+
+            let row = Row::new(vec![
+                Cell::from(format!("{slug} ({label})")),
+                status_cell,
+                Cell::from(session_info),
+            ]);
+
+            if selected {
+                row.style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(35),
+        Constraint::Percentage(20),
+        Constraint::Percentage(45),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["AGENT", "STATUS", "CWD SESSIONS"])
+                .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Available Coding Agents "),
+        );
+
+    frame.render_widget(table, chunks[1]);
+
+    let footer_text = vec![Line::from(vec![
+        Span::styled(
+            "[Enter] ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Launch/Select  "),
+        Span::styled(
+            "[n] ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("New Session  "),
+        Span::styled(
+            "[r] ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Resume Latest  "),
+        Span::styled(
+            "[Esc/q] ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Quit"),
+    ])];
+
+    let footer = Paragraph::new(footer_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(MUTED)),
+    );
+    frame.render_widget(footer, chunks[2]);
+}
+
+fn draw_mode_selector<T>(
+    frame: &mut Frame<'_>,
+    kind: &AgentKind,
+    options: &[(T, String)],
+    selected_index: usize,
+) {
+    let area = frame.area();
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    let title_paragraph = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("mena agent {} ", kind.slug()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("— Choose Launch Mode for Current Directory"),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(ACCENT)),
+    );
+    frame.render_widget(title_paragraph, chunks[0]);
+
+    let rows: Vec<Row> = options
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, label))| {
+            let selected = idx == selected_index;
+            let row = Row::new(vec![Cell::from(label.clone())]);
+            if selected {
+                row.style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let widths = [Constraint::Percentage(100)];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["LAUNCH MODE"])
+                .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Launch Options for {kind} ")),
+        );
+
+    frame.render_widget(table, chunks[1]);
+
+    let footer_text = vec![Line::from(vec![
+        Span::styled(
+            "[Enter] ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Confirm  "),
+        Span::styled(
+            "[Esc/q] ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Cancel"),
+    ])];
+
+    let footer = Paragraph::new(footer_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(MUTED)),
+    );
+    frame.render_widget(footer, chunks[2]);
 }
 #[cfg(test)]
 mod tests {

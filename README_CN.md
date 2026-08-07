@@ -53,6 +53,9 @@ mena sessions --help
 ## 快速开始
 
 ```sh
+mena agent                      # 交互式选择并在当前工作区启动 coding agent
+mena ag                         # `mena agent` 的完全等价简写
+mena ag claude                  # 在当前目录直接启动 Claude Code
 mena sessions                   # 浏览全部已保存 Session
 mena ss                         # `mena sessions` 的完全等价简写
 ```

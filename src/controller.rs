@@ -13,7 +13,217 @@ use crate::skill::SkillCatalog;
 use crate::tui;
 pub use crate::ui;
 use crate::view::{render_session_table, render_skill_detail, render_skill_table};
-use crate::{SessionsArgs, SkillSubcommand, SkillsArgs};
+use crate::{AgentLaunchArgs, SessionsArgs, SkillSubcommand, SkillsArgs};
+
+pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {
+    let cwd = std::env::current_dir().context("could not resolve current working directory")?;
+    let catalog = scan_sessions(None)?;
+    let custom = &settings.agent.custom;
+
+    let cwd_sessions: Vec<AgentSession> = catalog
+        .sessions()
+        .iter()
+        .filter(|session| {
+            session
+                .project
+                .as_deref()
+                .is_some_and(|project| crate::session::paths_equivalent(project, &cwd))
+        })
+        .cloned()
+        .collect();
+
+    if let Some(ref provider_slug) = args.provider {
+        let kind = resolve_agent_kind(provider_slug, custom)?;
+        launch_agent_with_options(&kind, args, &cwd_sessions, custom)?;
+    } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        let choice = tui::select_and_launch_agent(custom, &cwd_sessions)?;
+        if let Some(spec) = choice {
+            execute_launch(&spec)?;
+        }
+    } else {
+        print_agent_launch_help(custom, &cwd_sessions);
+    }
+    Ok(())
+}
+
+fn resolve_agent_kind(
+    slug: &str,
+    custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
+) -> Result<AgentKind> {
+    if let Some(kind) = AgentKind::from_slug(slug) {
+        Ok(kind)
+    } else if custom.contains_key(slug) {
+        Ok(AgentKind::Custom(slug.to_owned()))
+    } else {
+        bail!(
+            "unsupported agent provider `{slug}`; available providers: claude, codex, omp, opencode, pi, cursor, gemini{}",
+            if custom.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {}",
+                    custom.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+        );
+    }
+}
+
+pub fn fresh_launch_spec(
+    kind: &AgentKind,
+    custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
+) -> Result<NativeResumeCommand> {
+    match kind {
+        AgentKind::ClaudeCode => Ok(NativeResumeCommand {
+            program: "claude".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::Codex => Ok(NativeResumeCommand {
+            program: "codex".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::GeminiCli => Ok(NativeResumeCommand {
+            program: "gemini".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::OpenCode => Ok(NativeResumeCommand {
+            program: "opencode".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::Pi => Ok(NativeResumeCommand {
+            program: "pi".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::OhMyPi => Ok(NativeResumeCommand {
+            program: "omp".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::Cursor => Ok(NativeResumeCommand {
+            program: "cursor-agent".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::Custom(name) => {
+            let spec = custom
+                .get(name)
+                .with_context(|| format!("custom agent `{name}` not found in configuration"))?;
+            let program = spec
+                .executables
+                .first()
+                .with_context(|| format!("custom agent `{name}` defines no executables"))?;
+            Ok(NativeResumeCommand {
+                program: program.clone(),
+                args: Vec::new(),
+            })
+        }
+    }
+}
+
+pub fn resume_launch_spec(
+    kind: &AgentKind,
+    session_id: &str,
+    custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
+) -> Result<NativeResumeCommand> {
+    match kind {
+        AgentKind::Custom(name) => {
+            let spec = custom
+                .get(name)
+                .with_context(|| format!("custom agent `{name}` not found in configuration"))?;
+            custom_resume_spec(name, spec, session_id)
+        }
+        _ => native_resume_command(kind, session_id),
+    }
+}
+
+fn launch_agent_with_options(
+    kind: &AgentKind,
+    args: &AgentLaunchArgs,
+    cwd_sessions: &[AgentSession],
+    custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
+) -> Result<()> {
+    let matching_sessions: Vec<&AgentSession> = cwd_sessions
+        .iter()
+        .filter(|session| session.kind == *kind)
+        .collect();
+
+    let spec = if args.fresh {
+        fresh_launch_spec(kind, custom)?
+    } else if let Some(ref session_id) = args.session {
+        resume_launch_spec(kind, session_id, custom)?
+    } else if args.resume {
+        let latest = matching_sessions.first().with_context(|| {
+            format!(
+                "no saved session for `{}` found in current directory",
+                kind.slug()
+            )
+        })?;
+        resume_launch_spec(kind, &latest.id, custom)?
+    } else if matching_sessions.is_empty() {
+        fresh_launch_spec(kind, custom)?
+    } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        if let Some(chosen) = tui::select_launch_mode_for_agent(kind, custom, &matching_sessions)? {
+            chosen
+        } else {
+            return Ok(());
+        }
+    } else {
+        let latest = matching_sessions.first().unwrap();
+        resume_launch_spec(kind, &latest.id, custom)?
+    };
+
+    execute_launch(&spec)
+}
+
+pub fn execute_launch(spec: &NativeResumeCommand) -> Result<()> {
+    ui::info(format!("launching `{}`", spec.program));
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.args);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = command.exec();
+        bail!("failed to exec `{}`: {err}", spec.program);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = command.status().with_context(|| {
+            format!(
+                "failed to start `{}`; install it or ensure it is available on PATH",
+                spec.program
+            )
+        })?;
+        if !status.success() {
+            bail!("{} exited with status {status}", spec.program);
+        }
+        Ok(())
+    }
+}
+
+fn print_agent_launch_help(
+    custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
+    cwd_sessions: &[AgentSession],
+) {
+    println!("Available developer agents for current directory:\n");
+    for kind in AgentKind::all_kinds(custom) {
+        let slug = kind.slug();
+        let installed = kind.is_installed(custom);
+        let status = if installed {
+            "[installed]"
+        } else {
+            "[not in PATH]"
+        };
+        let count = cwd_sessions.iter().filter(|s| s.kind == kind).count();
+        let session_info = if count > 0 {
+            format!("{count} session(s) in cwd")
+        } else {
+            "no saved sessions in cwd".to_owned()
+        };
+        println!("  {slug:<12} {status:<15} ({session_info})");
+    }
+    println!("\nRun `mena agent <provider>` to launch an agent directly.");
+}
+
 pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
     if args.limit == Some(0) {
         bail!("--limit must be at least 1");

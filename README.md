@@ -56,6 +56,9 @@ mena sessions --help
 ## Quick start
 
 ```sh
+mena agent                      # select and launch a coding agent in current dir
+mena ag                         # exact shorthand for `mena agent`
+mena ag claude                  # launch Claude Code in current dir
 mena sessions                   # browse all saved sessions
 mena ss                         # exact shorthand for `mena sessions`
 ```

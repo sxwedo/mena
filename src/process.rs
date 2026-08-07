@@ -51,6 +51,60 @@ impl AgentKind {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub fn executable_name<'a>(
+        &'a self,
+        custom: &'a BTreeMap<String, CustomAgentSettings>,
+    ) -> Option<&'a str> {
+        match self {
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::GeminiCli => Some("gemini"),
+            Self::OpenCode => Some("opencode"),
+            Self::Pi => Some("pi"),
+            Self::OhMyPi => Some("omp"),
+            Self::Cursor => Some("cursor-agent"),
+            Self::Custom(name) => custom
+                .get(name)
+                .and_then(|c| c.executables.first().map(String::as_str)),
+        }
+    }
+
+    #[must_use]
+    pub fn is_installed(&self, custom: &BTreeMap<String, CustomAgentSettings>) -> bool {
+        match self {
+            Self::ClaudeCode => is_executable_in_path("claude"),
+            Self::Codex => is_executable_in_path("codex"),
+            Self::GeminiCli => is_executable_in_path("gemini"),
+            Self::OpenCode => is_executable_in_path("opencode"),
+            Self::Pi => is_executable_in_path("pi"),
+            Self::OhMyPi => is_executable_in_path("omp"),
+            Self::Cursor => {
+                is_executable_in_path("cursor-agent") || is_executable_in_path("cursor")
+            }
+            Self::Custom(name) => custom
+                .get(name)
+                .is_some_and(|c| c.executables.iter().any(|exe| is_executable_in_path(exe))),
+        }
+    }
+
+    #[must_use]
+    pub fn all_kinds(custom: &BTreeMap<String, CustomAgentSettings>) -> Vec<Self> {
+        let mut kinds = vec![
+            Self::ClaudeCode,
+            Self::Codex,
+            Self::OhMyPi,
+            Self::OpenCode,
+            Self::Pi,
+            Self::Cursor,
+            Self::GeminiCli,
+        ];
+        for name in custom.keys() {
+            kinds.push(Self::Custom(name.clone()));
+        }
+        kinds
+    }
 }
 
 impl fmt::Display for AgentKind {
@@ -334,6 +388,38 @@ const fn status_label(status: ProcessStatus) -> &'static str {
         ProcessStatus::Zombie | ProcessStatus::Dead => "exited",
         ProcessStatus::Unknown(_) => "unknown",
     }
+}
+#[must_use]
+pub fn is_executable_in_path(program: &str) -> bool {
+    if program.contains('/') || program.contains('\\') {
+        return Path::new(program).is_file();
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(program);
+            if candidate.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = candidate.metadata()
+                        && meta.permissions().mode() & 0o111 != 0
+                    {
+                        return true;
+                    }
+                }
+                #[cfg(not(unix))]
+                return true;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let candidate_exe = dir.join(format!("{program}.exe"));
+                if candidate_exe.is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

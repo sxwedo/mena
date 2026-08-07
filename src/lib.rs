@@ -28,6 +28,9 @@ pub struct AgentArgs {
 /// Local developer-agent process and session operations.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
+    /// Select and launch a developer agent process in the current directory
+    #[command(visible_alias = "ag")]
+    Agent(AgentLaunchArgs),
     /// Manage mena configuration
     Config {
         #[command(subcommand)]
@@ -50,6 +53,20 @@ pub enum ConfigCommand {
         #[arg(long)]
         import_clix: bool,
     },
+}
+#[derive(Debug, Clone, Args)]
+pub struct AgentLaunchArgs {
+    /// Provider to launch (e.g. claude, codex, omp, opencode, pi, cursor, gemini, or custom)
+    pub provider: Option<String>,
+    /// Force launching a fresh new session
+    #[arg(long, short = 'n')]
+    pub fresh: bool,
+    /// Resume the latest saved session in the current directory
+    #[arg(long, short = 'r')]
+    pub resume: bool,
+    /// Resume a specific session by ID or prefix in the current directory
+    #[arg(long)]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -113,6 +130,7 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
                 Ok(())
             }
         },
+        AgentCommand::Agent(args) => controller::run_agent(&args, settings),
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
         AgentCommand::Skills(args) => controller::run_skills(&args, settings),
     }

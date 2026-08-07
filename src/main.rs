@@ -40,6 +40,11 @@ mod tests {
     fn documented_commands_parse() {
         for invocation in [
             vec!["mena", "config", "init", "--import-clix"],
+            vec!["mena", "agent"],
+            vec!["mena", "ag"],
+            vec!["mena", "ag", "claude", "-n"],
+            vec!["mena", "ag", "omp", "--resume"],
+            vec!["mena", "ag", "codex", "--session", "session-123"],
             vec!["mena", "sessions"],
             vec!["mena", "ss"],
             vec![
@@ -88,6 +93,17 @@ mod tests {
         assert_eq!(args.provider.as_deref(), Some("codex"));
         assert_eq!(args.limit, Some(12));
         assert!(args.json);
+    }
+    #[test]
+    fn ag_is_equivalent_to_agent() {
+        let cli = Cli::try_parse_from(["mena", "ag", "claude", "-n"])
+            .expect("ag should parse as the agent command");
+
+        let AgentCommand::Agent(args) = cli.args.command else {
+            panic!("ag did not resolve to agent");
+        };
+        assert_eq!(args.provider.as_deref(), Some("claude"));
+        assert!(args.fresh);
     }
 
     #[test]
