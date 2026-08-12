@@ -376,8 +376,8 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
-        let empty_p = Paragraph::new("No skill selected or failed to load content")
-            .style(Style::default().fg(Color::DarkGray));
+        let message = app.preview_error.as_deref().unwrap_or("No skill selected");
+        let empty_p = Paragraph::new(message).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty_p, inner_area);
         return;
     };

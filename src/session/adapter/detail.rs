@@ -13,7 +13,7 @@ use super::super::{
 };
 use crate::AgentKind;
 
-pub(super) type Usage = (Option<u64>, Option<f64>);
+type Usage = (Option<u64>, Option<f64>);
 
 #[derive(Default)]
 pub(super) struct LoadedSession {
@@ -153,16 +153,6 @@ impl NumericUsage {
             self.has_cost.then_some(self.cost_usd),
         )
     }
-}
-
-pub(super) fn jsonl_usage(path: &Path, kind: &AgentKind) -> Result<Usage> {
-    let mut usage = JsonlUsage::new(kind);
-    let skipped = visit_bounded_lines(path, |line| {
-        if let Ok(record) = serde_json::from_slice::<Value>(line) {
-            usage.ingest(&record);
-        }
-    })?;
-    Ok(usage.finish(!skipped))
 }
 
 pub(super) fn codex_detail(path: &Path) -> Result<LoadedSession> {
@@ -584,7 +574,7 @@ pub(super) fn gemini_detail(path: &Path) -> Result<LoadedSession> {
     })
 }
 
-pub(super) fn gemini_usage(session: &Value) -> Usage {
+fn gemini_usage(session: &Value) -> Usage {
     let tokens = session
         .get("messages")
         .and_then(Value::as_array)
@@ -694,15 +684,6 @@ fn gemini_messages(session: &Value) -> Vec<SessionMessage> {
         messages.extend(parsed);
     }
     messages
-}
-
-pub(super) fn opencode_usage(home: &Path, session_id: &str) -> Result<Usage> {
-    let mut usage = NumericUsage::default();
-    visit_opencode_messages(home, session_id, |_, message| {
-        usage.ingest_opencode(message);
-        Ok(())
-    })?;
-    Ok(usage.finish())
 }
 
 pub(super) fn opencode_detail(home: &Path, session_id: &str) -> Result<LoadedSession> {

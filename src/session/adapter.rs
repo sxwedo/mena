@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     AgentSession, AssociationEvidence, DeletionSummary, SessionDetail, paths_equivalent,
-    read_json_file, remove_file_if_present, remove_tree_if_present, validate_deletion_targets,
+    remove_file_if_present, remove_tree_if_present, validate_deletion_targets,
     validate_storage_identifier,
 };
 use crate::{AgentKind, ProcessSnapshot};
@@ -102,11 +102,6 @@ impl ProviderAdapter {
         Self::from_kind(kind) == Some(self)
     }
 
-    #[allow(clippy::unused_self)]
-    pub(super) const fn has_session_catalog(self) -> bool {
-        true
-    }
-
     pub(super) fn process_evidence(
         self,
         home: &Path,
@@ -170,22 +165,6 @@ impl ProviderAdapter {
             Self::Pi => scan_pi(home, sessions),
             Self::OhMyPi => scan_oh_my_pi(home, sessions),
             Self::Cursor => scan_cursor(home, sessions),
-        }
-    }
-
-    pub(super) fn usage(self, home: &Path, session: &AgentSession) -> Result<detail::Usage> {
-        match self {
-            Self::Codex | Self::ClaudeCode | Self::Pi | Self::OhMyPi => {
-                detail::jsonl_usage(&session.path, &self.kind())
-            }
-            Self::GeminiCli => {
-                let usage = read_json_file(&session.path)?
-                    .as_ref()
-                    .map_or((None, None), detail::gemini_usage);
-                Ok(usage)
-            }
-            Self::OpenCode => detail::opencode_usage(home, &session.id),
-            Self::Cursor | Self::Goose => Ok((None, None)),
         }
     }
 

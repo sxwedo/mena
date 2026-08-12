@@ -1,4 +1,4 @@
-//! Local-first process and session control for developer agents.
+//! Local-first developer-agent launcher, session manager, and Skill browser.
 
 mod clipboard;
 mod controller;
@@ -56,7 +56,7 @@ pub enum ConfigCommand {
 }
 #[derive(Debug, Clone, Args)]
 pub struct AgentLaunchArgs {
-    /// Provider to launch (e.g. claude, codex, omp, opencode, pi, cursor, gemini, or custom)
+    /// Provider to launch (claude, codex, goose, gemini, opencode, pi, omp, cursor, or custom)
     pub provider: Option<String>,
     /// Force launching a fresh new session
     #[arg(long, short = 'n')]
@@ -89,7 +89,7 @@ pub struct SessionsArgs {
 pub struct SkillsArgs {
     #[command(subcommand)]
     pub command: Option<SkillSubcommand>,
-    /// Filter by provider: claude, codex, cursor, opencode, omp, generic
+    /// Filter by provider: claude, codex, cursor, opencode, or omp
     #[arg(long)]
     pub provider: Option<String>,
     /// Filter by scope: global or workspace

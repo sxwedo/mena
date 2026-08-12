@@ -1,6 +1,4 @@
-use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
-use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -278,19 +276,22 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         let values: Vec<_> = sessions.iter().map(session_list_json).collect();
         println!("{}", serde_json::to_string_pretty(&values)?);
     } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        let active_targets = active_session_targets(&catalog, settings)?;
+        let protection = session_protection(&catalog, settings)?;
         let export_directory =
             std::env::current_dir().context("failed to resolve the session export directory")?;
         let mut clipboard = crate::clipboard::SessionClipboard::default();
         let selected = tui::manage_sessions(
             sessions.to_vec(),
-            active_targets,
+            protection,
             &settings.ui.session_detail.colors,
             |session| catalog.detail(session),
             |detail, scope| crate::export::export_session_detail(detail, &export_directory, scope),
             |detail, scope| clipboard.copy_detail(detail, scope),
             |session| {
-                if active_session_targets(&catalog, settings)?.contains(&session.target()) {
+                if session_protection(&catalog, settings)?
+                    .protected_targets
+                    .contains(&session.target())
+                {
                     bail!("cannot delete a session that may be attached to a running agent");
                 }
                 catalog.delete_session(session)
@@ -316,9 +317,7 @@ pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<()> {
 
     match &args.command {
         Some(SkillSubcommand::Inspect { name, json }) => {
-            let detail = catalog
-                .inspect(name)
-                .with_context(|| format!("skill `{name}` not found"))??;
+            let detail = catalog.inspect(name, args.provider.as_deref(), args.scope.as_deref())?;
             if *json || args.json {
                 println!("{}", serde_json::to_string_pretty(&detail)?);
             } else {
@@ -326,17 +325,13 @@ pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<()> {
             }
         }
         None => {
-            let filtered = catalog.filter(args.provider.as_deref(), args.scope.as_deref());
+            let filtered = catalog.filter(args.provider.as_deref(), args.scope.as_deref())?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&filtered)?);
             } else if filtered.is_empty() {
                 ui::info("no skills discovered");
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                tui::manage_skills(filtered, |skill| {
-                    catalog
-                        .inspect(&skill.name)
-                        .with_context(|| format!("skill `{}` missing detail", skill.name))?
-                })?;
+                tui::manage_skills(filtered, |skill, path| catalog.entry(skill, path))?;
             } else {
                 print!("{}", render_skill_table(&filtered));
             }
@@ -425,15 +420,12 @@ fn scan_sessions(provider: Option<&AgentKind>) -> Result<SessionCatalog> {
     SessionCatalog::scan_provider(&home, provider)
 }
 
-fn active_session_targets(
+fn session_protection(
     catalog: &SessionCatalog,
     settings: &Settings,
-) -> Result<BTreeSet<String>> {
+) -> Result<crate::session::SessionProtection> {
     let live = discover_live_agents(&settings.agent.custom)?;
-    Ok(catalog
-        .associate_processes(&live)?
-        .protected_targets()
-        .clone())
+    catalog.protection(&live)
 }
 
 fn split_session_selector<'a>(
@@ -467,59 +459,4 @@ fn session_list_json(session: &AgentSession) -> Value {
         "started_at": session.started_at,
         "updated_at_unix": session.updated_at,
     })
-}
-#[allow(dead_code)]
-fn content_text(value: &Value) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.to_owned());
-    }
-    let parts: Vec<&str> = value
-        .as_array()?
-        .iter()
-        .filter_map(|part| {
-            part.get("text")
-                .or_else(|| part.get("content"))
-                .and_then(Value::as_str)
-        })
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(" "))
-}
-
-#[allow(dead_code)]
-fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-#[allow(dead_code)]
-fn truncate(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
-}
-
-#[allow(dead_code)]
-fn display_path(path: Option<&Path>) -> String {
-    path.map_or_else(|| "-".to_owned(), |path| path.display().to_string())
-}
-
-#[allow(dead_code)]
-fn format_tokens(tokens: Option<u64>) -> String {
-    tokens.map_or_else(|| "-".to_owned(), |tokens| tokens.to_string())
-}
-
-#[allow(dead_code)]
-fn format_cost(cost: Option<f64>) -> String {
-    cost.map_or_else(|| "n/a".to_owned(), |cost| format!("${cost:.4}"))
-}
-
-#[allow(dead_code)]
-fn format_unix_timestamp(timestamp: u64) -> String {
-    i64::try_from(timestamp)
-        .ok()
-        .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
-        .map_or_else(|| timestamp.to_string(), |value| value.to_rfc3339())
 }

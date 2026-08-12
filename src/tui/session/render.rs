@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
 use crate::tui::common::{
-    ACCENT, METADATA_KEY, MUTED, SessionDetailTheme, centered_rect, key_hints, render_border_beam,
+    ACCENT, MUTED, SessionDetailTheme, centered_rect, key_hints, render_border_beam,
     themed_key_hints, thinking_orb_spans,
 };
 use crate::view::{
@@ -659,27 +659,13 @@ fn footer_for_status(app: &SessionsApp) -> Line<'static> {
 
 fn searching_footer_line(progress: &InProgressSearch, app: &SessionsApp) -> Line<'static> {
     let tick = (progress.started.elapsed().as_millis() / 80) as usize;
-    let text = format!(
-        "Scanning transcripts — {}/{} scanned, {} match{} (Esc cancel)",
-        progress.cursor.min(app.sessions.len()),
-        app.sessions.len(),
-        progress.hits.len(),
-        if progress.hits.len() == 1 { "" } else { "es" }
-    );
+    let text = search_progress_text(progress, app.sessions.len());
     Line::from(thinking_orb_spans(tick, &text))
 }
 
-/// Braille spinner frames; advanced by elapsed time so the animation ticks even
-/// when each transcript loads faster than a frame.
-#[allow(dead_code)]
-const SEARCH_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-#[allow(dead_code)]
 pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) -> String {
-    let frame = SEARCH_SPINNER
-        [progress.started.elapsed().as_millis() as usize / 100 % SEARCH_SPINNER.len()];
     format!(
-        " {frame} Searching transcripts — {scanned}/{total} scanned, {hits} match{plural} (Esc cancel) ",
+        "Scanning transcripts — {scanned}/{total} scanned, {hits} match{plural} (Esc cancel)",
         scanned = progress.cursor.min(total),
         hits = progress.hits.len(),
         plural = if progress.hits.len() == 1 { "" } else { "es" },
@@ -857,28 +843,6 @@ fn display_path(project: Option<&std::path::Path>) -> String {
     project.map_or_else(|| "-".to_owned(), |project| project.display().to_string())
 }
 
-#[allow(dead_code)]
-fn format_tokens_compact(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format_compact(tokens, 1_000_000, "M")
-    } else if tokens >= 1_000 {
-        format_compact(tokens, 1_000, "K")
-    } else {
-        tokens.to_string()
-    }
-}
-
-#[allow(dead_code)]
-fn format_compact(value: u64, unit: u64, suffix: &str) -> String {
-    let mut whole = value / unit;
-    let mut decimal = (value % unit * 10 + unit / 2) / unit;
-    if decimal == 10 {
-        whole += 1;
-        decimal = 0;
-    }
-    format!("{whole}.{decimal}{suffix}")
-}
-
 fn format_cost(cost: Option<f64>) -> String {
     cost.map_or_else(|| "n/a".to_owned(), |cost| format!("${cost:.4}"))
 }
@@ -895,24 +859,6 @@ fn format_unix_timestamp(timestamp: u64) -> String {
         .ok()
         .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
         .map_or_else(|| timestamp.to_string(), |value| value.to_rfc3339())
-}
-
-#[allow(dead_code)]
-fn status_style(status: &str) -> Style {
-    match status {
-        "running" => Style::default().fg(Color::Green),
-        "stopped" | "exited" => Style::default().fg(Color::Red),
-        "sleeping" | "idle" => Style::default().fg(Color::Gray),
-        _ => Style::default(),
-    }
-}
-
-#[allow(dead_code)]
-fn detail_line(label: &'static str, value: String) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<8}"), Style::default().fg(METADATA_KEY)),
-        Span::raw(value),
-    ])
 }
 
 fn session_detail_line(

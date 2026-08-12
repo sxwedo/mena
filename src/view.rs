@@ -2,31 +2,10 @@ use std::fmt::Write as _;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::process::LiveAgent;
 use crate::session::{
-    AgentSession, AssociationSummary, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage,
-    ToolMetrics,
+    AgentSession, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage, ToolMetrics,
 };
 use crate::skill::{AgentSkill, SkillDetail};
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentReport {
-    pub agent: LiveAgent,
-    pub session: Option<AgentSession>,
-    pub association: AssociationSummary,
-}
-
-impl AgentReport {
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn project(&self) -> Option<&std::path::Path> {
-        self.session
-            .as_ref()
-            .and_then(|session| session.project.as_deref())
-            .or(self.agent.process.cwd.as_deref())
-    }
-}
 
 pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) -> String {
     if sessions.is_empty() {
@@ -261,28 +240,6 @@ fn project_label(path: &std::path::Path) -> String {
         )
 }
 
-#[allow(dead_code)]
-fn format_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format_compact(tokens, 1_000_000, "M")
-    } else if tokens >= 1_000 {
-        format_compact(tokens, 1_000, "K")
-    } else {
-        tokens.to_string()
-    }
-}
-
-#[allow(dead_code)]
-fn format_compact(value: u64, unit: u64, suffix: &str) -> String {
-    let mut whole = value / unit;
-    let mut decimal = (value % unit * 10 + unit / 2) / unit;
-    if decimal == 10 {
-        whole += 1;
-        decimal = 0;
-    }
-    format!("{whole}.{decimal}{suffix}")
-}
-
 fn format_age(updated_at: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -469,29 +426,6 @@ fn response_status(response: &ResponseMetrics) -> Option<&'static str> {
         "cancelled" | "canceled" => Some("cancelled"),
         _ => None,
     }
-}
-
-#[allow(dead_code)]
-pub fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1_024;
-    const MIB: u64 = KIB * 1_024;
-    const GIB: u64 = MIB * 1_024;
-    if bytes >= GIB {
-        format_scaled(bytes, GIB, "GiB")
-    } else if bytes >= MIB {
-        format_scaled(bytes, MIB, "MiB")
-    } else if bytes >= KIB {
-        format_scaled(bytes, KIB, "KiB")
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-#[allow(dead_code)]
-fn format_scaled(bytes: u64, unit: u64, suffix: &str) -> String {
-    let whole = bytes / unit;
-    let decimal = bytes % unit * 10 / unit;
-    format!("{whole}.{decimal} {suffix}")
 }
 
 #[cfg(test)]

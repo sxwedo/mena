@@ -2,7 +2,6 @@
   <img src="https://github.com/user-attachments/assets/1fb078f4-f1e1-4196-b97e-162505a6eafe" width="220" alt="mena logo"/>
 </p>
 
-
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb.svg" alt="License: MIT"></a>
   <a href=".mise.toml"><img src="https://img.shields.io/badge/rust-1.96.1-f97316.svg" alt="Rust 1.96.1"></a>
@@ -15,16 +14,9 @@
   English | <a href="README_CN.md">简体中文</a>
 </p>
 
-`mena` discovers running coding agents and their native saved sessions. It lets
-you inspect usage, read transcripts, resume work, stop processes, and safely
-delete archived sessions without a daemon, account, or remote service.
-
-- Supports Claude Code, Codex, Gemini CLI, OpenCode, Pi, Oh My Pi, Cursor Agent,
-  and custom process recognizers.
-- Reads provider-owned data in place and reports only usage and cost that the
-  provider actually persisted.
-- Keeps conversations local, bounds log reads, redacts common secrets, and
-  validates destructive operations before they run.
+`mena` is a local-first CLI for launching coding agents, browsing their native
+saved sessions, and inspecting installed Agent Skills. It runs without a
+daemon, account, or remote data store.
 
 ## Install
 
@@ -33,179 +25,70 @@ cargo install --git https://github.com/sxwedo/mena --locked
 mena --version
 ```
 
-The repository pins Rust 1.96.1. To build from source:
+Building from source requires Rust 1.96.1:
 
 ```sh
 git clone https://github.com/sxwedo/mena.git
 cd mena
 mise run build
-install -m 0755 target/release/mena /usr/local/bin/mena
-```
-
-### For coding agents
-
-If you are an agent, install `mena` as a user-level CLI by running the two
-commands below. Do not add it to the current project's `Cargo.toml`. If `cargo`
-is unavailable, report that Rust is required before continuing.
-
-```sh
-cargo install --git https://github.com/sxwedo/mena --locked
-mena sessions --help
 ```
 
 ## Quick start
 
 ```sh
-mena agent                      # select and launch a coding agent in current dir
-mena ag                         # exact shorthand for `mena agent`
-mena ag claude                  # launch Claude Code in current dir
-mena sessions                   # browse all saved sessions
-mena ss                         # exact shorthand for `mena sessions`
+mena agent                    # choose and launch an agent in the current directory
+mena ag claude                # launch Claude Code
+mena ag codex --resume        # resume the latest Codex session in this project
+mena sessions                 # browse saved sessions
+mena ss --provider cursor     # filter sessions by provider
+mena skills                   # browse installed Agent Skills
+mena sk inspect ponytail      # inspect one uniquely named Skill
 ```
-
-Targets are stable and script-friendly:
-
-- Running process: `provider:PID`, for example `claude:43120`.
-- Saved session: `provider:session-id`.
-- Unqualified IDs work only when they resolve unambiguously.
-
-## Current focus and roadmap
-
-- **Now - Sessions:** active development focuses on `mena sessions` and its
-  shorthand `mena ss`: discovery, search, transcript reading, exact response
-  and tool metrics, export, resume, and safe deletion.
-- **Next - Memory:** `mena memory` and durable agent-memory workflows are
-  planned next. They are documented here for direction only and are **not
-  implemented yet**.
-
-## Sessions
-
-`mena sessions` and `mena ss` are equivalent; every option works with either
-form.
-
-```sh
-mena ss
-mena ss --provider cursor --limit 20
-mena ss --include-empty
-mena ss --json
-```
-
-The interactive session view can search across providers and projects, open the
-complete transcript, show per-model persisted metrics, resume the native
-session, export it as Markdown, or permanently delete it.
-
-| Key | Action |
-|---|---|
-| `/` | Search target, provider, project, or title. Press `Enter` to also search the full transcript of every saved session (shown with a live progress indicator; `Esc` cancels) |
-| `g` | Toggle list grouping — flat or grouped by project |
-| `Enter` or `i` | Open session detail |
-| `r` | Resume with the native provider CLI |
-| `d`, then lowercase `y` | Permanently delete the selected session |
-| `c` / `e` | Copy / export the current detail as Markdown (follows the preview scope below) |
-| `Esc` or `q` | Close or quit |
-
-Inside the detail view, use arrows or `j`/`k` to scroll, `PgUp`/`PgDn` to move
-by page, `Home`/`End` to jump, and `Shift+↑`/`Shift+↓` to move between user and
-assistant messages. The preview defaults to **conversation only** (user and
-assistant messages); press `p` to keep just the conversation, or `Shift+P` to
-reveal the complete transcript including tool calls, tool results, and system
-messages. Copy (`c`) and export (`e`) follow the active preview scope; exports
-are named `...-conv.md` (conversation) or `...-full.md` (complete). Metadata
-and model usage are always shown. Mouse reporting remains disabled so native
-terminal text selection still works.
-
-## Commands
 
 | Command | Purpose |
 |---|---|
-| `mena sessions` / `mena ss` | Search and manage saved sessions |
-| `mena config init` | Create the private configuration file |
-
+| `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
+| `mena sessions` / `mena ss` | Search, inspect, resume, export, and delete sessions |
+| `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
+| `mena config init` | Create `~/.config/mena/config.toml` |
 
 ## Provider support
 
-| Provider | Process discovery | Saved sessions | Resume | Delete |
-|---|:---:|:---:|:---:|:---:|
-| Claude Code | ✓ | ✓ | ✓ | ✓ |
-| Codex | ✓ | ✓ | ✓ | ✓ |
-| Gemini CLI | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | ✓ | ✓ | ✓ | ✓ |
-| Pi | ✓ | ✓ | ✓ | ✓ |
-| Oh My Pi | ✓ | ✓ | ✓ | ✓ |
-| Cursor Agent | ✓ | ✓ | ✓ | ✓ |
-| Custom recognizer | ✓ | - | configurable | - |
+| Provider | Launch | Saved sessions |
+|---|:---:|:---:|
+| Claude Code | ✓ | ✓ |
+| Codex | ✓ | ✓ |
+| Gemini CLI | ✓ | ✓ |
+| OpenCode | ✓ | ✓ |
+| Pi | ✓ | ✓ |
+| Oh My Pi | ✓ | ✓ |
+| Cursor Agent | ✓ | ✓ |
+| Goose | ✓ | — |
+| Custom configuration | ✓ | — |
 
-Custom recognizers do not have a generic supported local session catalog. `mena` returns an explicit unsupported error instead of guessing a storage path.
+Custom agents and Goose do not have a generic session catalog. `mena` returns
+an explicit unsupported result instead of guessing provider-owned paths.
 
-### Live session association
+## Documentation
 
-`mena` reports live-session data only when current native evidence identifies
-one logical session. Claude Code supplies PID, process-start, project, and
-session identity metadata. Pi and Oh My Pi are matched only while the live
-process holds exactly one cataloged native transcript open (via `/proc` on
-Linux or `/usr/sbin/lsof` on macOS).
+- [Session browser, metrics, export, and deletion](docs/sessions.md)
+- [Agent Skill discovery and browser](docs/skills.md)
+- [Configuration](docs/configuration.md)
+- [Architecture and development](docs/development.md)
 
-A provider resume/session argument proves only which session launched the
-process; because an agent may switch sessions without restarting, it is shown
-as `launch`, not `exact`. Project equality, timestamps, and “most recently
-updated” are never used to claim a live association. `ambiguous`,
-`unconfirmed`, and `unsupported` processes therefore expose no session ID,
-tokens, or cost.
+## Safety model
 
-## Data and safety
+- Session data remains in each provider's native local store.
+- Usage and cost are shown only when persisted by the provider; values are
+  never inferred from public prices.
+- Resume uses program-plus-argv execution, never a shell.
+- Live-session association requires provider-native evidence. Uncertain cases
+  fail closed for deletion.
+- Session deletion validates identifiers, canonical paths, symlink containment,
+  and live-process protection before removing data.
 
-- Conversation data stays in the provider's native local store.
-- Tokens, cost, duration, TTFT, retries, and errors appear only when the native
-  record contains them; missing values are never estimated.
-- Live process metrics are attributed to a session only for an `exact` native
-  association; `ps --json` exposes `session_match` and
-  `session_match_evidence`.
-- Resume commands use program-plus-argv execution and never invoke a shell.
-- Stop revalidates PID, start time, executable, and provider before signaling.
-- Delete rejects live sessions, ambiguous targets, path traversal, and symlink
-  escapes outside provider-owned roots. If any live process is not exactly
-  associated, deletion fails closed for that provider's complete catalog.
-- Detail export is atomic, never overwrites an existing file, and uses mode
-  `0600` on Unix.
-
-## Automation
-
-`ps`, `inspect`, and `sessions` expose stable JSON output:
-
-```sh
-mena ps --json | jq '.[] | {id, project, session_match, session_match_evidence, tokens, cost_usd}'
-mena ss --json | jq '.[] | select(.agent == "codex") | .target'
-```
-
-A dash in human output means no exact native session was associated. `n/a`
-means an exact session exists but does not contain a persisted cost.
-
-## Configuration
-
-Create `~/.config/mena/config.toml` with mode `0600` on Unix:
-
-```sh
-mena config init
-```
-
-The base directory honors `XDG_CONFIG_HOME`. Custom process recognizers use an
-exact executable match and optional command markers:
-
-```toml
-[agent.custom.my_agent]
-executables = ["my-agent"]
-command_contains = ["--agent-mode"]
-resume = ["my-agent", "resume", "{session}"]
-```
-
-The resume command is an argv array and must contain `{session}`. Existing
-`clix` custom-agent definitions can be imported once with:
-
-```sh
-mena config init --import-clix
-```
-
-Normal operation reads only the `mena` configuration.
+See [the session safety details](docs/sessions.md#safety-and-live-session-association)
+for the complete contract.
 
 ## Development
 
@@ -214,8 +97,9 @@ mise run verify  # fmt + check + tests + strict Clippy + rustdoc
 mise run build   # optimized release binary
 ```
 
-Provider adapters and safety-sensitive changes should include focused fixtures.
-See [AGENTS.md](AGENTS.md) for architecture and repository invariants.
+Repository architecture and extension points are documented in
+[docs/development.md](docs/development.md). Agent-specific invariants live in
+[AGENTS.md](AGENTS.md).
 
 ## License
 

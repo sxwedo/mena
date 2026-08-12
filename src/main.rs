@@ -7,7 +7,7 @@ use mena::AgentArgs;
     name = "mena",
     author,
     version,
-    about = "Local-first process and session control for developer agents"
+    about = "Launch developer agents and manage their local sessions and skills"
 )]
 struct Cli {
     #[command(flatten)]
@@ -43,6 +43,7 @@ mod tests {
             vec!["mena", "agent"],
             vec!["mena", "ag"],
             vec!["mena", "ag", "claude", "-n"],
+            vec!["mena", "ag", "goose"],
             vec!["mena", "ag", "omp", "--resume"],
             vec!["mena", "ag", "codex", "--session", "session-123"],
             vec!["mena", "sessions"],
@@ -68,6 +69,17 @@ mod tests {
                 "--json",
             ],
             vec!["mena", "sk", "inspect", "ponytail", "--json"],
+            vec![
+                "mena",
+                "sk",
+                "--provider",
+                "codex",
+                "--scope",
+                "global",
+                "inspect",
+                "ponytail",
+                "--json",
+            ],
         ] {
             Cli::try_parse_from(&invocation)
                 .unwrap_or_else(|error| panic!("failed to parse {invocation:?}: {error}"));

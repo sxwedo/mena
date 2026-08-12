@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -36,38 +36,9 @@ impl AgentSession {
     }
 }
 
-/// How confidently a live process is associated with one persisted session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssociationStatus {
-    /// Current native runtime evidence selected one logical session.
-    Exact,
-    /// The argv identifies the launch session, but the provider can switch sessions in-process.
-    Launch,
-    /// Native evidence selected more than one logical session.
-    Ambiguous,
-    /// The provider has a catalog, but no native process-to-session identity was found.
-    Unconfirmed,
-    /// The provider has no supported local session catalog.
-    Unsupported,
-}
-
-#[allow(dead_code)]
-impl AssociationStatus {
-    #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Exact => "exact",
-            Self::Launch => "launch",
-            Self::Ambiguous => "ambiguous",
-            Self::Unconfirmed => "unconfirmed",
-            Self::Unsupported => "unsupported",
-        }
-    }
-}
-
 /// Native evidence used to establish an exact process-to-session association.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssociationEvidence {
+enum AssociationEvidence {
     /// Provider-owned runtime metadata containing the live PID and session identity.
     NativeRuntime,
     /// The live process has the provider-owned transcript file open.
@@ -76,80 +47,20 @@ pub enum AssociationEvidence {
     ResumeArgument,
 }
 
-#[allow(dead_code)]
-impl AssociationEvidence {
-    #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::NativeRuntime => "native_runtime",
-            Self::OpenSessionFile => "open_session_file",
-            Self::ResumeArgument => "resume_argument",
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AssociationDecision<'a> {
+    Exact {
+        session: &'a AgentSession,
+        evidence: AssociationEvidence,
+    },
+    ProtectProvider,
+    Unsupported,
 }
 
-/// Stable, owned association metadata suitable for reports and JSON output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssociationSummary {
-    pub(crate) status: AssociationStatus,
-    pub(crate) evidence: Option<AssociationEvidence>,
-}
-
-impl AssociationSummary {
-    const fn unsupported() -> Self {
-        Self {
-            status: AssociationStatus::Unsupported,
-            evidence: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct ProcessSessionAssociation<'a> {
-    session: Option<&'a AgentSession>,
-    summary: AssociationSummary,
-}
-
-#[allow(dead_code)]
-impl<'a> ProcessSessionAssociation<'a> {
-    #[must_use]
-    pub(crate) const fn session(self) -> Option<&'a AgentSession> {
-        self.session
-    }
-
-    #[must_use]
-    pub(crate) const fn summary(self) -> AssociationSummary {
-        self.summary
-    }
-}
-
-/// Batch association result. Matching is global so deletion protection and
-/// process reporting consume the same evidence and cannot drift apart.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct SessionAssociations<'a> {
-    by_pid: BTreeMap<u32, ProcessSessionAssociation<'a>>,
-    protected_targets: BTreeSet<String>,
-}
-
-#[allow(dead_code)]
-impl<'a> SessionAssociations<'a> {
-    #[must_use]
-    pub(crate) fn for_process(&self, pid: u32) -> ProcessSessionAssociation<'a> {
-        self.by_pid
-            .get(&pid)
-            .copied()
-            .unwrap_or(ProcessSessionAssociation {
-                session: None,
-                summary: AssociationSummary::unsupported(),
-            })
-    }
-
-    #[must_use]
-    pub(crate) const fn protected_targets(&self) -> &BTreeSet<String> {
-        &self.protected_targets
-    }
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SessionProtection {
+    pub exact_active_targets: BTreeSet<String>,
+    pub protected_targets: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,51 +355,6 @@ pub struct SessionCatalog {
     sessions: Vec<AgentSession>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-struct CachedUsage {
-    updated_at: u64,
-    tokens: Option<u64>,
-    cost_usd: Option<f64>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Default)]
-pub struct UsageCache {
-    entries: BTreeMap<PathBuf, CachedUsage>,
-}
-
-#[allow(dead_code)]
-impl UsageCache {
-    pub fn enrich(
-        &mut self,
-        catalog: &SessionCatalog,
-        session: &AgentSession,
-    ) -> Result<AgentSession> {
-        if let Some(cached) = self
-            .entries
-            .get(&session.path)
-            .filter(|cached| cached.updated_at == session.updated_at)
-        {
-            let mut enriched = session.clone();
-            enriched.tokens = cached.tokens;
-            enriched.cost_usd = cached.cost_usd;
-            return Ok(enriched);
-        }
-
-        let enriched = catalog.with_usage(session)?;
-        self.entries.insert(
-            session.path.clone(),
-            CachedUsage {
-                updated_at: session.updated_at,
-                tokens: enriched.tokens,
-                cost_usd: enriched.cost_usd,
-            },
-        );
-        Ok(enriched)
-    }
-}
-
 impl SessionCatalog {
     #[cfg(test)]
     pub fn scan(home: &Path) -> Result<Self> {
@@ -536,123 +402,68 @@ impl SessionCatalog {
         Ok(first)
     }
 
-    pub(crate) fn associate_processes<'a>(
-        &'a self,
-        agents: &[LiveAgent],
-    ) -> Result<SessionAssociations<'a>> {
-        let mut by_pid = BTreeMap::new();
-        let mut protected_targets = BTreeSet::new();
+    pub(crate) fn protection(&self, agents: &[LiveAgent]) -> Result<SessionProtection> {
+        let mut protection = SessionProtection::default();
 
         for agent in agents {
-            let Some(adapter) = adapter::ProviderAdapter::from_kind(&agent.kind) else {
-                by_pid.insert(
-                    agent.process.pid,
-                    ProcessSessionAssociation {
-                        session: None,
-                        summary: AssociationSummary::unsupported(),
-                    },
-                );
-                continue;
-            };
-            if !adapter.has_session_catalog() {
-                by_pid.insert(
-                    agent.process.pid,
-                    ProcessSessionAssociation {
-                        session: None,
-                        summary: AssociationSummary::unsupported(),
-                    },
-                );
-                continue;
-            }
-
-            let evidence = adapter.process_evidence(&self.home, &agent.process)?;
-            let mut candidates = BTreeMap::<String, (&AgentSession, AssociationEvidence)>::new();
-            for item in evidence {
-                for session in self.sessions.iter().filter(|session| {
-                    session.kind == agent.kind
-                        && item.matches(session)
-                        && association_project_consistent(session, agent.process.cwd.as_deref())
-                }) {
+            match self.association_for_process(agent)? {
+                AssociationDecision::Exact { session, evidence } => {
+                    debug_assert_ne!(evidence, AssociationEvidence::ResumeArgument);
                     let target = session.target();
-                    candidates
-                        .entry(target)
-                        .and_modify(|(selected, source)| {
-                            if session.updated_at > selected.updated_at {
-                                *selected = session;
-                            }
-                            *source = item.source;
-                        })
-                        .or_insert((session, item.source));
+                    protection.exact_active_targets.insert(target.clone());
+                    protection.protected_targets.insert(target);
                 }
+                AssociationDecision::ProtectProvider => {
+                    protect_provider_sessions(
+                        &self.sessions,
+                        &agent.kind,
+                        &mut protection.protected_targets,
+                    );
+                }
+                AssociationDecision::Unsupported => {}
             }
-
-            let association = match candidates.len() {
-                1 => {
-                    let (target, (session, source)) =
-                        candidates.into_iter().next().expect("one candidate");
-                    if source == AssociationEvidence::ResumeArgument {
-                        protect_provider_sessions(
-                            &self.sessions,
-                            &agent.kind,
-                            &mut protected_targets,
-                        );
-                        ProcessSessionAssociation {
-                            session: None,
-                            summary: AssociationSummary {
-                                status: AssociationStatus::Launch,
-                                evidence: Some(source),
-                            },
-                        }
-                    } else {
-                        protected_targets.insert(target);
-                        ProcessSessionAssociation {
-                            session: Some(session),
-                            summary: AssociationSummary {
-                                status: AssociationStatus::Exact,
-                                evidence: Some(source),
-                            },
-                        }
-                    }
-                }
-                0 => {
-                    protect_provider_sessions(&self.sessions, &agent.kind, &mut protected_targets);
-                    ProcessSessionAssociation {
-                        session: None,
-                        summary: AssociationSummary {
-                            status: AssociationStatus::Unconfirmed,
-                            evidence: None,
-                        },
-                    }
-                }
-                _ => {
-                    protect_provider_sessions(&self.sessions, &agent.kind, &mut protected_targets);
-                    ProcessSessionAssociation {
-                        session: None,
-                        summary: AssociationSummary {
-                            status: AssociationStatus::Ambiguous,
-                            evidence: None,
-                        },
-                    }
-                }
-            };
-            by_pid.insert(agent.process.pid, association);
         }
-
-        Ok(SessionAssociations {
-            by_pid,
-            protected_targets,
-        })
+        Ok(protection)
     }
 
-    pub fn with_usage(&self, session: &AgentSession) -> Result<AgentSession> {
-        let mut enriched = session.clone();
-        let (tokens, cost_usd) = adapter::ProviderAdapter::from_kind(&session.kind)
-            .map_or(Ok((None, None)), |adapter| {
-                adapter.usage(&self.home, session)
-            })?;
-        enriched.tokens = tokens;
-        enriched.cost_usd = cost_usd;
-        Ok(enriched)
+    fn association_for_process<'a>(&'a self, agent: &LiveAgent) -> Result<AssociationDecision<'a>> {
+        let Some(adapter) = adapter::ProviderAdapter::from_kind(&agent.kind) else {
+            return Ok(AssociationDecision::Unsupported);
+        };
+
+        let evidence = adapter.process_evidence(&self.home, &agent.process)?;
+        let mut candidates = BTreeMap::<String, (&AgentSession, AssociationEvidence)>::new();
+        for item in evidence {
+            for session in self.sessions.iter().filter(|session| {
+                session.kind == agent.kind
+                    && item.matches(session)
+                    && association_project_consistent(session, agent.process.cwd.as_deref())
+            }) {
+                candidates
+                    .entry(session.target())
+                    .and_modify(|(selected, source)| {
+                        if session.updated_at > selected.updated_at {
+                            *selected = session;
+                        }
+                        *source = item.source;
+                    })
+                    .or_insert((session, item.source));
+            }
+        }
+
+        let decision = match candidates.len() {
+            1 => {
+                let (_, (session, evidence)) =
+                    candidates.into_iter().next().expect("one candidate");
+                if evidence == AssociationEvidence::ResumeArgument {
+                    AssociationDecision::ProtectProvider
+                } else {
+                    AssociationDecision::Exact { session, evidence }
+                }
+            }
+            _ => AssociationDecision::ProtectProvider,
+        };
+        Ok(decision)
     }
 
     pub fn detail(&self, selected: &AgentSession) -> Result<SessionDetail> {
@@ -1063,21 +874,6 @@ fn visit_bounded_lines_limit(
     }
 }
 
-#[allow(dead_code)]
-pub fn tail_records(path: &Path, limit: usize) -> Result<Vec<String>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut records = VecDeque::with_capacity(limit.min(1_024));
-    visit_bounded_lines(path, |line| {
-        if records.len() == limit {
-            records.pop_front();
-        }
-        records.push_back(String::from_utf8_lossy(line).into_owned());
-    })?;
-    Ok(records.into_iter().collect())
-}
-
 fn modified_seconds(path: &Path) -> Result<u64> {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -1114,7 +910,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AgentSession, AssociationEvidence, AssociationStatus, ResponseMetrics, SessionCatalog,
+        AgentSession, AssociationDecision, AssociationEvidence, ResponseMetrics, SessionCatalog,
         SessionDetail, SessionMessage, SessionMessageKind, SessionMessageMetrics, TokenUsage,
     };
     use crate::process::{AgentKind, LiveAgent, ProcessSnapshot};
@@ -2304,20 +2100,19 @@ mod tests {
             100,
         );
 
-        let associations = catalog
-            .associate_processes(std::slice::from_ref(&agent))
-            .expect("associate process");
-        let association = associations.for_process(42);
-
-        assert!(association.session().is_none());
-        assert_eq!(association.summary().status, AssociationStatus::Launch);
         assert_eq!(
-            association.summary().evidence,
-            Some(AssociationEvidence::ResumeArgument)
+            catalog
+                .association_for_process(&agent)
+                .expect("associate process"),
+            AssociationDecision::ProtectProvider
         );
+        let protected = catalog
+            .protection(std::slice::from_ref(&agent))
+            .expect("protect sessions");
+        assert!(protected.exact_active_targets.is_empty());
         assert_eq!(
-            associations.protected_targets(),
-            &std::collections::BTreeSet::from([
+            protected.protected_targets,
+            std::collections::BTreeSet::from([
                 "codex:codex-id".to_owned(),
                 "codex:codex-other".to_owned(),
             ])
@@ -2346,18 +2141,19 @@ mod tests {
             1,
         );
 
-        let associations = catalog
-            .associate_processes(std::slice::from_ref(&agent))
-            .expect("associate process");
-        let association = associations.for_process(42);
-
-        assert!(association.session().is_none());
-        assert_eq!(association.summary().status, AssociationStatus::Unconfirmed);
         assert_eq!(
-            associations.protected_targets(),
-            &std::collections::BTreeSet::from(
-                ["codex:newer".to_owned(), "codex:older".to_owned(),]
-            )
+            catalog
+                .association_for_process(&agent)
+                .expect("associate process"),
+            AssociationDecision::ProtectProvider
+        );
+        let protected = catalog
+            .protection(std::slice::from_ref(&agent))
+            .expect("protect sessions");
+        assert!(protected.exact_active_targets.is_empty());
+        assert_eq!(
+            protected.protected_targets,
+            std::collections::BTreeSet::from(["codex:newer".to_owned(), "codex:older".to_owned(),])
         );
     }
 
@@ -2383,23 +2179,24 @@ mod tests {
         let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
         let agent = live_agent(AgentKind::ClaudeCode, 42, &["claude"], "/work/project", 100);
 
-        let associations = catalog
-            .associate_processes(std::slice::from_ref(&agent))
-            .expect("associate process");
-        let association = associations.for_process(42);
-
+        let AssociationDecision::Exact { session, evidence } = catalog
+            .association_for_process(&agent)
+            .expect("associate process")
+        else {
+            panic!("native runtime must identify one exact session");
+        };
+        assert_eq!(session.id, "claude-id");
+        assert_eq!(evidence, AssociationEvidence::NativeRuntime);
+        let protected = catalog
+            .protection(std::slice::from_ref(&agent))
+            .expect("protect exact session");
         assert_eq!(
-            association.session().map(|session| session.id.as_str()),
-            Some("claude-id")
+            protected.exact_active_targets,
+            std::collections::BTreeSet::from(["claude:claude-id".to_owned()])
         );
-        assert_eq!(association.summary().status, AssociationStatus::Exact);
         assert_eq!(
-            association.summary().evidence,
-            Some(AssociationEvidence::NativeRuntime)
-        );
-        assert_eq!(
-            associations.protected_targets(),
-            &std::collections::BTreeSet::from(["claude:claude-id".to_owned()])
+            protected.protected_targets,
+            std::collections::BTreeSet::from(["claude:claude-id".to_owned()])
         );
 
         let stale_agent = LiveAgent {
@@ -2409,15 +2206,20 @@ mod tests {
             },
             ..agent
         };
-        let associations = catalog
-            .associate_processes(std::slice::from_ref(&stale_agent))
-            .expect("reject stale runtime identity");
         assert_eq!(
-            associations.for_process(42).summary().status,
-            AssociationStatus::Unconfirmed
+            catalog
+                .association_for_process(&stale_agent)
+                .expect("reject stale runtime identity"),
+            AssociationDecision::ProtectProvider
         );
-        assert!(associations.for_process(42).session().is_none());
-        assert_eq!(associations.protected_targets().len(), 2);
+        assert_eq!(
+            catalog
+                .protection(std::slice::from_ref(&stale_agent))
+                .expect("protect provider sessions")
+                .protected_targets
+                .len(),
+            2
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2444,20 +2246,14 @@ mod tests {
                 .as_secs(),
         );
 
-        let associations = catalog
-            .associate_processes(std::slice::from_ref(&agent))
-            .expect("associate process");
-        let association = associations.for_process(std::process::id());
-
-        assert_eq!(
-            association.session().map(|session| session.id.as_str()),
-            Some("omp-id")
-        );
-        assert_eq!(association.summary().status, AssociationStatus::Exact);
-        assert_eq!(
-            association.summary().evidence,
-            Some(AssociationEvidence::OpenSessionFile)
-        );
+        let AssociationDecision::Exact { session, evidence } = catalog
+            .association_for_process(&agent)
+            .expect("associate process")
+        else {
+            panic!("open transcript must identify one exact session");
+        };
+        assert_eq!(session.id, "omp-id");
+        assert_eq!(evidence, AssociationEvidence::OpenSessionFile);
     }
 
     #[test]
@@ -2484,14 +2280,20 @@ mod tests {
             100,
         );
 
-        let associations = catalog
-            .associate_processes(std::slice::from_ref(&agent))
-            .expect("associate process");
-        let association = associations.for_process(42);
-
-        assert!(association.session().is_none());
-        assert_eq!(association.summary().status, AssociationStatus::Ambiguous);
-        assert_eq!(associations.protected_targets().len(), 2);
+        assert_eq!(
+            catalog
+                .association_for_process(&agent)
+                .expect("associate process"),
+            AssociationDecision::ProtectProvider
+        );
+        assert_eq!(
+            catalog
+                .protection(std::slice::from_ref(&agent))
+                .expect("protect ambiguous sessions")
+                .protected_targets
+                .len(),
+            2
+        );
     }
 
     fn assert_session(
@@ -2507,11 +2309,11 @@ mod tests {
             .iter()
             .find(|session| &session.kind == kind)
             .expect("session kind");
-        let session = catalog.with_usage(session).expect("load session usage");
-        assert_eq!(session.id, id);
-        assert_eq!(session.title.as_deref(), Some(title));
-        assert_eq!(session.tokens, Some(tokens));
-        assert_eq!(session.cost_usd, cost_usd);
+        let detail = catalog.detail(session).expect("load session usage");
+        assert_eq!(detail.session.id, id);
+        assert_eq!(detail.session.title.as_deref(), Some(title));
+        assert_eq!(detail.session.tokens, Some(tokens));
+        assert_eq!(detail.session.cost_usd, cost_usd);
     }
 
     fn write(path: &std::path::Path, contents: &str) {

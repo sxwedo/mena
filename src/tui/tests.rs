@@ -391,6 +391,7 @@ fn detail_theme_can_customize_every_text_surface_independently() {
     let mut app = SessionsApp::new_with_detail_theme(
         vec![session.clone()],
         BTreeSet::default(),
+        BTreeSet::default(),
         SessionDetailTheme::from(&colors),
     );
     app.open_detail(SessionDetail {
@@ -1260,6 +1261,26 @@ fn active_session_renders_green_active_indicator() {
     );
 }
 
+#[test]
+fn fail_closed_protection_does_not_claim_an_exact_active_session() {
+    let session = transcript_session("a", "Alpha", "/tmp/a.jsonl");
+    let protected_targets = BTreeSet::from([session.target()]);
+    let mut app = SessionsApp::new_with_detail_theme(
+        vec![session.clone()],
+        BTreeSet::new(),
+        protected_targets,
+        SessionDetailTheme::default(),
+    );
+
+    assert_eq!(
+        session_cell(&session, SessionColumn::Active, &app),
+        Cell::from("")
+    );
+    app.request_delete();
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert!(app.status.as_ref().is_some_and(|status| status.is_error));
+}
+
 fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
     let mut output = String::new();
     for y in 0..height {
@@ -1303,8 +1324,33 @@ fn fixture_skill(name: &str, dir: &std::path::Path) -> crate::skill::AgentSkill 
         description: Some(format!("{name} skill description")),
         triggers: vec![name.to_string()],
         valid: true,
-        children: Vec::new(),
+        children: fixture_skill_children(dir),
     }
+}
+
+fn fixture_skill_children(dir: &std::path::Path) -> Vec<crate::skill::SkillChildItem> {
+    let mut children: Vec<_> = std::fs::read_dir(dir)
+        .expect("read fixture skill directory")
+        .map(|entry| {
+            let path = entry.expect("fixture child").path();
+            crate::skill::SkillChildItem {
+                name: path
+                    .file_name()
+                    .expect("fixture child name")
+                    .to_string_lossy()
+                    .into_owned(),
+                is_dir: path.is_dir(),
+                path,
+            }
+        })
+        .collect();
+    children.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    children
 }
 
 #[test]
@@ -1342,6 +1388,7 @@ fn multi_level_tree_expands_nested_directories() {
 
     // Select references dir and expand: examples/ + guide.md appear (dirs first).
     app.selected_index = 1;
+    app.cache_children(references.clone(), fixture_skill_children(&references));
     app.toggle_expand();
     let rows = &app.visible_rows;
     assert!(rows.iter().any(|r| matches!(
@@ -1359,6 +1406,7 @@ fn multi_level_tree_expands_nested_directories() {
         .position(|r| matches!(r, SkillRow::Item { name, .. } if name == "examples"))
         .expect("examples row");
     app.selected_index = examples_idx;
+    app.cache_children(examples.clone(), fixture_skill_children(&examples));
     app.toggle_expand();
     let rows = &app.visible_rows;
     assert!(rows.iter().any(|r| matches!(

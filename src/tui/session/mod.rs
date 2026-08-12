@@ -8,7 +8,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::session::{AgentSession, DeletionSummary, DetailScope, SessionDetail};
+use crate::session::{
+    AgentSession, DeletionSummary, DetailScope, SessionDetail, SessionProtection,
+};
 use crate::settings::SessionDetailColorSettings;
 use crate::tui::common::{ManagedTerminal, SessionDetailTheme, is_key_press};
 
@@ -16,9 +18,9 @@ pub(crate) use self::app::*;
 pub(crate) use self::event::*;
 pub(crate) use self::render::*;
 
-pub fn manage_sessions(
+pub(crate) fn manage_sessions(
     sessions: Vec<AgentSession>,
-    active_targets: BTreeSet<String>,
+    protection: SessionProtection,
     detail_colors: &SessionDetailColorSettings,
     mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
     mut export: impl FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>,
@@ -27,7 +29,8 @@ pub fn manage_sessions(
 ) -> Result<Option<AgentSession>> {
     run_session_browser(
         sessions,
-        active_targets,
+        protection.exact_active_targets,
+        protection.protected_targets,
         SessionDetailTheme::from(detail_colors),
         SessionBrowserCallbacks {
             load_detail: Some(&mut load_detail),
@@ -41,10 +44,16 @@ pub fn manage_sessions(
 fn run_session_browser(
     sessions: Vec<AgentSession>,
     active_targets: BTreeSet<String>,
+    protected_targets: BTreeSet<String>,
     detail_theme: SessionDetailTheme,
     mut callbacks: SessionBrowserCallbacks<'_>,
 ) -> Result<Option<AgentSession>> {
-    let mut app = SessionsApp::new_with_detail_theme(sessions, active_targets, detail_theme);
+    let mut app = SessionsApp::new_with_detail_theme(
+        sessions,
+        active_targets,
+        protected_targets,
+        detail_theme,
+    );
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     let mut tick: usize = 0;
     loop {

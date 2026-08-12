@@ -5,12 +5,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 
 use super::app::*;
 use super::render::draw_skills;
-use crate::skill::{AgentSkill, SkillDetail};
+use crate::skill::{AgentSkill, SkillEntry};
 use crate::tui::common::ManagedTerminal;
 
 pub fn run_skill_browser(
     skills: Vec<AgentSkill>,
-    load_detail: &mut impl FnMut(&AgentSkill) -> Result<SkillDetail>,
+    load_entry: &mut impl FnMut(&AgentSkill, &std::path::Path) -> Result<SkillEntry>,
 ) -> Result<()> {
     let mut app = SkillsApp::new(skills);
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
@@ -21,50 +21,30 @@ pub fn run_skill_browser(
         if app.preview_path != current_path {
             app.preview_path.clone_from(&current_path);
             app.current_detail = None;
+            app.preview_error = None;
             app.preview_scroll = 0;
         }
 
         if app.current_detail.is_none()
-            && let Some(_path) = &current_path
+            && app.preview_error.is_none()
+            && let Some(path) = current_path.as_deref()
+            && let Some(skill_idx) = app
+                .visible_rows
+                .get(app.selected_index)
+                .map(|row| match row {
+                    SkillRow::Skill { skill_idx, .. } | SkillRow::Item { skill_idx, .. } => {
+                        *skill_idx
+                    }
+                })
         {
-            app.current_detail = match app.visible_rows.get(app.selected_index) {
-                Some(SkillRow::Skill { skill_idx, .. }) => {
-                    let skill = &app.skills[*skill_idx];
-                    load_detail(skill).ok()
+            let skill = app.skills[skill_idx].clone();
+            match load_entry(&skill, path) {
+                Ok(entry) => {
+                    app.cache_children(path.to_path_buf(), entry.children);
+                    app.current_detail = Some(entry.detail);
                 }
-                Some(SkillRow::Item {
-                    full_path,
-                    name,
-                    is_dir,
-                    skill_idx,
-                    ..
-                }) => {
-                    let skill = &app.skills[*skill_idx];
-                    let content = if *is_dir {
-                        format!("[ directory: {name} ]")
-                    } else {
-                        std::fs::read_to_string(full_path)
-                            .unwrap_or_else(|e| format!("(could not read: {e})"))
-                    };
-                    Some(SkillDetail {
-                        skill: AgentSkill {
-                            name: name.clone(),
-                            provider: skill.provider.clone(),
-                            scope: skill.scope.clone(),
-                            path: full_path.clone(),
-                            location: skill.location.clone(),
-                            is_symlink: false,
-                            description: None,
-                            triggers: Vec::new(),
-                            valid: true,
-                            children: Vec::new(),
-                        },
-                        content,
-                        extra: std::collections::BTreeMap::new(),
-                    })
-                }
-                None => None,
-            };
+                Err(error) => app.preview_error = Some(format!("{error:#}")),
+            }
         }
 
         terminal

@@ -1,5 +1,5 @@
-pub mod detail;
-pub mod storage;
+mod detail;
+mod storage;
 
-pub use detail::parse_skill_detail;
-pub use storage::discover_skills;
+pub(super) use detail::{parse_skill_detail, read_skill_text};
+pub(super) use storage::{DiscoveredSkillFile, discover_skills, read_skill_children};

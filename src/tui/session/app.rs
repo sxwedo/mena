@@ -103,6 +103,7 @@ pub(crate) struct SessionsApp {
     pub(crate) sessions: Vec<AgentSession>,
     pub(crate) filtered: Vec<usize>,
     pub(crate) active_targets: BTreeSet<String>,
+    pub(crate) protected_targets: BTreeSet<String>,
     pub(crate) table_state: TableState,
     pub(crate) query: String,
     pub(crate) mode: BrowserMode,
@@ -133,18 +134,25 @@ pub(crate) struct SessionsApp {
 impl SessionsApp {
     #[cfg(test)]
     pub(crate) fn new(sessions: Vec<AgentSession>, active_targets: BTreeSet<String>) -> Self {
-        Self::new_with_detail_theme(sessions, active_targets, SessionDetailTheme::default())
+        Self::new_with_detail_theme(
+            sessions,
+            active_targets.clone(),
+            active_targets,
+            SessionDetailTheme::default(),
+        )
     }
 
     pub(crate) fn new_with_detail_theme(
         sessions: Vec<AgentSession>,
         active_targets: BTreeSet<String>,
+        protected_targets: BTreeSet<String>,
         detail_theme: SessionDetailTheme,
     ) -> Self {
         let mut app = Self {
             sessions,
             filtered: Vec::new(),
             active_targets,
+            protected_targets,
             table_state: TableState::default(),
             query: String::new(),
             mode: BrowserMode::Browse,
@@ -402,7 +410,7 @@ impl SessionsApp {
         let Some(session) = self.selected_session() else {
             return;
         };
-        if self.active_targets.contains(&session.target()) {
+        if self.protected_targets.contains(&session.target()) {
             self.status = Some(StatusMessage::error(
                 "Cannot delete a session that may be attached to a running agent".to_owned(),
             ));

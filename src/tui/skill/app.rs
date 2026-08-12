@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::skill::{AgentSkill, SkillChildItem, SkillDetail};
@@ -29,38 +29,19 @@ pub(crate) enum SkillRow {
     },
 }
 
-/// Read a directory's children (dirs first, then files, each sorted).
-fn read_dir_children(dir: &std::path::Path) -> Vec<SkillChildItem> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut items: Vec<SkillChildItem> = entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            let name = p.file_name()?.to_str()?.to_string();
-            let is_dir = p.is_dir();
-            Some(SkillChildItem {
-                name,
-                path: p,
-                is_dir,
-            })
-        })
-        .collect();
-    items.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-    items
-}
-
 pub(crate) struct SkillsApp {
     pub(crate) skills: Vec<AgentSkill>,
     /// Set of expanded directory paths.
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// Flat visible row list rebuilt by `rebuild_rows`.
     pub(crate) visible_rows: Vec<SkillRow>,
+    /// Directory contents loaded through the Skill catalog seam.
+    directory_children: HashMap<PathBuf, Vec<SkillChildItem>>,
     pub(crate) selected_index: usize,
     pub(crate) search_query: String,
     pub(crate) is_searching: bool,
     pub(crate) current_detail: Option<SkillDetail>,
+    pub(crate) preview_error: Option<String>,
     /// Path of the file currently shown in the preview; used to detect stale cache.
     pub(crate) preview_path: Option<PathBuf>,
     pub(crate) preview_scroll: u16,
@@ -72,14 +53,26 @@ pub(crate) struct SkillsApp {
 
 impl SkillsApp {
     pub(crate) fn new(skills: Vec<AgentSkill>) -> Self {
+        let directory_children = skills
+            .iter()
+            .filter(|skill| !skill.children.is_empty())
+            .filter_map(|skill| {
+                skill
+                    .path
+                    .parent()
+                    .map(|directory| (directory.to_path_buf(), skill.children.clone()))
+            })
+            .collect();
         let mut app = Self {
             skills,
             expanded_dirs: HashSet::new(),
             visible_rows: Vec::new(),
+            directory_children,
             selected_index: 0,
             search_query: String::new(),
             is_searching: false,
             current_detail: None,
+            preview_error: None,
             preview_path: None,
             preview_scroll: 0,
             full_screen_preview: false,
@@ -121,7 +114,8 @@ impl SkillsApp {
             let skill_dir = skill.path.parent().map(PathBuf::from);
             let has_children = skill_dir
                 .as_ref()
-                .is_some_and(|d| std::fs::read_dir(d).is_ok_and(|mut r| r.next().is_some()));
+                .and_then(|directory| self.directory_children.get(directory))
+                .is_some_and(|children| !children.is_empty());
             let expanded = skill_dir
                 .as_ref()
                 .is_some_and(|d| self.expanded_dirs.contains(d));
@@ -132,13 +126,16 @@ impl SkillsApp {
                 expanded,
             });
 
-            if expanded && let Some(dir) = skill_dir {
-                let children = read_dir_children(&dir);
+            if expanded
+                && let Some(dir) = skill_dir
+                && let Some(children) = self.directory_children.get(&dir)
+            {
                 walk_children(
                     &mut self.visible_rows,
                     &self.expanded_dirs,
+                    &self.directory_children,
                     skill_idx,
-                    &children,
+                    children,
                     1,
                 );
             }
@@ -150,7 +147,12 @@ impl SkillsApp {
         self.preview_scroll = 0;
         self.marquee_offset = 0;
         self.current_detail = None;
+        self.preview_error = None;
         self.preview_path = None;
+    }
+
+    pub(crate) fn cache_children(&mut self, directory: PathBuf, children: Vec<SkillChildItem>) {
+        self.directory_children.insert(directory, children);
     }
 }
 
@@ -158,6 +160,7 @@ impl SkillsApp {
 fn walk_children(
     rows: &mut Vec<SkillRow>,
     expanded_dirs: &HashSet<PathBuf>,
+    directory_children: &HashMap<PathBuf, Vec<SkillChildItem>>,
     skill_idx: usize,
     children: &[SkillChildItem],
     depth: usize,
@@ -177,9 +180,15 @@ fn walk_children(
             is_last,
         });
 
-        if expanded {
-            let sub = read_dir_children(&child.path);
-            walk_children(rows, expanded_dirs, skill_idx, &sub, depth + 1);
+        if expanded && let Some(children) = directory_children.get(&child.path) {
+            walk_children(
+                rows,
+                expanded_dirs,
+                directory_children,
+                skill_idx,
+                children,
+                depth + 1,
+            );
         }
     }
 }

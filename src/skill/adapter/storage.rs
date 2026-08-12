@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result, bail};
+
+const MAX_DIRECTORY_ENTRIES: usize = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DiscoveredProvider {
     Claude,
@@ -8,8 +12,6 @@ pub enum DiscoveredProvider {
     Cursor,
     OpenCode,
     Omp,
-    #[allow(dead_code)]
-    Generic,
 }
 
 impl DiscoveredProvider {
@@ -21,21 +23,6 @@ impl DiscoveredProvider {
             Self::Cursor => "cursor",
             Self::OpenCode => "opencode",
             Self::Omp => "omp",
-            Self::Generic => "generic",
-        }
-    }
-
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "cursor" => Some(Self::Cursor),
-            "opencode" => Some(Self::OpenCode),
-            "omp" => Some(Self::Omp),
-            "generic" => Some(Self::Generic),
-            _ => None,
         }
     }
 }
@@ -54,23 +41,6 @@ impl DiscoveredScope {
             Self::Workspace => "workspace",
         }
     }
-
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "global" => Some(Self::Global),
-            "workspace" => Some(Self::Workspace),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DiscoveredChildItem {
-    pub name: String,
-    pub path: PathBuf,
-    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,17 +49,17 @@ pub struct DiscoveredSkillFile {
     pub provider: DiscoveredProvider,
     pub scope: DiscoveredScope,
     pub path: PathBuf,
+    pub root: PathBuf,
     pub location: String,
     pub is_symlink: bool,
-    pub children: Vec<DiscoveredChildItem>,
+    pub children: Vec<crate::skill::SkillChildItem>,
 }
 
 /// Discover all skill files across standard global and workspace directories.
-#[must_use]
 pub fn discover_skills(
     home_dir: Option<&Path>,
     workspace_dir: Option<&Path>,
-) -> Vec<DiscoveredSkillFile> {
+) -> Result<Vec<DiscoveredSkillFile>> {
     let mut skills = Vec::new();
 
     // 1. Discover Global skills
@@ -121,7 +91,7 @@ pub fn discover_skills(
                 DiscoveredScope::Global,
                 home_dir,
                 &mut skills,
-            );
+            )?;
         }
     }
 
@@ -148,19 +118,21 @@ pub fn discover_skills(
                 DiscoveredScope::Workspace,
                 home_dir,
                 &mut skills,
-            );
+            )?;
         }
     }
 
-    // Deduplicate or sort by name/scope/provider
     skills.sort_by(|a, b| {
         a.name
             .cmp(&b.name)
             .then_with(|| a.scope.cmp(&b.scope))
             .then_with(|| a.provider.cmp(&b.provider))
     });
+    skills.dedup_by(|left, right| {
+        left.provider == right.provider && left.scope == right.scope && left.path == right.path
+    });
 
-    skills
+    Ok(skills)
 }
 
 fn scan_skill_root(
@@ -169,16 +141,24 @@ fn scan_skill_root(
     scope: DiscoveredScope,
     home_dir: Option<&Path>,
     out: &mut Vec<DiscoveredSkillFile>,
-) {
+) -> Result<()> {
     if !root.is_dir() {
-        return;
+        return Ok(());
     }
 
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
+    let entries = fs::read_dir(root)
+        .with_context(|| format!("failed to read skill root {}", root.display()))?;
 
-    for entry in entries.flatten() {
+    for (index, entry) in entries.enumerate() {
+        if index == MAX_DIRECTORY_ENTRIES {
+            bail!(
+                "skill root {} exceeds the {} entry limit",
+                root.display(),
+                MAX_DIRECTORY_ENTRIES
+            );
+        }
+        let entry =
+            entry.with_context(|| format!("failed to read an entry in {}", root.display()))?;
         let path = entry.path();
         if path.is_file() {
             let is_md = path.extension().is_some_and(|ext| ext == "md");
@@ -191,13 +171,14 @@ fn scan_skill_root(
                     provider,
                     scope,
                     path: path.clone(),
+                    root: path.clone(),
                     location,
                     is_symlink,
                     children: Vec::new(),
                 });
             }
         } else if path.is_dir() {
-            // Check for SKILL.md, skill.md, or index.md inside directory
+            // Check the conventional entrypoint first, then common fallbacks.
             let skill_file_candidates = [
                 path.join("SKILL.md"),
                 path.join("skill.md"),
@@ -212,28 +193,14 @@ fn scan_skill_root(
                     .is_ok_and(|m| m.file_type().is_symlink())
                     || fs::symlink_metadata(&skill_path).is_ok_and(|m| m.file_type().is_symlink());
                 let location = format_location(root, home_dir);
-                let mut children = Vec::new();
-
-                if let Ok(dir_entries) = fs::read_dir(&path) {
-                    for child_entry in dir_entries.flatten() {
-                        let c_path = child_entry.path();
-                        if let Some(c_name) = c_path.file_name().and_then(|n| n.to_str()) {
-                            children.push(DiscoveredChildItem {
-                                name: c_name.to_string(),
-                                path: c_path.clone(),
-                                is_dir: c_path.is_dir(),
-                            });
-                        }
-                    }
-                    children
-                        .sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-                }
+                let children = read_skill_children(&path)?;
 
                 out.push(DiscoveredSkillFile {
                     name: name.to_string(),
                     provider,
                     scope,
                     path: skill_path,
+                    root: path,
                     location,
                     is_symlink,
                     children,
@@ -241,6 +208,40 @@ fn scan_skill_root(
             }
         }
     }
+    Ok(())
+}
+
+pub fn read_skill_children(directory: &Path) -> Result<Vec<crate::skill::SkillChildItem>> {
+    let entries = fs::read_dir(directory)
+        .with_context(|| format!("failed to read skill directory {}", directory.display()))?;
+    let mut children = Vec::new();
+    for entry in entries {
+        if children.len() == MAX_DIRECTORY_ENTRIES {
+            bail!(
+                "skill directory {} exceeds the {} entry limit",
+                directory.display(),
+                MAX_DIRECTORY_ENTRIES
+            );
+        }
+        let entry =
+            entry.with_context(|| format!("failed to read an entry in {}", directory.display()))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        children.push(crate::skill::SkillChildItem {
+            name: name.to_owned(),
+            is_dir: path.is_dir(),
+            path,
+        });
+    }
+    children.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(children)
 }
 
 fn format_location(root: &Path, home_dir: Option<&Path>) -> String {
@@ -279,7 +280,7 @@ mod tests {
             DiscoveredScope::Global,
             None,
             &mut discovered,
-        );
+        )?;
 
         assert_eq!(discovered.len(), 2);
         let names: Vec<_> = discovered.iter().map(|s| s.name.as_str()).collect();

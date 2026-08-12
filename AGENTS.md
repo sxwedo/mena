@@ -15,6 +15,8 @@ The user-facing command is `mena`:
 mena agent [provider] [--fresh] [--resume] [--session <id>]
 mena ag [provider]
 mena sessions
+mena skills [--provider <name>] [--scope <scope>]
+mena skills inspect <name>
 mena config init [--import-clix]
 ```
 
@@ -43,49 +45,58 @@ Data flows from `main.rs` through command dispatch in `lib.rs` into
 main.rs
   └── lib.rs
       ├── controller.rs
-      │   ├── process.rs
-      │   ├── session.rs
-      │   │   └── session/adapter.rs
-      │   │       ├── detail.rs
-      │   │       └── storage.rs
-      │   ├── tui.rs
-      │   └── view.rs
+      ├── process.rs
+      ├── session.rs
+      │   └── session/adapter.rs
+      │       ├── detail.rs
+      │       └── storage.rs
+      ├── skill.rs
+      │   └── skill/adapter.rs
+      │       ├── detail.rs
+      │       └── storage.rs
+      ├── tui/
+      │   ├── agent_launcher/
+      │   ├── session/
+      │   └── skill/
+      ├── view.rs
       ├── settings.rs
       ├── fs.rs
       └── ui.rs
 ```
 
-- `process.rs` recognizes built-in and configured custom processes, samples
-  resources, and revalidates process identity immediately before signaling.
+- `process.rs` recognizes built-in and configured custom processes and obtains
+  provider-native evidence needed for safe session protection.
 - `session.rs` owns the provider-neutral session model, catalog, selectors,
   evidence-based live association, bounded I/O, and provider-independent
   deletion safeguards.
 - `session/adapter.rs` is the single seam for built-in session providers. It
-  uses closed-enum static dispatch so discovery, usage, detail, resume, and
-  deletion capabilities remain exhaustive without a vtable or runtime
+  uses closed-enum static dispatch so discovery, detail, resume, association,
+  and deletion capabilities remain exhaustive without a vtable or runtime
   registry. `adapter/storage.rs` owns native layouts and index cleanup;
   `adapter/detail.rs` normalizes provider records into the shared model.
-- `controller.rs` consumes session associations, emits stable JSON or text
-  output, redacts command secrets, and resumes through native argv.
-- `tui.rs` owns the responsive top view, session picker/manager, search,
-  details, and destructive-action confirmation.
+- `skill.rs` is the filesystem seam for Skill discovery, unique selection,
+  canonical root containment, bounded preview reads, and directory listing.
+- `controller.rs` orchestrates commands, emits stable JSON or text output, and
+  resumes through native argv.
+- `tui/` owns agent launch, session management, Skill browsing, search, detail
+  views, and destructive-action confirmation. TUI modules must not bypass the
+  session or Skill catalog seams for provider-owned storage.
 - `settings.rs` owns `~/.config/mena/config.toml`. Its optional clix importer is
   a migration boundary only; runtime behavior must not depend on clix.
 - `fs.rs` provides atomic, permission-preserving writes for native index repair.
 
 ## Safety invariants
 
-- Never signal a PID without revalidating PID, start time, executable, and
-  recognized provider against the originally selected process.
 - Never invoke a shell for resume commands. Construct program and argv
   separately; substitute only the `{session}` placeholder.
 - Never infer token cost from public prices. Report only persisted exact values.
 - Never claim a current process-to-session association from project equality,
   recency, or timestamps alone. Only current provider-native runtime evidence is
-  exact; a resume argv is launch evidence only. Unconfirmed processes must not
-  receive session metrics, and deletion must fail closed for their provider.
-- Keep log reads bounded and redact common secret-bearing process arguments in
-  default output. `--raw` is an explicit opt-in.
+  exact; a resume argv is launch evidence only. Active display uses exact
+  targets, while deletion protection fails closed for the complete provider
+  catalog when association is unconfirmed or ambiguous.
+- Keep transcript and Skill reads bounded. Skill preview paths must remain
+  within the selected canonical Skill root.
 - Never delete a session attached to a running process.
 - Validate session IDs and canonical paths before deletion. Traversal and
   symlink escapes outside provider-owned roots must fail closed.
@@ -119,7 +130,12 @@ this section. Normal command execution reads mena configuration only.
   merely to add another built-in provider.
 - Add process recognition in `process.rs`; keep desktop helper processes from
   matching command-line agents.
-- Preserve stable selectors (`provider:PID`, `provider:session-id`) and JSON
-  field names unless making an explicitly versioned breaking change.
-- Update README command examples and the provider matrix with behavior changes.
+- Add Skill storage behavior through `skill.rs` and `skill/adapter/`; do not
+  introduce direct filesystem reads into `tui/skill/`.
+- Preserve saved-session selectors (`provider:session-id`) and JSON field names
+  unless making an explicitly versioned breaking change.
+- Keep `README.md` and `README_CN.md` concise and synchronized. Put detailed
+  behavior in the matching English and Chinese files under `docs/`.
+- Update README command examples, the provider matrix, and detailed docs with
+  behavior changes.
 - Run the full `mise run verify` gate before committing.

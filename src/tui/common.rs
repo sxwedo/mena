@@ -14,8 +14,6 @@ use crate::settings::{ConfigColor, SessionDetailColorSettings};
 
 pub(super) const ACCENT: Color = Color::Cyan;
 pub(super) const MUTED: Color = Color::DarkGray;
-#[allow(dead_code)]
-pub(super) const METADATA_KEY: Color = Color::LightMagenta;
 
 // ── Color mapping ──────────────────────────────────────────────────────────────
 
@@ -120,11 +118,6 @@ pub(super) struct ManagedTerminal {
 }
 
 impl ManagedTerminal {
-    #[allow(dead_code)]
-    pub(super) fn enter() -> Result<Self> {
-        Self::enter_internal(false)
-    }
-
     pub(super) fn enter_with_native_selection() -> Result<Self> {
         Self::enter_internal(true)
     }

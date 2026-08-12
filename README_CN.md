@@ -14,15 +14,8 @@
   <a href="README.md">English</a> | 简体中文
 </p>
 
-`mena` 可以发现正在运行的编码 Agent 及其原生保存的 Session。无需守护进程、
-账号或远程服务，即可检查用量、阅读对话、恢复工作、停止进程并安全删除归档
-Session。
-
-- 支持 Claude Code、Codex、Gemini CLI、OpenCode、Pi、Oh My Pi、
-  Cursor Agent 和自定义进程识别规则。
-- 直接读取 Provider 自己的存储，只报告 Provider 确实持久化的用量与成本。
-- 对话保留在本机；日志读取有界、常见 Secret 默认脱敏，破坏性操作执行前会被
-  严格验证。
+`mena` 是一个本地优先的 CLI，用来启动编码 Agent、浏览其原生保存的 Session，
+以及检查已安装的 Agent Skill。无需守护进程、账号或远程数据存储。
 
 ## 安装
 
@@ -31,166 +24,67 @@ cargo install --git https://github.com/sxwedo/mena --locked
 mena --version
 ```
 
-仓库固定使用 Rust 1.96.1。从源码构建：
+从源码构建需要 Rust 1.96.1：
 
 ```sh
 git clone https://github.com/sxwedo/mena.git
 cd mena
 mise run build
-install -m 0755 target/release/mena /usr/local/bin/mena
-```
-
-### 给编码 Agent
-
-如果你是 Agent，请执行下面两条命令，将 `mena` 安装为用户级 CLI。不要把它加入
-当前项目的 `Cargo.toml`。如果环境中没有 `cargo`，先报告需要安装 Rust，再继续。
-
-```sh
-cargo install --git https://github.com/sxwedo/mena --locked
-mena sessions --help
 ```
 
 ## 快速开始
 
 ```sh
-mena agent                      # 交互式选择并在当前工作区启动 coding agent
-mena ag                         # `mena agent` 的完全等价简写
-mena ag claude                  # 在当前目录直接启动 Claude Code
-mena sessions                   # 浏览全部已保存 Session
-mena ss                         # `mena sessions` 的完全等价简写
+mena agent                    # 在当前目录选择并启动 Agent
+mena ag claude                # 启动 Claude Code
+mena ag codex --resume        # 恢复当前项目最近的 Codex Session
+mena sessions                 # 浏览已保存 Session
+mena ss --provider cursor     # 按 Provider 筛选 Session
+mena skills                   # 浏览已安装的 Agent Skill
+mena sk inspect ponytail      # 检查唯一命名的 Skill
 ```
-
-Target 稳定且适合脚本使用：
-
-- 运行中进程：`provider:PID`，例如 `claude:43120`。
-- 已保存 Session：`provider:session-id`。
-- 只有在结果唯一时，才允许省略 Provider。
-
-## 当前重点与路线图
-
-- **当前 - Sessions：** 重点开发 `mena sessions` 及其简写 `mena ss`，包括发现、
-  搜索、对话阅读、准确的响应与工具指标、导出、恢复和安全删除。
-- **下一步 - Memory：** 后续将关注 `mena memory` 和持久化 Agent 记忆工作流。
-  此处只记录方向，相关功能**尚未实现**。
-
-## Sessions
-
-`mena sessions` 与 `mena ss` 完全等价，所有参数都能用于任一形式。
-
-```sh
-mena ss
-mena ss --provider cursor --limit 20
-mena ss --include-empty
-mena ss --json
-```
-
-交互式 Session 视图可以跨 Provider 和项目搜索，打开完整对话，展示按模型汇总的
-持久化指标，恢复原生 Session，将其导出为 Markdown，或永久删除。
-
-| 按键 | 操作 |
-|---|---|
-| `/` | 按 Target、Provider、项目或标题搜索。按 `Enter` 会进一步对所有已保存 Session 的完整对话做全文搜索（带实时进度指示，可按 `Esc` 取消） |
-| `g` | 切换列表分组 — 扁平 或 按项目分组 |
-| `Enter` 或 `i` | 打开 Session 详情 |
-| `r` | 使用 Provider 原生 CLI 恢复 |
-| `d`，然后输入小写 `y` | 永久删除选中的 Session |
-| `c` / `e` | 将当前详情复制 / 导出为 Markdown（跟随下方的预览范围） |
-| `Esc` 或 `q` | 关闭或退出 |
-
-在详情视图中，使用方向键或 `j`/`k` 滚动，`PgUp`/`PgDn` 翻页，`Home`/`End`
-跳转到首尾，`Shift+↑`/`Shift+↓` 在用户与 Assistant 消息之间跳转。预览默认为
-**仅对话**（仅用户与 Assistant 消息）；按 `p` 保持仅对话，或按 `Shift+P`
-显示完整对话（含工具调用、工具结果与系统消息）。复制（`c`）与导出（`e`）
-跟随当前预览范围；导出文件名以 `...-conv.md`（仅对话）或 `...-full.md`
-（完整）区分。元数据与模型用量始终显示。鼠标上报保持关闭，因此终端原生文本
-选择仍然可用。
-
-## 命令
 
 | 命令 | 用途 |
 |---|---|
-| `mena sessions` / `mena ss` | 搜索并管理已保存 Session |
-| `mena config init` | 创建私有配置文件 |
-
+| `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
+| `mena sessions` / `mena ss` | 搜索、检查、恢复、导出和删除 Session |
+| `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
+| `mena config init` | 创建 `~/.config/mena/config.toml` |
 
 ## Provider 支持
 
-| Provider | 进程发现 | 已保存 Session | 恢复 | 删除 |
-|---|:---:|:---:|:---:|:---:|
-| Claude Code | ✓ | ✓ | ✓ | ✓ |
-| Codex | ✓ | ✓ | ✓ | ✓ |
-| Gemini CLI | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | ✓ | ✓ | ✓ | ✓ |
-| Pi | ✓ | ✓ | ✓ | ✓ |
-| Oh My Pi | ✓ | ✓ | ✓ | ✓ |
-| Cursor Agent | ✓ | ✓ | ✓ | ✓ |
-| 自定义识别规则 | ✓ | - | 可配置 | - |
+| Provider | 启动 | 已保存 Session |
+|---|:---:|:---:|
+| Claude Code | ✓ | ✓ |
+| Codex | ✓ | ✓ |
+| Gemini CLI | ✓ | ✓ |
+| OpenCode | ✓ | ✓ |
+| Pi | ✓ | ✓ |
+| Oh My Pi | ✓ | ✓ |
+| Cursor Agent | ✓ | ✓ |
+| Goose | ✓ | — |
+| 自定义配置 | ✓ | — |
 
-自定义识别规则没有通用且受支持的本地 Session 目录。`mena` 会返回明确的“不支持”错误，而不是猜测存储路径。
+自定义 Agent 和 Goose 没有通用 Session 目录。`mena` 会明确返回不支持，而不会
+猜测 Provider 自己的存储路径。
 
-### 运行进程与 Session 的关联
+## 文档
 
-只有当前原生证据能够唯一指向一个逻辑 Session 时，`mena` 才展示运行进程的
-Session 数据。Claude Code 提供包含 PID、进程启动时间、项目和 Session ID 的原生
-运行时记录；Pi 和 Oh My Pi 仅在进程确实打开且只打开一个已收录的原生对话文件时
-精确关联（Linux 使用 `/proc`，macOS 使用 `/usr/sbin/lsof`）。
+- [Session 浏览、指标、导出与删除](docs/sessions_CN.md)
+- [Agent Skill 发现与浏览](docs/skills_CN.md)
+- [配置](docs/configuration_CN.md)
+- [架构与开发](docs/development_CN.md)
 
-Provider 的恢复或 Session 参数只能证明进程启动时选择了哪个 Session；Agent 可能
-在不重启进程的情况下切换 Session，因此该证据标记为 `launch`，而不是 `exact`。
-项目相同、时间接近和“最近更新”都不会被用来宣称精确关联。状态为 `ambiguous`、
-`unconfirmed` 或 `unsupported` 时，不输出 Session ID、Token 或成本。
+## 安全模型
 
-## 数据与安全
+- Session 数据始终保留在各 Provider 的原生本地存储中。
+- 只有 Provider 持久化的用量和成本才会展示；不会根据公开价格推算。
+- 恢复命令使用“程序 + argv”，绝不调用 Shell。
+- 运行进程与 Session 的关联必须来自 Provider 原生证据；不确定时删除操作按
+  fail-closed 处理。
+- 删除前会验证 Session ID、规范路径、符号链接范围和运行进程保护状态。
 
-- 对话数据始终保留在 Provider 的原生本地存储中。
-- Token、成本、耗时、TTFT、重试和错误只在原生记录存在时展示，缺失值绝不估算。
-- 只有 `exact` 原生关联才会把指标归属到运行进程；`ps --json` 同时输出
-  `session_match` 和 `session_match_evidence`。
-- 恢复命令使用“程序 + argv”执行，绝不调用 Shell。
-- 停止进程前重新验证 PID、启动时间、可执行文件和 Provider。
-- 删除操作拒绝运行中的 Session、歧义 Target、路径穿越和 Provider 根目录之外的
-  符号链接逃逸；只要某个运行进程无法精确关联，该 Provider 的全部 Session 都按
-  fail closed 方式禁止删除。
-- 详情导出采用原子写入、绝不覆盖已有文件，并在 Unix 下使用 `0600` 权限。
-
-## 自动化
-
-`ps`、`inspect` 和 `sessions` 提供稳定的 JSON 输出：
-
-```sh
-mena ps --json | jq '.[] | {id, project, session_match, session_match_evidence, tokens, cost_usd}'
-mena ss --json | jq '.[] | select(.agent == "codex") | .target'
-```
-
-人类可读输出中的短横线表示没有精确关联原生 Session；`n/a` 表示已精确关联，但
-Session 中没有持久化成本。
-
-## 配置
-
-创建 `~/.config/mena/config.toml`；Unix 下文件权限为 `0600`：
-
-```sh
-mena config init
-```
-
-基础目录遵循 `XDG_CONFIG_HOME`。自定义进程识别使用精确的可执行文件匹配和可选的
-命令标记：
-
-```toml
-[agent.custom.my_agent]
-executables = ["my-agent"]
-command_contains = ["--agent-mode"]
-resume = ["my-agent", "resume", "{session}"]
-```
-
-恢复命令是 argv 数组，必须包含 `{session}`。已有的 `clix` 自定义 Agent 定义可以
-一次性导入：
-
-```sh
-mena config init --import-clix
-```
-
-正常运行时只读取 `mena` 配置。
+完整约束见 [Session 安全说明](docs/sessions_CN.md#安全与运行中-session-关联)。
 
 ## 开发
 
@@ -199,8 +93,8 @@ mise run verify  # 格式、检查、测试、严格 Clippy 与 rustdoc
 mise run build   # 优化后的 release 二进制
 ```
 
-Provider 适配器和安全敏感变更应包含有针对性的 Fixture。架构与仓库约束参见
-[AGENTS.md](AGENTS.md)。
+仓库架构与扩展入口见 [docs/development_CN.md](docs/development_CN.md)，面向编码 Agent 的
+不变量见 [AGENTS.md](AGENTS.md)。
 
 ## 许可证
 

@@ -16,5 +16,5 @@ pub(crate) mod skill;
 mod tests;
 
 pub use agent_launcher::{select_and_launch_agent, select_launch_mode_for_agent};
-pub use session::manage_sessions;
+pub(crate) use session::manage_sessions;
 pub use skill::manage_skills;
