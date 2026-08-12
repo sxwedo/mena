@@ -7,7 +7,7 @@ use mena::AgentArgs;
     name = "mena",
     author,
     version,
-    about = "Launch developer agents and manage their local sessions and skills"
+    about = "Launch developer agents and inspect local sessions, skills, and MCP servers"
 )]
 struct Cli {
     #[command(flatten)]
@@ -69,6 +69,28 @@ mod tests {
                 "--json",
             ],
             vec!["mena", "sk", "inspect", "ponytail", "--json"],
+            vec!["mena", "mcp"],
+            vec![
+                "mena",
+                "mcp",
+                "--provider",
+                "codex",
+                "--scope",
+                "user",
+                "--json",
+            ],
+            vec![
+                "mena",
+                "mcp",
+                "--provider",
+                "claude",
+                "inspect",
+                "context7",
+                "--probe",
+                "--timeout",
+                "15",
+                "--json",
+            ],
             vec![
                 "mena",
                 "sk",
@@ -137,5 +159,43 @@ mod tests {
         assert_eq!(args.provider.as_deref(), Some("claude"));
         assert_eq!(args.scope.as_deref(), Some("global"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn mcp_inspect_supports_explicit_live_metadata_discovery() {
+        let cli = Cli::try_parse_from([
+            "mena",
+            "mcp",
+            "--provider",
+            "codex",
+            "--scope",
+            "project",
+            "inspect",
+            "docs",
+            "--probe",
+            "--timeout",
+            "20",
+            "--json",
+        ])
+        .expect("MCP inspection should parse");
+
+        let AgentCommand::Mcp(args) = cli.args.command else {
+            panic!("mcp did not resolve to the MCP catalog command");
+        };
+        assert_eq!(args.provider.as_deref(), Some("codex"));
+        assert_eq!(args.scope.as_deref(), Some("project"));
+        let Some(mena::McpSubcommand::Inspect {
+            name,
+            probe,
+            timeout,
+            json,
+        }) = args.command
+        else {
+            panic!("inspect subcommand was not parsed");
+        };
+        assert_eq!(name, "docs");
+        assert!(probe);
+        assert_eq!(timeout, 20);
+        assert!(json);
     }
 }

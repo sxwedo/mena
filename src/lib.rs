@@ -1,9 +1,10 @@
-//! Local-first developer-agent launcher, session manager, and Skill browser.
+//! Local-first developer-agent launcher and catalog for sessions, Skills, and MCP servers.
 
 mod clipboard;
 mod controller;
 mod export;
 mod fs;
+mod mcp;
 mod process;
 mod session;
 pub mod settings;
@@ -14,6 +15,13 @@ mod view;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
+pub use mcp::{
+    McpAuthentication, McpCatalog, McpDetail, McpListCapability, McpProbe, McpProbeStatus,
+    McpPromptArgument, McpRegistration, McpResourceCapability, McpRuntimePrompt,
+    McpRuntimeResource, McpRuntimeResourceTemplate, McpRuntimeTool, McpServerCapabilities,
+    McpServerIdentity, McpSourceFormat, McpTimeouts, McpToolAnnotations, McpToolPolicy,
+    McpTransport, McpValueBinding, McpValueSource,
+};
 pub use process::{AgentKind, ProcessSnapshot};
 pub use settings::Settings;
 pub use skill::{AgentSkill, SkillCatalog, SkillDetail};
@@ -42,6 +50,8 @@ pub enum AgentCommand {
     /// Inspect or list available developer agent skills
     #[command(visible_alias = "sk")]
     Skills(SkillsArgs),
+    /// Inspect MCP server registrations and their metadata
+    Mcp(McpArgs),
 }
 
 /// Mena configuration operations.
@@ -112,6 +122,42 @@ pub enum SkillSubcommand {
     },
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub command: Option<McpSubcommand>,
+    /// Filter by client provider: claude, codex, cursor, gemini, goose, omp, opencode, or pi
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Filter by configuration scope: user, local, project, plugin, profile, managed, or shared
+    #[arg(long)]
+    pub scope: Option<String>,
+    /// Filter by configuration source path or suffix
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Emit stable machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum McpSubcommand {
+    /// Inspect one uniquely identified MCP registration
+    Inspect {
+        /// MCP server name or provider:scope:name selector
+        name: String,
+        /// Connect to the server and discover protocol metadata; never calls tools
+        #[arg(long)]
+        probe: bool,
+        /// Maximum live-probe duration in seconds
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+        /// Emit stable machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Execute one `mena` command.
 ///
 /// # Errors
@@ -133,6 +179,7 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
         AgentCommand::Agent(args) => controller::run_agent(&args, settings),
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
         AgentCommand::Skills(args) => controller::run_skills(&args, settings),
+        AgentCommand::Mcp(args) => controller::run_mcp(&args),
     }
 }
 

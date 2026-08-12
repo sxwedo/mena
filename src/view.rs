@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::mcp::{McpDetail, McpProbe, McpRegistration, McpServerCapabilities};
 use crate::session::{
     AgentSession, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage, ToolMetrics,
 };
@@ -192,6 +193,300 @@ pub fn render_skill_detail(detail: &SkillDetail) -> String {
         detail.content
     );
     out
+}
+
+pub fn render_mcp_table(registrations: &[&McpRegistration]) -> String {
+    if registrations.is_empty() {
+        return "No MCP registrations found.\n".to_owned();
+    }
+    let headers = [
+        "SELECTOR",
+        "STATE",
+        "TRANSPORT",
+        "TARGET",
+        "TOOLS",
+        "SOURCE",
+    ];
+    let rows: Vec<Vec<String>> = registrations
+        .iter()
+        .map(|registration| {
+            let state = if !registration.valid {
+                "invalid"
+            } else if registration.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let target = registration
+                .command
+                .as_deref()
+                .or(registration.url.as_deref())
+                .unwrap_or("-");
+            let tools = if registration.tool_policy.include.is_empty() {
+                "runtime unknown".to_owned()
+            } else {
+                format!("configured: {}", registration.tool_policy.include.len())
+            };
+            vec![
+                registration.selector.clone(),
+                state.to_owned(),
+                registration.transport.as_str().to_owned(),
+                target.to_owned(),
+                tools,
+                registration.source.display().to_string(),
+            ]
+        })
+        .collect();
+    strip_terminal_controls(&render_table(&headers, &rows))
+}
+
+pub fn render_mcp_detail(detail: &McpDetail) -> String {
+    render_mcp_registration_detail(&detail.registration, detail.probe.as_ref())
+}
+
+pub fn render_mcp_registration_detail(
+    registration: &McpRegistration,
+    probe: Option<&McpProbe>,
+) -> String {
+    let mut out = String::new();
+    write_mcp_registration(&mut out, registration);
+    match probe {
+        None => {
+            let _ = writeln!(out, "Runtime metadata: not probed");
+        }
+        Some(probe) => write_mcp_probe(&mut out, probe),
+    }
+    strip_terminal_controls(&out)
+}
+
+fn write_mcp_registration(out: &mut String, registration: &McpRegistration) {
+    let _ = writeln!(out, "MCP {}", registration.selector);
+    let _ = writeln!(out, "Static registration metadata");
+    let _ = writeln!(out, "  Provider:  {}", registration.provider);
+    let _ = writeln!(out, "  Scope:     {}", registration.scope);
+    let _ = writeln!(out, "  Source:    {}", registration.source.display());
+    let _ = writeln!(out, "  Format:    {:?}", registration.source_format);
+    let _ = writeln!(out, "  State:     {}", mcp_state(registration));
+    let _ = writeln!(out, "  Transport: {}", registration.transport.as_str());
+    if let Some(display_name) = &registration.display_name {
+        let _ = writeln!(out, "  Display:   {display_name}");
+    }
+    if let Some(description) = &registration.description {
+        let _ = writeln!(out, "  Description: {description}");
+    }
+    write_mcp_connection(out, registration);
+    write_mcp_registration_policy(out, registration);
+    for warning in &registration.warnings {
+        let _ = writeln!(out, "  Warning: {warning}");
+    }
+}
+
+fn write_mcp_connection(out: &mut String, registration: &McpRegistration) {
+    if let Some(command) = &registration.command {
+        let _ = writeln!(out, "  Command:   {command}");
+    }
+    if !registration.args.is_empty() {
+        let _ = writeln!(out, "  Args:      {}", registration.args.join(" "));
+    }
+    if let Some(url) = &registration.url {
+        let _ = writeln!(out, "  URL:       {url}");
+    }
+    if let Some(cwd) = &registration.cwd {
+        let _ = writeln!(out, "  CWD:       {}", cwd.display());
+    }
+    if !registration.authentication.is_empty() {
+        let values = registration
+            .authentication
+            .iter()
+            .map(|auth| {
+                auth.reference.as_ref().map_or_else(
+                    || auth.kind.clone(),
+                    |reference| format!("{} ({reference})", auth.kind),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "  Authentication: {values}");
+    }
+    write_bindings(out, "Environment", &registration.environment);
+    write_bindings(out, "Headers", &registration.headers);
+    let timeouts = [
+        ("startup", registration.timeouts.startup_ms),
+        ("catalog", registration.timeouts.catalog_ms),
+        ("tool", registration.timeouts.tool_ms),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| format!("{name}={value}ms")))
+    .collect::<Vec<_>>();
+    if !timeouts.is_empty() {
+        let _ = writeln!(out, "  Timeouts:  {}", timeouts.join(", "));
+    }
+}
+
+fn write_mcp_registration_policy(out: &mut String, registration: &McpRegistration) {
+    if !registration.tool_policy.include.is_empty() {
+        let _ = writeln!(
+            out,
+            "  Configured tools: {}",
+            registration.tool_policy.include.join(", ")
+        );
+    }
+    if !registration.tool_policy.exclude.is_empty() {
+        let _ = writeln!(
+            out,
+            "  Excluded tools:   {}",
+            registration.tool_policy.exclude.join(", ")
+        );
+    }
+    if !registration.extra_fields.is_empty() {
+        let _ = writeln!(
+            out,
+            "  Unnormalized keys: {}",
+            registration.extra_fields.join(", ")
+        );
+    }
+}
+
+fn write_mcp_probe(out: &mut String, probe: &McpProbe) {
+    let _ = writeln!(
+        out,
+        "Runtime metadata: {} ({}ms)",
+        probe.status, probe.duration_ms
+    );
+    if let Some(protocol) = &probe.protocol_version {
+        let _ = writeln!(out, "  Protocol: {protocol}");
+    }
+    if let Some(server) = &probe.server {
+        let identity = server.title.as_deref().unwrap_or(&server.name);
+        let _ = writeln!(out, "  Server:   {identity} {}", server.version);
+        if let Some(description) = &server.description {
+            let _ = writeln!(out, "  Description: {description}");
+        }
+        if let Some(website) = &server.website_url {
+            let _ = writeln!(out, "  Website: {website}");
+        }
+    }
+    if let Some(capabilities) = &probe.capabilities {
+        write_mcp_capabilities(out, capabilities);
+    }
+    if let Some(instructions) = &probe.instructions {
+        let _ = writeln!(out, "  Instructions: {instructions}");
+    }
+    write_mcp_runtime_catalogs(out, probe);
+    for warning in &probe.warnings {
+        let _ = writeln!(out, "  Warning: {warning}");
+    }
+    if let Some(error) = &probe.error {
+        let _ = writeln!(out, "  Error: {error}");
+    }
+}
+
+fn write_mcp_capabilities(out: &mut String, capabilities: &McpServerCapabilities) {
+    let mut names = Vec::new();
+    if capabilities.tools.is_some() {
+        names.push("tools");
+    }
+    if capabilities.prompts.is_some() {
+        names.push("prompts");
+    }
+    if capabilities.resources.is_some() {
+        names.push("resources");
+    }
+    if capabilities.logging {
+        names.push("logging");
+    }
+    if capabilities.completions {
+        names.push("completions");
+    }
+    if capabilities.experimental {
+        names.push("experimental");
+    }
+    let value = if names.is_empty() {
+        "none advertised".to_owned()
+    } else {
+        names.join(", ")
+    };
+    let _ = writeln!(out, "  Capabilities: {value}");
+    if !capabilities.extensions.is_empty() {
+        let _ = writeln!(out, "  Extensions: {}", capabilities.extensions.join(", "));
+    }
+}
+
+fn write_mcp_runtime_catalogs(out: &mut String, probe: &McpProbe) {
+    if !probe.tools.is_empty() {
+        let _ = writeln!(out, "Runtime tools: {}", probe.tools.len());
+        for tool in &probe.tools {
+            let state = if tool.enabled_by_registration {
+                "enabled"
+            } else {
+                "filtered"
+            };
+            let _ = writeln!(out, "  - {} [{state}]", tool.name);
+            if let Some(description) = &tool.description {
+                let _ = writeln!(out, "    {description}");
+            }
+        }
+    }
+    if !probe.prompts.is_empty() {
+        let _ = writeln!(out, "Runtime prompts: {}", probe.prompts.len());
+        for prompt in &probe.prompts {
+            let _ = writeln!(out, "  - {}", prompt.name);
+            if let Some(description) = &prompt.description {
+                let _ = writeln!(out, "    {description}");
+            }
+        }
+    }
+    if !probe.resources.is_empty() {
+        let _ = writeln!(out, "Runtime resources: {}", probe.resources.len());
+        for resource in &probe.resources {
+            let _ = writeln!(out, "  - {} ({})", resource.name, resource.uri);
+        }
+    }
+    if !probe.resource_templates.is_empty() {
+        let _ = writeln!(
+            out,
+            "Runtime resource templates: {}",
+            probe.resource_templates.len()
+        );
+        for template in &probe.resource_templates {
+            let _ = writeln!(out, "  - {} ({})", template.name, template.uri_template);
+        }
+    }
+}
+
+const fn mcp_state(registration: &McpRegistration) -> &'static str {
+    if !registration.valid {
+        "invalid"
+    } else if registration.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    }
+}
+
+fn write_bindings(out: &mut String, label: &str, bindings: &[crate::mcp::McpValueBinding]) {
+    if bindings.is_empty() {
+        return;
+    }
+    let values = bindings
+        .iter()
+        .map(|binding| format!("{} ({:?})", binding.name, binding.source))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "  {label}: {values}");
+}
+
+fn strip_terminal_controls(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '\u{fffd}'
+            }
+        })
+        .collect()
 }
 
 fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
@@ -430,9 +725,16 @@ fn response_status(response: &ResponseMetrics) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
     use super::{
         format_count, format_duration_millis, format_metric_error, format_response_header_metrics,
-        format_response_summary, format_token_breakdown, format_tool_summary,
+        format_response_summary, format_token_breakdown, format_tool_summary, render_mcp_detail,
+        render_mcp_table,
+    };
+    use crate::mcp::{
+        McpDetail, McpRegistration, McpSourceFormat, McpTimeouts, McpToolPolicy, McpTransport,
     };
     use crate::session::{MetricError, ResponseMetrics, TokenUsage, ToolMetrics};
 
@@ -513,5 +815,65 @@ mod tests {
             Some("completed · 140ms · exit 0")
         );
         assert_eq!(format_tool_summary(&ToolMetrics::default()), None);
+    }
+
+    #[test]
+    fn renders_static_mcp_inventory_without_claiming_runtime_tools() {
+        let registration = mcp_registration();
+        let table = render_mcp_table(&[&registration]);
+        assert!(table.contains("codex:user:docs"));
+        assert!(table.contains("stdio"));
+        assert!(table.contains("configured: 1"));
+
+        let detail = render_mcp_detail(&McpDetail {
+            registration,
+            probe: None,
+        });
+        assert!(detail.contains("Static registration metadata"));
+        assert!(detail.contains("Runtime metadata: not probed"));
+        assert!(!detail.contains("Runtime tools: 1"));
+    }
+
+    #[test]
+    fn mcp_text_rendering_neutralizes_terminal_control_sequences() {
+        let mut registration = mcp_registration();
+        registration.description = Some("safe\u{1b}[2Jcontent".to_owned());
+        let output = render_mcp_detail(&McpDetail {
+            registration,
+            probe: None,
+        });
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.contains("safe�[2Jcontent"));
+    }
+
+    fn mcp_registration() -> McpRegistration {
+        McpRegistration {
+            selector: "codex:user:docs".to_owned(),
+            name: "docs".to_owned(),
+            provider: "codex".to_owned(),
+            scope: "user".to_owned(),
+            source: PathBuf::from("/tmp/config.toml"),
+            source_format: McpSourceFormat::Toml,
+            transport: McpTransport::Stdio,
+            enabled: true,
+            valid: true,
+            display_name: None,
+            description: Some("Documentation search".to_owned()),
+            command: Some("docs-server".to_owned()),
+            args: vec!["--safe".to_owned()],
+            url: None,
+            cwd: None,
+            timeouts: McpTimeouts::default(),
+            authentication: Vec::new(),
+            environment: Vec::new(),
+            headers: Vec::new(),
+            tool_policy: McpToolPolicy {
+                include: vec!["search".to_owned()],
+                ..McpToolPolicy::default()
+            },
+            options: BTreeMap::new(),
+            extra_fields: Vec::new(),
+            warnings: Vec::new(),
+        }
     }
 }

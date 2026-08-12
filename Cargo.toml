@@ -3,12 +3,12 @@ name = "mena"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.1"
-description = "A local-first CLI for launching developer agents and managing sessions and skills."
+description = "A local-first CLI for developer-agent sessions, skills, and MCP catalogs."
 license = "MIT"
 repository = "https://github.com/sxwedo/mena"
 homepage = "https://github.com/sxwedo/mena"
 readme = "README.md"
-keywords = ["agents", "cli", "developer-tools", "local-first", "tui"]
+keywords = ["agents", "cli", "developer-tools", "local-first", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -19,11 +19,20 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
 dirs = "5"
+http = "1.5"
+json5 = "1.3"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
+rmcp = { version = "3.1.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml_ng = "0.10"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tempfile = "3.27"
 toml = "0.8"
+tokio = { version = "1.48", features = ["io-util", "process", "rt", "time"] }
 unicode-width = "0.2"
+url = "2.5"
+
+[dev-dependencies]
+rmcp = { version = "3.1.2", default-features = false, features = ["server"] }

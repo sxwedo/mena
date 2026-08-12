@@ -17,6 +17,8 @@ mena ag [provider]
 mena sessions
 mena skills [--provider <name>] [--scope <scope>]
 mena skills inspect <name>
+mena mcp [--provider <client>] [--scope <scope>] [--source <path>] [--json]
+mena mcp inspect <name> [--probe] [--timeout <seconds>] [--json]
 mena config init [--import-clix]
 ```
 
@@ -54,8 +56,18 @@ main.rs
       │   └── skill/adapter.rs
       │       ├── detail.rs
       │       └── storage.rs
+      ├── mcp.rs
+      │   ├── adapter.rs
+      │   │   ├── common.rs
+      │   │   ├── storage.rs
+      │   │   ├── codex.rs
+      │   │   ├── json_clients.rs
+      │   │   ├── goose.rs
+      │   │   └── plugins.rs
+      │   └── probe.rs
       ├── tui/
       │   ├── agent_launcher/
+      │   ├── mcp/
       │   ├── session/
       │   └── skill/
       ├── view.rs
@@ -76,11 +88,16 @@ main.rs
   `adapter/detail.rs` normalizes provider records into the shared model.
 - `skill.rs` is the filesystem seam for Skill discovery, unique selection,
   canonical root containment, bounded preview reads, and directory listing.
+- `mcp.rs` owns the provider-neutral MCP catalog, stable filters, ambiguity
+  handling, redacted public metadata, and explicit live-probe gate.
+  `mcp/adapter.rs` is the closed client-config seam; raw connection values stay
+  private. `mcp/probe.rs` alone may start stdio or contact Streamable HTTP, and
+  only after `--probe` or an explicit `p` action in the MCP browser.
 - `controller.rs` orchestrates commands, emits stable JSON or text output, and
   resumes through native argv.
-- `tui/` owns agent launch, session management, Skill browsing, search, detail
-  views, and destructive-action confirmation. TUI modules must not bypass the
-  session or Skill catalog seams for provider-owned storage.
+- `tui/` owns agent launch, session management, Skill and MCP browsing, search,
+  detail views, and destructive-action confirmation. TUI modules must not
+  bypass the session, Skill, or MCP catalog seams for provider-owned data.
 - `settings.rs` owns `~/.config/mena/config.toml`. Its optional clix importer is
   a migration boundary only; runtime behavior must not depend on clix.
 - `fs.rs` provides atomic, permission-preserving writes for native index repair.
@@ -103,6 +120,15 @@ main.rs
 - Keep destructive confirmation explicit and lowercase-`y` only.
 - Custom agents have no generic local session catalog. Do not guess
   storage paths; return an actionable unsupported-operation error.
+- A static MCP scan must never start a configured process, contact an endpoint,
+  execute a dynamic value helper, or reuse another client's credential store.
+- A live MCP probe is explicit (`p` in the browser or `--probe`) and bounded. It
+  may initialize and list protocol metadata, but must never call tools, read
+  resource contents, or render prompts.
+- Never serialize MCP environment/header/auth values. Redact URL userinfo,
+  query values, fragments, and secret-bearing argv positions; sanitize errors.
+- Treat MCP server metadata and safety annotations as untrusted claims. Keep
+  reads, pages, item counts, schemas, text, timeouts, and cleanup bounded.
 
 ## Configuration
 
@@ -132,6 +158,11 @@ this section. Normal command execution reads mena configuration only.
   matching command-line agents.
 - Add Skill storage behavior through `skill.rs` and `skill/adapter/`; do not
   introduce direct filesystem reads into `tui/skill/`.
+- Add MCP client formats through `mcp/adapter.rs`, normalize in focused
+  adapters, and add interface fixtures for source/scope discovery, ambiguity,
+  redaction, environment expansion, plugin containment, and probe paths.
+- Keep MCP TUI probing behind `McpCatalog`; do not expose private connections to
+  `tui/mcp/`. Probe results must remain keyed to their originating registration.
 - Preserve saved-session selectors (`provider:session-id`) and JSON field names
   unless making an explicitly versioned breaking change.
 - Keep `README.md` and `README_CN.md` concise and synchronized. Put detailed

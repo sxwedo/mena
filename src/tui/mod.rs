@@ -9,6 +9,7 @@
 
 pub(crate) mod agent_launcher;
 pub(crate) mod common;
+pub(crate) mod mcp;
 pub(crate) mod session;
 pub(crate) mod skill;
 
@@ -16,5 +17,6 @@ pub(crate) mod skill;
 mod tests;
 
 pub use agent_launcher::{select_and_launch_agent, select_launch_mode_for_agent};
+pub(crate) use mcp::manage_mcp;
 pub(crate) use session::manage_sessions;
 pub use skill::manage_skills;

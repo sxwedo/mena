@@ -18,8 +18,16 @@ main.rs
       │   └── skill/adapter
       │       ├── storage.rs 发现与目录读取
       │       └── detail.rs  有界文本读取与 frontmatter 解析
+      ├── mcp.rs             注册模型、目录与 probe gate
+      │   ├── adapter.rs     闭合的客户端配置发现 seam
+      │   │   ├── common.rs  归一化与脱敏
+      │   │   ├── storage.rs 有界配置 I/O
+      │   │   ├── codex.rs / json_clients.rs / goose.rs
+      │   │   └── plugins.rs 已启用 Plugin 发现与路径范围
+      │   └── probe.rs       显式协议元数据发现
       ├── tui
       │   ├── agent_launcher
+      │   ├── mcp
       │   ├── session
       │   └── skill
       ├── settings.rs
@@ -33,6 +41,13 @@ Provider Session 通过闭合枚举形成 adapter seam。内置 Provider 都在�
 Skill Catalog 是 Skill 发现和预览的文件系统 seam。TUI 只消费 Catalog 结果和已
 缓存的目录条目，不直接读取任意路径。
 
+MCP Catalog 同样把公共注册元数据与私有连接材料分开。Adapter 在 scan 时只读取与
+归一化；只有调用方显式要求 live probe 后，raw command、env、header 与 URL 值才能
+进入 `probe.rs`。
+
+MCP TUI 负责搜索、选择、详情渲染缓存和有界 Probe 工作线程。工作线程仍通过
+`McpCatalog` 回调，不接收也不重建 Adapter 的私有连接值。
+
 ## 安全不变量
 
 - 原生恢复命令必须分别构造程序和 argv，绝不调用 Shell。
@@ -43,6 +58,11 @@ Skill Catalog 是 Skill 发现和预览的文件系统 seam。TUI 只消费 Cata
 - 删除前验证 ID、规范路径和 Provider 根目录包含关系。
 - 不估算 Token 成本，也不虚构单次 Tool Token。
 - 自定义 Agent 不允许猜测 Session 目录。
+- 静态 MCP scan 绝不启动进程或访问 Server。
+- MCP probe 不调用 Tool、不读取 Resource、不展开 Prompt。
+- MCP 发现不得调用 Shell 或动态凭据 helper。
+- MCP 敏感值必须保持私有；只序列化脱敏目标以及 binding 名称/来源。
+- Server 描述、schema 与 safety annotation 都按不可信数据处理。
 
 ## 增加 Provider 支持
 
@@ -54,6 +74,18 @@ Skill Catalog 是 Skill 发现和预览的文件系统 seam。TUI 只消费 Cata
 6. 更新 README Provider 矩阵和相关文档。
 
 不要仅为了增加编译期内置 Provider 就引入运行时注册或 `dyn Trait`。
+
+## 增加 MCP 客户端支持
+
+1. 扩展 `mcp/adapter.rs` 中的闭合发现序列。
+2. 原生解析放在单一职责 Adapter，并通过 `mcp/adapter/common.rs` 归一化。
+3. 保持可序列化 `McpRegistration` 与私有 `McpConnection` 分离，凭据值绝不能进入
+   公共模型。
+4. 为每种原生来源/scope、歧义、未知字段、脱敏、环境展开与错误 transport 增加
+   接口测试。
+5. Live transport 只能放进 `mcp/probe.rs`，并保持显式 opt-in、时间/数量/分页
+   上限、错误脱敏与零 Tool 调用。
+6. 更新 [MCP 来源与元数据矩阵](mcp_CN.md)。
 
 ## 验证
 

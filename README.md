@@ -14,9 +14,9 @@
   English | <a href="README_CN.md">简体中文</a>
 </p>
 
-`mena` is a local-first CLI for launching coding agents, browsing their native
-saved sessions, and inspecting installed Agent Skills. It runs without a
-daemon, account, or remote data store.
+`mena` is a local-first CLI for launching coding agents, browsing native saved
+sessions, inspecting Agent Skills, and auditing MCP registrations. It runs
+without a daemon, account, or remote data store.
 
 ## Install
 
@@ -43,6 +43,8 @@ mena sessions                 # browse saved sessions
 mena ss --provider cursor     # filter sessions by provider
 mena skills                   # browse installed Agent Skills
 mena sk inspect ponytail      # inspect one uniquely named Skill
+mena mcp                      # interactively browse MCP registrations
+mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
 ```
 
 | Command | Purpose |
@@ -50,21 +52,24 @@ mena sk inspect ponytail      # inspect one uniquely named Skill
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena sessions` / `mena ss` | Search, inspect, resume, export, and delete sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
+| `mena mcp` | Search, inspect, and explicitly probe MCP registrations |
 | `mena config init` | Create `~/.config/mena/config.toml` |
 
 ## Provider support
 
-| Provider | Launch | Saved sessions |
-|---|:---:|:---:|
-| Claude Code | ✓ | ✓ |
-| Codex | ✓ | ✓ |
-| Gemini CLI | ✓ | ✓ |
-| OpenCode | ✓ | ✓ |
-| Pi | ✓ | ✓ |
-| Oh My Pi | ✓ | ✓ |
-| Cursor Agent | ✓ | ✓ |
-| Goose | ✓ | — |
-| Custom configuration | ✓ | — |
+| Provider | Launch | Sessions | MCP config |
+|---|:---:|:---:|:---:|
+| Claude Code | ✓ | ✓ | ✓ |
+| Codex | ✓ | ✓ | ✓ |
+| Gemini CLI | ✓ | ✓ | ✓ |
+| OpenCode | ✓ | ✓ | ✓ |
+| Pi | ✓ | ✓ | adapter¹ |
+| Oh My Pi | ✓ | ✓ | ✓ |
+| Cursor Agent | ✓ | ✓ | ✓ |
+| Goose | ✓ | — | ✓ |
+| Custom configuration | ✓ | — | — |
+
+¹ Pi entries are discovered only when `pi-mcp-adapter` is installed.
 
 Custom agents and Goose do not have a generic session catalog. `mena` returns
 an explicit unsupported result instead of guessing provider-owned paths.
@@ -73,6 +78,7 @@ an explicit unsupported result instead of guessing provider-owned paths.
 
 - [Session browser, metrics, export, and deletion](docs/sessions.md)
 - [Agent Skill discovery and browser](docs/skills.md)
+- [MCP catalog, metadata, sources, and safety](docs/mcp.md)
 - [Configuration](docs/configuration.md)
 - [Architecture and development](docs/development.md)
 
@@ -82,6 +88,8 @@ an explicit unsupported result instead of guessing provider-owned paths.
 - Usage and cost are shown only when persisted by the provider; values are
   never inferred from public prices.
 - Resume uses program-plus-argv execution, never a shell.
+- The MCP browser starts from static configuration. Only `p` or `--probe`
+  starts stdio or contacts HTTP; probes never call tools or read resources.
 - Live-session association requires provider-native evidence. Uncertain cases
   fail closed for deletion.
 - Session deletion validates identifiers, canonical paths, symlink containment,

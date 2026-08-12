@@ -14,8 +14,8 @@
   <a href="README.md">English</a> | 简体中文
 </p>
 
-`mena` 是一个本地优先的 CLI，用来启动编码 Agent、浏览其原生保存的 Session，
-以及检查已安装的 Agent Skill。无需守护进程、账号或远程数据存储。
+`mena` 是一个本地优先的 CLI，用来启动编码 Agent、浏览原生 Session、检查
+Agent Skill，以及审计 MCP 注册。无需守护进程、账号或远程数据存储。
 
 ## 安装
 
@@ -42,6 +42,8 @@ mena sessions                 # 浏览已保存 Session
 mena ss --provider cursor     # 按 Provider 筛选 Session
 mena skills                   # 浏览已安装的 Agent Skill
 mena sk inspect ponytail      # 检查唯一命名的 Skill
+mena mcp                      # 交互浏览 MCP 注册
+mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 ```
 
 | 命令 | 用途 |
@@ -49,21 +51,24 @@ mena sk inspect ponytail      # 检查唯一命名的 Skill
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
 | `mena sessions` / `mena ss` | 搜索、检查、恢复、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
+| `mena mcp` | 搜索、检查并显式探测 MCP 注册 |
 | `mena config init` | 创建 `~/.config/mena/config.toml` |
 
 ## Provider 支持
 
-| Provider | 启动 | 已保存 Session |
-|---|:---:|:---:|
-| Claude Code | ✓ | ✓ |
-| Codex | ✓ | ✓ |
-| Gemini CLI | ✓ | ✓ |
-| OpenCode | ✓ | ✓ |
-| Pi | ✓ | ✓ |
-| Oh My Pi | ✓ | ✓ |
-| Cursor Agent | ✓ | ✓ |
-| Goose | ✓ | — |
-| 自定义配置 | ✓ | — |
+| Provider | 启动 | Session | MCP 配置 |
+|---|:---:|:---:|:---:|
+| Claude Code | ✓ | ✓ | ✓ |
+| Codex | ✓ | ✓ | ✓ |
+| Gemini CLI | ✓ | ✓ | ✓ |
+| OpenCode | ✓ | ✓ | ✓ |
+| Pi | ✓ | ✓ | adapter¹ |
+| Oh My Pi | ✓ | ✓ | ✓ |
+| Cursor Agent | ✓ | ✓ | ✓ |
+| Goose | ✓ | — | ✓ |
+| 自定义配置 | ✓ | — | — |
+
+¹ 仅在安装 `pi-mcp-adapter` 后发现 Pi 条目。
 
 自定义 Agent 和 Goose 没有通用 Session 目录。`mena` 会明确返回不支持，而不会
 猜测 Provider 自己的存储路径。
@@ -72,6 +77,7 @@ mena sk inspect ponytail      # 检查唯一命名的 Skill
 
 - [Session 浏览、指标、导出与删除](docs/sessions_CN.md)
 - [Agent Skill 发现与浏览](docs/skills_CN.md)
+- [MCP 目录、元数据、来源与安全边界](docs/mcp_CN.md)
 - [配置](docs/configuration_CN.md)
 - [架构与开发](docs/development_CN.md)
 
@@ -80,6 +86,8 @@ mena sk inspect ponytail      # 检查唯一命名的 Skill
 - Session 数据始终保留在各 Provider 的原生本地存储中。
 - 只有 Provider 持久化的用量和成本才会展示；不会根据公开价格推算。
 - 恢复命令使用“程序 + argv”，绝不调用 Shell。
+- MCP 浏览器初始只展示静态配置；只有按 `p` 或使用 `--probe` 才启动 stdio 或访问
+  HTTP，且 probe 不调用工具、不读取资源。
 - 运行进程与 Session 的关联必须来自 Provider 原生证据；不确定时删除操作按
   fail-closed 处理。
 - 删除前会验证 Session ID、规范路径、符号链接范围和运行进程保护状态。

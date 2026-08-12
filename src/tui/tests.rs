@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::AgentKind;
@@ -12,13 +12,31 @@ use ratatui::style::{Color, Modifier};
 use ratatui::widgets::Cell;
 
 use super::common::*;
+use super::mcp::{app::McpApp, render::draw_mcp};
 use super::session::*;
+use crate::mcp::{McpRegistration, McpSourceFormat, McpTimeouts, McpToolPolicy, McpTransport};
 use crate::session::{
     AgentSession, DeletionSummary, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
     SessionMessageKind, SessionMessageMetrics, TokenUsage,
 };
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::tui::skill::app::{SkillRow, SkillsApp};
+
+#[test]
+fn mcp_browser_renders_a_searchable_list_and_static_detail() {
+    let mut app = McpApp::new(vec![fixture_mcp_registration("codegraph")]);
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+
+    terminal
+        .draw(|frame| draw_mcp(frame, &mut app))
+        .expect("draw MCP browser");
+
+    let screen = buffer_text(terminal.backend().buffer(), 100, 24);
+    assert!(screen.contains("MENA MCP"));
+    assert!(screen.contains("codegraph"));
+    assert!(screen.contains("Runtime metadata: not probed"));
+    assert!(screen.contains("p Probe"));
+}
 
 #[test]
 fn session_layout_displays_titles_and_filters_by_them() {
@@ -1292,6 +1310,34 @@ fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> Str
         output.push('\n');
     }
     output
+}
+
+fn fixture_mcp_registration(name: &str) -> McpRegistration {
+    McpRegistration {
+        selector: format!("codex:user:{name}"),
+        name: name.to_owned(),
+        provider: "codex".to_owned(),
+        scope: "user".to_owned(),
+        source: PathBuf::from("/Users/test/.codex/config.toml"),
+        source_format: McpSourceFormat::Toml,
+        transport: McpTransport::Stdio,
+        enabled: true,
+        valid: true,
+        display_name: Some("CodeGraph".to_owned()),
+        description: Some("Repository graph server".to_owned()),
+        command: Some("codegraph-mcp".to_owned()),
+        args: Vec::new(),
+        url: None,
+        cwd: None,
+        timeouts: McpTimeouts::default(),
+        authentication: Vec::new(),
+        environment: Vec::new(),
+        headers: Vec::new(),
+        tool_policy: McpToolPolicy::default(),
+        options: BTreeMap::new(),
+        extra_fields: Vec::new(),
+        warnings: Vec::new(),
+    }
 }
 
 fn find_text(

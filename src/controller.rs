@@ -4,14 +4,97 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::mcp::{McpCatalog, McpProbeStatus};
 use crate::process::{AgentKind, discover_live_agents};
 use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
 use crate::settings::{CustomAgentSettings, Settings};
 use crate::skill::SkillCatalog;
 use crate::tui;
 pub use crate::ui;
-use crate::view::{render_session_table, render_skill_detail, render_skill_table};
-use crate::{AgentLaunchArgs, SessionsArgs, SkillSubcommand, SkillsArgs};
+use crate::view::{
+    render_mcp_detail, render_mcp_table, render_session_table, render_skill_detail,
+    render_skill_table,
+};
+use crate::{AgentLaunchArgs, McpArgs, McpSubcommand, SessionsArgs, SkillSubcommand, SkillsArgs};
+
+/// Execute `mena mcp` without contacting any configured server unless an
+/// inspect request includes `--probe` or the user explicitly presses `p` in
+/// the interactive browser.
+///
+/// # Errors
+///
+/// Returns an error when a configuration is invalid, a selector is ambiguous,
+/// or a requested live probe cannot be performed.
+pub fn run_mcp(args: &McpArgs) -> Result<()> {
+    let home = dirs::home_dir();
+    let current_dir = std::env::current_dir().context("could not resolve current directory")?;
+    let catalog = McpCatalog::scan(home.as_deref(), Some(&current_dir))?;
+    match &args.command {
+        Some(McpSubcommand::Inspect {
+            name,
+            probe,
+            timeout,
+            json,
+        }) => {
+            let detail = if *probe {
+                catalog.inspect_with_probe(
+                    name,
+                    args.provider.as_deref(),
+                    args.scope.as_deref(),
+                    args.source.as_deref(),
+                    *timeout,
+                )?
+            } else {
+                catalog.inspect(
+                    name,
+                    args.provider.as_deref(),
+                    args.scope.as_deref(),
+                    args.source.as_deref(),
+                )?
+            };
+            let probe_failure = detail.probe.as_ref().and_then(|probe| {
+                (!matches!(
+                    probe.status,
+                    McpProbeStatus::Success | McpProbeStatus::Partial
+                ))
+                .then(|| {
+                    probe
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| probe.status.to_string())
+                })
+            });
+            if *json || args.json {
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                print!("{}", render_mcp_detail(&detail));
+            }
+            if let Some(error) = probe_failure {
+                bail!("live MCP probe did not succeed: {error}");
+            }
+        }
+        None => {
+            let registrations = catalog.select(
+                args.provider.as_deref(),
+                args.scope.as_deref(),
+                args.source.as_deref(),
+            )?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&registrations)?);
+            } else if registrations.is_empty() {
+                ui::info("no MCP registrations discovered");
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                let registrations = registrations.into_iter().cloned().collect();
+                tui::manage_mcp(registrations, move |registration| {
+                    catalog.inspect_registration_with_probe(registration, 10)
+                })?;
+            } else {
+                print!("{}", render_mcp_table(&registrations));
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir().context("could not resolve current working directory")?;

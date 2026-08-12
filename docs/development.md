@@ -18,8 +18,16 @@ main.rs
       │   └── skill/adapter
       │       ├── storage.rs discovery and directory reads
       │       └── detail.rs  bounded text and frontmatter parsing
+      ├── mcp.rs             registration model, catalog, and probe gate
+      │   ├── adapter.rs     closed client-config discovery seam
+      │   │   ├── common.rs  normalization and redaction
+      │   │   ├── storage.rs bounded configuration I/O
+      │   │   ├── codex.rs / json_clients.rs / goose.rs
+      │   │   └── plugins.rs enabled-plugin discovery and containment
+      │   └── probe.rs       explicit protocol metadata discovery
       ├── tui
       │   ├── agent_launcher
+      │   ├── mcp
       │   ├── session
       │   └── skill
       ├── settings.rs
@@ -35,6 +43,15 @@ The Skill catalog is the filesystem seam for Skill discovery and preview. TUI
 code consumes catalog results and cached directory entries rather than reading
 arbitrary paths itself.
 
+The MCP catalog similarly separates public registration metadata from private
+connection material. Adapters only read and normalize during a scan. The raw
+command, environment, header, and URL values can cross into `probe.rs` only
+after the caller explicitly requests a live probe.
+
+The MCP TUI owns search, selection, cached detail rendering, and its bounded
+probe worker. The worker calls back through `McpCatalog`; it does not receive or
+reconstruct private adapter connection values.
+
 ## Safety invariants
 
 - Construct native resume program and argv separately; never invoke a shell.
@@ -46,6 +63,12 @@ arbitrary paths itself.
 - Validate IDs, canonical paths, and provider-root containment before deletion.
 - Never estimate token cost or unavailable per-call Tool token values.
 - Custom agents have no guessed session catalog.
+- Static MCP scans never start a process or contact a server.
+- MCP probes never invoke tools, read resources, or render prompts.
+- Never invoke a shell or dynamic credential helper for MCP discovery.
+- Keep secret-bearing MCP values private; serialize only redacted targets and
+  binding names/sources.
+- Treat server descriptions, schemas, and safety annotations as untrusted data.
 
 ## Adding provider support
 
@@ -59,6 +82,19 @@ arbitrary paths itself.
 
 Do not add runtime registration or `dyn Trait` merely to support another
 compiled-in provider.
+
+## Adding MCP client support
+
+1. Extend the closed discovery sequence in `mcp/adapter.rs`.
+2. Keep native parsing in a focused adapter and normalize through
+   `mcp/adapter/common.rs`.
+3. Preserve the split between serializable `McpRegistration` and private
+   `McpConnection`; never put credential values in a public model.
+4. Add interface tests for every native source/scope, ambiguity, unknown
+   fields, redaction, environment expansion, and malformed transport.
+5. Add live transport support only in `mcp/probe.rs`, with explicit opt-in,
+   time/item/page bounds, sanitized errors, and zero tool calls.
+6. Update [the MCP source and metadata matrix](mcp.md).
 
 ## Verification
 
