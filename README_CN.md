@@ -38,6 +38,7 @@ mise run build
 mena agent                    # 在当前目录选择并启动 Agent
 mena ag claude                # 启动 Claude Code
 mena ag codex --resume        # 恢复当前项目最近的 Codex Session
+mena ps                       # 列出运行中的编码 Agent 进程
 mena sessions                 # 浏览已保存 Session
 mena ss --provider cursor     # 按 Provider 筛选 Session
 mena skills                   # 浏览已安装的 Agent Skill
@@ -50,6 +51,7 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 | 命令 | 用途 |
 |---|---|
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
+| `mena ps` | 列出运行中的编码 Agent 进程 |
 | `mena sessions` / `mena ss` | 搜索、检查、恢复、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
 | `mena mcp` | 浏览、打开/编辑配置、检查并显式探测 MCP 注册 |
@@ -87,6 +89,8 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 - Session 数据始终保留在各 Provider 的原生本地存储中。
 - 只有 Provider 持久化的用量和成本才会展示；不会根据公开价格推算。
 - 恢复命令使用“程序 + argv”，绝不调用 Shell。
+- `mena ps` 是一次性只读的 OS 进程快照；其中的状态不是推断出的 Agent 生命周期，
+  `--verbose` 会打印可能包含密钥的完整命令行。
 - MCP 浏览器初始只展示静态配置；只有按 `p` 或使用 `--probe` 才启动 stdio 或访问
   HTTP，且 probe 不调用工具、不读取资源。
 - 运行进程与 Session 的关联必须来自 Provider 原生证据；不确定时删除操作按

@@ -7,7 +7,7 @@ use mena::AgentArgs;
     name = "mena",
     author,
     version,
-    about = "Launch developer agents and inspect local sessions, skills, and MCP servers"
+    about = "Launch developer agents and inspect running processes, sessions, skills, and MCP servers"
 )]
 struct Cli {
     #[command(flatten)]
@@ -61,6 +61,8 @@ mod tests {
             vec!["mena", "ag", "goose"],
             vec!["mena", "ag", "omp", "--resume"],
             vec!["mena", "ag", "codex", "--session", "session-123"],
+            vec!["mena", "ps"],
+            vec!["mena", "ps", "--json"],
             vec!["mena", "sessions"],
             vec!["mena", "ss"],
             vec![
@@ -155,6 +157,18 @@ mod tests {
         };
         assert_eq!(args.provider.as_deref(), Some("claude"));
         assert!(args.fresh);
+    }
+
+    #[test]
+    fn ps_parses_json_and_verbose_output() {
+        let cli =
+            Cli::try_parse_from(["mena", "ps", "--json", "--verbose"]).expect("ps should parse");
+
+        let AgentCommand::Ps(args) = cli.args.command else {
+            panic!("ps did not resolve to process listing");
+        };
+        assert!(args.json);
+        assert!(args.verbose);
     }
 
     #[test]

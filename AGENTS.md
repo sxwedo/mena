@@ -12,6 +12,7 @@ The user-facing command is `mena`:
 ```sh
 mena agent [provider] [--fresh] [--resume] [--session <id>]
 mena ag [provider]
+mena ps [--json] [--verbose]
 mena sessions
 mena skills [--provider <name>] [--scope <scope>]
 mena skills inspect <name>

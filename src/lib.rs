@@ -40,6 +40,8 @@ pub enum AgentCommand {
     /// Select and launch a developer agent process in the current directory
     #[command(visible_alias = "ag")]
     Agent(AgentLaunchArgs),
+    /// Show running developer-agent processes
+    Ps(PsArgs),
     /// Manage mena configuration
     Config {
         #[command(subcommand)]
@@ -74,6 +76,16 @@ pub struct AgentLaunchArgs {
     /// Resume a specific session by ID or prefix in the current directory
     #[arg(long)]
     pub session: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct PsArgs {
+    /// Output structured JSON instead of a human-readable table
+    #[arg(long)]
+    pub json: bool,
+    /// Show full command lines (may contain secrets; use with care)
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -179,6 +191,7 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
             }
         },
         AgentCommand::Agent(args) => controller::run_agent(&args, settings),
+        AgentCommand::Ps(args) => controller::run_ps(&args, settings),
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
         AgentCommand::Skills(args) => controller::run_skills(&args, settings),
         AgentCommand::Mcp(args) => controller::run_mcp(&args),
@@ -187,10 +200,12 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use super::{AgentKind, ProcessSnapshot};
+    use super::{AgentArgs, AgentCommand, AgentKind, ProcessSnapshot, PsArgs, Settings};
     use crate::process::recognize_agent;
+    use crate::settings::{AgentSettings, CustomAgentSettings};
 
     fn process(executable: &str, command: &[&str]) -> ProcessSnapshot {
         ProcessSnapshot {
@@ -269,5 +284,34 @@ mod tests {
             )),
             Some(AgentKind::OhMyPi)
         );
+    }
+
+    #[test]
+    fn ps_rejects_invalid_custom_agent_configuration_before_discovery() {
+        let settings = Settings {
+            agent: AgentSettings {
+                custom: BTreeMap::from([(
+                    "codex".to_owned(),
+                    CustomAgentSettings {
+                        executables: vec!["other".to_owned()],
+                        command_contains: Vec::new(),
+                        resume: Vec::new(),
+                    },
+                )]),
+            },
+            ..Settings::default()
+        };
+        let error = super::run(
+            AgentArgs {
+                command: AgentCommand::Ps(PsArgs {
+                    json: false,
+                    verbose: false,
+                }),
+            },
+            &settings,
+        )
+        .expect_err("invalid custom configuration should fail before process discovery");
+
+        assert!(error.to_string().contains("collides with a built-in"));
     }
 }

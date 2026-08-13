@@ -3,10 +3,43 @@ use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 use crate::mcp::{McpDetail, McpProbe, McpRegistration, McpServerCapabilities};
+use crate::process::LiveAgent;
 use crate::session::{
     AgentSession, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage, ToolMetrics,
 };
 use crate::skill::{AgentSkill, SkillDetail};
+
+pub fn render_process_table(agents: &[LiveAgent], verbose: bool) -> String {
+    if agents.is_empty() {
+        return "No running developer-agent processes found.\n".to_owned();
+    }
+
+    let mut headers = vec!["KIND", "PID", "CWD", "RUNTIME", "STATUS"];
+    if verbose {
+        headers.push("COMMAND");
+    }
+    let rows = agents
+        .iter()
+        .map(|agent| {
+            let mut row = vec![
+                agent.kind.slug().to_owned(),
+                agent.process.pid.to_string(),
+                agent
+                    .process
+                    .cwd
+                    .as_deref()
+                    .map_or_else(|| "-".to_owned(), |cwd| cwd.display().to_string()),
+                format_duration(agent.process.run_time),
+                agent.process.status.clone(),
+            ];
+            if verbose {
+                row.push(agent.process.command.join(" "));
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    strip_terminal_controls(&render_table(&headers, &rows))
+}
 
 pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) -> String {
     if sessions.is_empty() {
@@ -731,11 +764,12 @@ mod tests {
     use super::{
         format_count, format_duration_millis, format_metric_error, format_response_header_metrics,
         format_response_summary, format_token_breakdown, format_tool_summary, render_mcp_detail,
-        render_mcp_table,
+        render_mcp_table, render_process_table,
     };
     use crate::mcp::{
         McpDetail, McpRegistration, McpSourceFormat, McpTimeouts, McpToolPolicy, McpTransport,
     };
+    use crate::process::{AgentKind, LiveAgent, ProcessSnapshot};
     use crate::session::{MetricError, ResponseMetrics, TokenUsage, ToolMetrics};
 
     #[test]
@@ -745,6 +779,43 @@ mod tests {
         assert_eq!(format_duration_millis(12_345), "12.3s");
         assert_eq!(format_duration_millis(125_450), "2m 05.5s");
         assert_eq!(format_duration_millis(3_725_450), "1h 02m 05.5s");
+    }
+
+    #[test]
+    fn process_table_hides_commands_unless_verbose() {
+        let agent = LiveAgent {
+            kind: AgentKind::Codex,
+            process: ProcessSnapshot {
+                pid: 42,
+                parent_pid: Some(1),
+                executable: PathBuf::from("/opt/bin/codex"),
+                command: vec!["codex".to_owned(), "--api-key=secret".to_owned()],
+                cwd: Some(PathBuf::from("/work/project")),
+                started_at: 1,
+                run_time: 125,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                status: "sleeping".to_owned(),
+            },
+        };
+
+        let default = render_process_table(std::slice::from_ref(&agent), false);
+        assert!(default.contains("codex"));
+        assert!(default.contains("2m 05s"));
+        assert!(!default.contains("COMMAND"));
+        assert!(!default.contains("secret"));
+
+        let verbose = render_process_table(&[agent], true);
+        assert!(verbose.contains("COMMAND"));
+        assert!(verbose.contains("codex --api-key=secret"));
+    }
+
+    #[test]
+    fn empty_process_table_is_a_success_message() {
+        assert_eq!(
+            render_process_table(&[], false),
+            "No running developer-agent processes found.\n"
+        );
     }
 
     #[test]

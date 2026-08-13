@@ -279,11 +279,22 @@ pub fn discover_live_agents_with_cpu(
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
     }
 
-    let mut agents: Vec<_> = system
-        .processes()
-        .iter()
-        .map(|(pid, process)| {
-            let snapshot = snapshot(*pid, process);
+    recognize_live_agents(
+        system
+            .processes()
+            .iter()
+            .map(|(pid, process)| snapshot(*pid, process)),
+        custom,
+    )
+}
+
+fn recognize_live_agents(
+    snapshots: impl IntoIterator<Item = ProcessSnapshot>,
+    custom: &BTreeMap<String, CustomAgentSettings>,
+) -> Result<Vec<LiveAgent>> {
+    let mut agents: Vec<_> = snapshots
+        .into_iter()
+        .map(|snapshot| {
             recognize_agent_with_custom(&snapshot, custom).map(|kind| {
                 kind.map(|kind| LiveAgent {
                     kind,
@@ -447,8 +458,26 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use super::{AgentKind, ProcessSnapshot, recognize_agent_with_custom, validate_custom_agents};
+    use super::{
+        AgentKind, ProcessSnapshot, recognize_agent_with_custom, recognize_live_agents,
+        validate_custom_agents,
+    };
     use crate::settings::CustomAgentSettings;
+
+    fn process(pid: u32, executable: &str, command: &[&str]) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            parent_pid: None,
+            executable: PathBuf::from(executable),
+            command: command.iter().map(ToString::to_string).collect(),
+            cwd: Some(PathBuf::from("/work/project")),
+            started_at: 1,
+            run_time: 2,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            status: "sleeping".to_owned(),
+        }
+    }
 
     #[test]
     fn custom_recognizers_require_executable_and_all_command_markers() {
@@ -465,26 +494,38 @@ mod tests {
             },
         )]);
         validate_custom_agents(&custom).expect("valid custom agent");
-        let process = ProcessSnapshot {
-            pid: 7,
-            parent_pid: None,
-            executable: PathBuf::from("/usr/bin/node"),
-            command: vec![
-                "node".to_owned(),
-                "my-agent.js".to_owned(),
-                "--daemon".to_owned(),
-            ],
-            cwd: None,
-            started_at: 1,
-            run_time: 1,
-            cpu_percent: 0.0,
-            memory_bytes: 0,
-            status: "sleeping".to_owned(),
-        };
+        let process = process(7, "/usr/bin/node", &["node", "my-agent.js", "--daemon"]);
         assert_eq!(
             recognize_agent_with_custom(&process, &custom).expect("recognition"),
             Some(AgentKind::Custom("my_agent".to_owned()))
         );
+    }
+
+    #[test]
+    fn live_agent_snapshots_recognize_built_in_and_custom_processes() {
+        let custom = BTreeMap::from([(
+            "my_agent".to_owned(),
+            CustomAgentSettings {
+                executables: vec!["node".to_owned()],
+                command_contains: vec!["my-agent.js".to_owned()],
+                resume: Vec::new(),
+            },
+        )]);
+        let agents = recognize_live_agents(
+            [
+                process(9, "/usr/bin/other", &["other"]),
+                process(7, "/opt/bin/codex", &["codex"]),
+                process(3, "/usr/bin/node", &["node", "my-agent.js"]),
+            ],
+            &custom,
+        )
+        .expect("live agent recognition");
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].process.pid, 3);
+        assert_eq!(agents[0].kind, AgentKind::Custom("my_agent".to_owned()));
+        assert_eq!(agents[1].process.pid, 7);
+        assert_eq!(agents[1].kind, AgentKind::Codex);
     }
 
     #[test]

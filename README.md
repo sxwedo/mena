@@ -39,6 +39,7 @@ mise run build
 mena agent                    # choose and launch an agent in the current directory
 mena ag claude                # launch Claude Code
 mena ag codex --resume        # resume the latest Codex session in this project
+mena ps                       # list running coding-agent processes
 mena sessions                 # browse saved sessions
 mena ss --provider cursor     # filter sessions by provider
 mena skills                   # browse installed Agent Skills
@@ -51,6 +52,7 @@ mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
 | Command | Purpose |
 |---|---|
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
+| `mena ps` | List running coding-agent processes |
 | `mena sessions` / `mena ss` | Search, inspect, resume, export, and delete sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse, open/edit configuration, inspect, and explicitly probe MCP registrations |
@@ -89,6 +91,8 @@ an explicit unsupported result instead of guessing provider-owned paths.
 - Usage and cost are shown only when persisted by the provider; values are
   never inferred from public prices.
 - Resume uses program-plus-argv execution, never a shell.
+- `mena ps` is a one-shot, read-only OS process snapshot. Its status is not an
+  inferred agent lifecycle; `--verbose` prints full command lines that may contain secrets.
 - The MCP browser starts from static configuration. Only `p` or `--probe`
   starts stdio or contacts HTTP; probes never call tools or read resources.
 - Live-session association requires provider-native evidence. Uncertain cases

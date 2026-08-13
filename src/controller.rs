@@ -6,17 +6,19 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::mcp::{McpCatalog, McpProbeStatus};
-use crate::process::{AgentKind, discover_live_agents};
+use crate::process::{AgentKind, LiveAgent, discover_live_agents};
 use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
 use crate::settings::{CustomAgentSettings, Settings};
 use crate::skill::SkillCatalog;
 use crate::tui;
 pub use crate::ui;
 use crate::view::{
-    render_mcp_detail, render_mcp_table, render_session_table, render_skill_detail,
-    render_skill_table,
+    render_mcp_detail, render_mcp_table, render_process_table, render_session_table,
+    render_skill_detail, render_skill_table,
 };
-use crate::{AgentLaunchArgs, McpArgs, McpSubcommand, SessionsArgs, SkillSubcommand, SkillsArgs};
+use crate::{
+    AgentLaunchArgs, McpArgs, McpSubcommand, PsArgs, SessionsArgs, SkillSubcommand, SkillsArgs,
+};
 
 /// Execute `mena mcp` without contacting any configured server unless an
 /// inspect request includes `--probe` or the user explicitly presses `p` in
@@ -148,6 +150,25 @@ pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {
         }
     } else {
         print_agent_launch_help(custom, &cwd_sessions);
+    }
+    Ok(())
+}
+
+/// Print a one-shot, read-only snapshot of recognized agent processes.
+///
+/// # Errors
+///
+/// Returns an error when process discovery or JSON serialization fails.
+pub fn run_ps(args: &PsArgs, settings: &Settings) -> Result<()> {
+    let agents = discover_live_agents(&settings.agent.custom)?;
+    if args.json {
+        let values: Vec<_> = agents
+            .iter()
+            .map(|agent| process_list_json(agent, args.verbose))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&values)?);
+    } else {
+        print!("{}", render_process_table(&agents, args.verbose));
     }
     Ok(())
 }
@@ -567,4 +588,18 @@ fn session_list_json(session: &AgentSession) -> Value {
         "started_at": session.started_at,
         "updated_at_unix": session.updated_at,
     })
+}
+
+fn process_list_json(agent: &LiveAgent, verbose: bool) -> Value {
+    let mut value = serde_json::json!({
+        "kind": agent.kind.slug(),
+        "pid": agent.process.pid,
+        "cwd": agent.process.cwd,
+        "run_time_seconds": agent.process.run_time,
+        "status": agent.process.status,
+    });
+    if verbose {
+        value["command"] = Value::String(agent.process.command.join(" "));
+    }
+    value
 }
