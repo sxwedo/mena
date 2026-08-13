@@ -1,7 +1,6 @@
 # Architecture and development
 
-`mena` is a standalone Rust 2024 crate pinned to Rust 1.96.1. It must not gain a
-path dependency on the clix workspace from which it was originally extracted.
+`mena` is a standalone Rust 2024 crate pinned to Rust 1.96.1.
 
 ## Data flow
 

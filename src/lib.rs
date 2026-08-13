@@ -58,11 +58,7 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, Subcommand)]
 pub enum ConfigCommand {
     /// Create ~/.config/mena/config.toml with restrictive permissions
-    Init {
-        /// Import [agent.custom] entries from ~/.config/clix/config.toml
-        #[arg(long)]
-        import_clix: bool,
-    },
+    Init,
 }
 #[derive(Debug, Clone, Args)]
 pub struct AgentLaunchArgs {
@@ -170,8 +166,8 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
     }
     match args.command {
         AgentCommand::Config { command } => match command {
-            ConfigCommand::Init { import_clix } => {
-                let path = settings::ensure_default_config(import_clix)?;
+            ConfigCommand::Init => {
+                let path = settings::ensure_default_config()?;
                 ui::success(format!("created {} (mode 0600)", path.display()));
                 Ok(())
             }

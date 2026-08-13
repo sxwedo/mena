@@ -5,9 +5,7 @@ This file provides guidance to AI coding agents working in this repository.
 ## Overview
 
 `mena` is a standalone, local-first Rust CLI for discovering, inspecting, and
-controlling developer-agent processes and their native persisted sessions. It
-was extracted from `clix-agent`; it must remain independent of the clix
-workspace and must not acquire a path dependency back to it.
+controlling developer-agent processes and their native persisted sessions.
 
 The user-facing command is `mena`:
 
@@ -19,7 +17,7 @@ mena skills [--provider <name>] [--scope <scope>]
 mena skills inspect <name>
 mena mcp [--provider <client>] [--scope <scope>] [--source <path>] [--json]
 mena mcp inspect <name> [--probe] [--timeout <seconds>] [--json]
-mena config init [--import-clix]
+mena config init
 ```
 
 ## Verification
@@ -98,8 +96,8 @@ main.rs
 - `tui/` owns agent launch, session management, Skill and MCP browsing, search,
   detail views, and destructive-action confirmation. TUI modules must not
   bypass the session, Skill, or MCP catalog seams for provider-owned data.
-- `settings.rs` owns `~/.config/mena/config.toml`. Its optional clix importer is
-  a migration boundary only; runtime behavior must not depend on clix.
+- `settings.rs` owns `~/.config/mena/config.toml` and creates it atomically with
+  restrictive permissions.
 - `fs.rs` provides atomic, permission-preserving writes for native index repair.
 
 ## Safety invariants
@@ -141,8 +139,8 @@ command_contains = ["--agent-mode"]
 resume = ["my-agent", "resume", "{session}"]
 ```
 
-`mena config init --import-clix` may read the legacy clix config once to copy
-this section. Normal command execution reads mena configuration only.
+`mena config init` creates the default template without importing configuration
+from another application.
 
 ## Change guidelines
 

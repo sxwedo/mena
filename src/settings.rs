@@ -325,27 +325,22 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// Create the default config, optionally importing custom agents from clix.
+/// Create the default configuration file with restrictive permissions.
 ///
 /// # Errors
 ///
-/// Returns an error if the destination exists, the legacy config is unavailable
-/// or invalid, or the new private config cannot be written.
-pub fn ensure_default_config(import_clix: bool) -> Result<PathBuf> {
+/// Returns an error if the destination exists or the private configuration file
+/// cannot be created.
+pub fn ensure_default_config() -> Result<PathBuf> {
     let path = config_path();
     if path.exists() {
         bail!("config file already exists: {}", path.display());
     }
-    let contents = if import_clix {
-        render_imported_config()?
-    } else {
-        DEFAULT_CONFIG_TEMPLATE.to_owned()
-    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    write_private(&path, &contents)?;
+    write_private(&path, DEFAULT_CONFIG_TEMPLATE)?;
     Ok(path)
 }
 
@@ -355,33 +350,6 @@ fn config_base_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn legacy_clix_config_path() -> PathBuf {
-    config_base_dir().join("clix/config.toml")
-}
-
-fn render_imported_config() -> Result<String> {
-    let path = legacy_clix_config_path();
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read legacy clix config {}", path.display()))?;
-    render_imported_config_from(&contents, &path)
-}
-
-fn render_imported_config_from(contents: &str, path: &Path) -> Result<String> {
-    let settings = parse_settings(contents, path)?;
-    if settings.agent.custom.is_empty() {
-        bail!(
-            "legacy clix config contains no [agent.custom] entries: {}",
-            path.display()
-        );
-    }
-    let serialized = toml::to_string_pretty(&settings)
-        .context("failed to serialize imported custom-agent settings")?;
-    Ok(format!(
-        "# Imported from {} by `mena config init --import-clix`.\n\n{serialized}",
-        path.display()
-    ))
 }
 
 fn parse_settings(contents: &str, path: &Path) -> Result<Settings> {
@@ -409,9 +377,7 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use super::{ConfigColor, DEFAULT_CONFIG_TEMPLATE, Settings, render_imported_config_from};
+    use super::{ConfigColor, DEFAULT_CONFIG_TEMPLATE, Settings};
 
     #[test]
     fn default_template_is_valid_and_empty() {
@@ -440,39 +406,6 @@ resume = ["my-agent", "resume", "{session}"]
         assert_eq!(custom.executables, ["my-agent", "my-agent.exe"]);
         assert_eq!(custom.command_contains, ["--agent-mode"]);
         assert_eq!(custom.resume, ["my-agent", "resume", "{session}"]);
-    }
-
-    #[test]
-    fn clix_import_keeps_only_custom_agents() {
-        let source = r#"
-[github]
-token = "must-not-be-copied"
-
-[agent.custom.my_agent]
-executables = ["my-agent"]
-resume = ["my-agent", "resume", "{session}"]
-"#;
-        let imported = render_imported_config_from(source, Path::new("clix/config.toml"))
-            .expect("legacy custom agents should import");
-        assert!(imported.contains("[agent.custom.my_agent]"));
-        assert!(imported.contains("executables = [\"my-agent\"]"));
-        assert!(!imported.contains("must-not-be-copied"));
-        assert!(!imported.contains("[github]"));
-        assert!(!imported.contains("[ui]"));
-    }
-
-    #[test]
-    fn clix_import_requires_a_custom_agent() {
-        let error = render_imported_config_from(
-            "[github]\ntoken = \"ignored\"\n",
-            Path::new("clix/config.toml"),
-        )
-        .expect_err("empty legacy agent config should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("contains no [agent.custom] entries")
-        );
     }
 
     #[test]

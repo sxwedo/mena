@@ -37,9 +37,24 @@ mod tests {
     }
 
     #[test]
+    fn config_init_has_no_user_options() {
+        let command = Cli::command();
+        let config = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "config")
+            .expect("config command");
+        let init = config
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "init")
+            .expect("config init command");
+
+        assert_eq!(init.get_arguments().count(), 0);
+    }
+
+    #[test]
     fn documented_commands_parse() {
         for invocation in [
-            vec!["mena", "config", "init", "--import-clix"],
+            vec!["mena", "config", "init"],
             vec!["mena", "agent"],
             vec!["mena", "ag"],
             vec!["mena", "ag", "claude", "-n"],

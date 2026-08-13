@@ -1,7 +1,6 @@
 # 架构与开发
 
-`mena` 是独立的 Rust 2024 crate，固定使用 Rust 1.96.1。它虽然从 clix workspace
-迁出，但不能重新引入指向 clix 的路径依赖。
+`mena` 是独立的 Rust 2024 crate，固定使用 Rust 1.96.1。
 
 ## 数据流
 

@@ -9,15 +9,7 @@
 mena config init
 ```
 
-On Unix, the file is created with mode `0600` and is never overwritten. To copy
-only legacy `[agent.custom]` entries from clix once:
-
-```sh
-mena config init --import-clix
-```
-
-Normal command execution reads mena configuration only; the clix file is not a
-runtime dependency.
+On Unix, the file is created with mode `0600` and is never overwritten.
 
 ## Custom agents
 

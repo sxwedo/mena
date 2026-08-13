@@ -9,14 +9,7 @@
 mena config init
 ```
 
-Unix 下文件权限为 `0600`，已有文件绝不覆盖。若要一次性复制 clix 中的
-`[agent.custom]`：
-
-```sh
-mena config init --import-clix
-```
-
-正常运行只读取 mena 配置；clix 文件不是运行时依赖。
+Unix 下文件权限为 `0600`，已有文件绝不覆盖。
 
 ## 自定义 Agent
 
