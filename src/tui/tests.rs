@@ -23,38 +23,50 @@ use crate::settings::{ConfigColor, SessionDetailColorSettings};
 use crate::tui::skill::app::{SkillRow, SkillsApp};
 
 #[test]
-fn mcp_browser_renders_a_searchable_list_and_static_detail() {
-    let mut app = McpApp::new(vec![fixture_mcp_registration("codegraph")]);
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+fn mcp_browser_groups_clients_and_centers_action_hints() {
+    let codex = fixture_mcp_registration("codegraph");
+    let mut claude = fixture_mcp_registration("docs");
+    claude.provider = "claude".to_owned();
+    claude.selector = "claude:user:docs".to_owned();
+    let mut app = McpApp::new(vec![claude, codex]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
 
     terminal
         .draw(|frame| draw_mcp(frame, &mut app))
         .expect("draw MCP browser");
 
-    let screen = buffer_text(terminal.backend().buffer(), 100, 24);
+    let screen = buffer_text(terminal.backend().buffer(), 80, 24);
     assert!(screen.contains("MENA MCP"));
     assert!(screen.contains("codegraph"));
+    assert!(screen.contains("◆ CLAUDE · 1"));
+    assert!(screen.contains("◆ CODEX · 1"));
     assert!(screen.contains("Runtime metadata: not probed"));
     assert!(screen.contains("p Probe"));
+    assert!(screen.contains("d Delete"));
+    assert!(screen.contains("↵ Focus"));
+    assert!(screen.contains("q Back"));
+    let footer = screen.lines().last().expect("footer line");
+    let left_padding = footer.len() - footer.trim_start().len();
+    let right_padding = footer.len() - footer.trim_end().len();
+    assert!(left_padding.abs_diff(right_padding) <= 1);
 }
 
 #[test]
-fn mcp_browser_renders_the_basic_configuration_editor() {
+fn mcp_browser_renders_explicit_delete_confirmation() {
     let mut app = McpApp::new(vec![fixture_mcp_registration("codegraph")]);
-    app.begin_edit();
+    app.begin_delete();
     let mut terminal = Terminal::new(TestBackend::new(110, 28)).expect("test terminal");
 
     terminal
         .draw(|frame| draw_mcp(frame, &mut app))
-        .expect("draw MCP editor");
+        .expect("draw MCP delete confirmation");
 
     let screen = buffer_text(terminal.backend().buffer(), 110, 28);
-    assert!(screen.contains("Edit MCP basics: codex:user:codegraph"));
+    assert!(screen.contains("Delete MCP registration"));
+    assert!(screen.contains("codex:user:codegraph"));
     assert!(screen.contains("/Users/test/.codex/config.toml"));
-    assert!(screen.contains("Enabled"));
-    assert!(screen.contains("Command"));
-    assert!(screen.contains("Arguments (JSON array)"));
-    assert!(screen.contains("Ctrl+S Save"));
+    assert!(screen.contains("y Delete permanently"));
+    assert!(screen.contains("n/Esc Cancel"));
 }
 
 #[test]

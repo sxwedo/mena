@@ -20,7 +20,7 @@ main.rs
       ├── mcp.rs             注册模型、目录与 probe gate
       │   ├── adapter.rs     闭合的客户端配置发现 seam
       │   │   ├── common.rs  归一化与脱敏
-      │   │   ├── edit.rs    原生基础字段写回
+      │   │   ├── edit.rs    来源定位与原生配置变更
       │   │   ├── storage.rs 有界配置 I/O
       │   │   ├── codex.rs / json_clients.rs / goose.rs
       │   │   └── plugins.rs 已启用 Plugin 发现与路径范围
@@ -46,12 +46,12 @@ MCP Catalog 同样把公共注册元数据与私有连接材料分开。Adapter 
 归一化；只有调用方显式要求 live probe 后，raw command、env、header 与 URL 值才能
 进入 `probe.rs`。
 
-MCP TUI 负责搜索、选择、详情渲染缓存和有界 Probe 工作线程。工作线程仍通过
-`McpCatalog` 回调，不接收也不重建 Adapter 的私有连接值。
+MCP TUI 负责分组搜索、选择、Spotlight 详情渲染缓存、来源动作、删除确认和有界 Probe
+工作线程。工作线程仍通过 `McpCatalog` 回调，不接收也不重建 Adapter 的私有连接值。
 
-MCP 配置修改也通过同一个 Catalog seam。`McpConfigPatch` 只包含非敏感基础字段；
-`adapter/edit.rs` 会重新读取原生文件、按客户端结构定点修改、完成校验，并通过
-`fs.rs` 原子写入且保留权限。TUI 不直接解析或写入 Provider 配置。
+MCP 配置修改也通过同一个 Catalog seam。来源行定位和删除都会重新读取当前原生文件；
+删除按客户端结构完成校验，再通过 `fs.rs` 原子写入并保留权限。外部编辑器不经过
+Shell 启动，退出后 TUI 通过 Catalog 刷新。TUI 不直接解析或写入 Provider 配置。
 
 ## 安全不变量
 
@@ -67,8 +67,8 @@ MCP 配置修改也通过同一个 Catalog seam。`McpConfigPatch` 只包含非�
 - MCP probe 不调用 Tool、不读取 Resource、不展开 Prompt。
 - MCP 发现不得调用 Shell 或动态凭据 helper。
 - MCP 敏感值必须保持私有；只序列化脱敏目标以及 binding 名称/来源。
-- 绝不能把脱敏占位符写入文件；managed/plugin 以及无法保留注释的格式不进入内置
-  MCP 编辑器。
+- 绝不能把脱敏占位符写入文件；managed/plugin 来源不能编辑或删除，带注释格式不能
+  自动删除。
 - MCP 配置写入必须重新读取来源、保留无关数据、验证原生结构并原子替换文件。
 - Server 描述、schema 与 safety annotation 都按不可信数据处理。
 

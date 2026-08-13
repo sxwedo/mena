@@ -10,12 +10,12 @@ mod probe;
 
 use adapter::discover_mcp_servers;
 
-pub fn ensure_basic_config_editable(registration: &McpRegistration) -> Result<()> {
-    adapter::ensure_basic_config_editable(registration)
+pub fn ensure_source_editable(registration: &McpRegistration) -> Result<()> {
+    adapter::ensure_source_editable(registration)
 }
 
-pub fn basic_config_can_toggle_enabled(registration: &McpRegistration) -> bool {
-    adapter::basic_config_can_toggle_enabled(registration)
+pub fn ensure_config_deletable(registration: &McpRegistration) -> Result<()> {
+    adapter::ensure_config_deletable(registration)
 }
 
 /// Transport or host mechanism used to expose an MCP server.
@@ -454,6 +454,62 @@ impl McpCatalog {
         &self.registrations
     }
 
+    /// Resolve the current one-based source line for a registration.
+    ///
+    /// Returns line 1 when a valid but unusual native spelling cannot be
+    /// located precisely, so opening the source remains available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source cannot be read.
+    pub fn source_line(&self, registration: &McpRegistration) -> Result<usize> {
+        adapter::source_line(registration, self.workspace.as_deref())
+    }
+
+    /// Permanently remove one registration from its writable native source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registration is stale, its source is
+    /// read-only or cannot preserve comments, or the atomic update fails.
+    pub fn delete_registration(&self, registration: &McpRegistration) -> Result<()> {
+        let current = Self::scan(self.home.as_deref(), self.workspace.as_deref())?;
+        let index = current.resolve_identity_index(registration)?;
+        let current_registration = &current.registrations[index];
+        adapter::delete_config(current_registration, self.workspace.as_deref())?;
+        let refreshed = Self::scan(self.home.as_deref(), self.workspace.as_deref())?;
+        if refreshed.registrations.iter().any(|candidate| {
+            candidate.selector == current_registration.selector
+                && candidate.source == current_registration.source
+        }) {
+            bail!(
+                "MCP registration `{}` is still present after deletion",
+                current_registration.selector
+            );
+        }
+        Ok(())
+    }
+
+    /// Rediscover and return a filtered snapshot of the current registrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configuration cannot be read or parsed, or a
+    /// filter value is unsupported.
+    pub fn refresh_selection(
+        &self,
+        provider: Option<&str>,
+        scope: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<Vec<McpRegistration>> {
+        let current = Self::scan(self.home.as_deref(), self.workspace.as_deref())?;
+        Ok(current
+            .select(provider, scope, source)?
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
     /// Atomically update basic connection fields in one registration's native
     /// configuration and return the freshly rediscovered registration.
     ///
@@ -750,6 +806,155 @@ command = "other-server"
         assert!(content.contains("API_TOKEN = \"keep-secret\""));
         assert!(content.contains("[mcp_servers.other]"));
         assert!(content.contains("command = \"other-server\""));
+        Ok(())
+    }
+
+    #[test]
+    fn source_line_and_delete_target_only_the_selected_codex_table() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".codex"))?;
+        let path = home.path().join(".codex/config.toml");
+        fs::write(
+            &path,
+            r#"# keep this comment
+[mcp_servers.keep]
+command = "keep-server"
+
+[mcp_servers.remove]
+command = "remove-server"
+
+[mcp_servers.remove.env]
+TOKEN = "keep-private"
+"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.name == "remove")
+            .expect("remove registration");
+        assert_eq!(catalog.source_line(registration)?, 5);
+
+        catalog.delete_registration(registration)?;
+
+        let content = fs::read_to_string(&path)?;
+        assert!(content.contains("# keep this comment"));
+        assert!(content.contains("[mcp_servers.keep]"));
+        assert!(!content.contains("mcp_servers.remove"));
+        assert!(!content.contains("keep-private"));
+        Ok(())
+    }
+
+    #[test]
+    fn json_delete_cleans_native_policy_lists_and_preserves_other_servers() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".gemini"))?;
+        let path = home.path().join(".gemini/settings.json");
+        fs::write(
+            &path,
+            r#"{
+  "mcpServers": {
+    "keep": {"command": "keep-server"},
+    "remove": {"command": "remove-server"}
+  },
+  "mcp": {
+    "allowed": ["keep", "remove"],
+    "excluded": ["remove"]
+  }
+}"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.name == "remove")
+            .expect("remove registration");
+        assert_eq!(catalog.source_line(registration)?, 4);
+
+        catalog.delete_registration(registration)?;
+
+        let root: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        assert!(root["mcpServers"].get("keep").is_some());
+        assert!(root["mcpServers"].get("remove").is_none());
+        assert_eq!(root["mcp"]["allowed"], serde_json::json!(["keep"]));
+        assert_eq!(root["mcp"]["excluded"], serde_json::json!([]));
+        Ok(())
+    }
+
+    #[test]
+    fn source_line_follows_native_jsonc_and_yaml_object_paths() -> Result<()> {
+        let home = tempdir()?;
+        let opencode_path = home.path().join(".config/opencode/opencode.jsonc");
+        fs::create_dir_all(opencode_path.parent().expect("OpenCode parent"))?;
+        fs::write(
+            &opencode_path,
+            r#"{
+  mcp: {
+    decoy: {
+      selected: { command: ["wrong"] }
+    },
+    selected: {
+      type: "local",
+      command: ["right"]
+    }
+  }
+}"#,
+        )?;
+        let goose_path = home.path().join(".config/goose/config.yaml");
+        fs::create_dir_all(goose_path.parent().expect("Goose parent"))?;
+        fs::write(
+            &goose_path,
+            r"selected: wrong
+extensions:
+  decoy:
+    type: builtin
+    selected:
+      type: builtin
+  selected:
+    type: builtin
+",
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let opencode = catalog
+            .registrations()
+            .iter()
+            .find(|registration| {
+                registration.provider == "opencode" && registration.name == "selected"
+            })
+            .expect("OpenCode registration");
+        let goose = catalog
+            .registrations()
+            .iter()
+            .find(|registration| {
+                registration.provider == "goose" && registration.name == "selected"
+            })
+            .expect("Goose registration");
+
+        assert_eq!(catalog.source_line(opencode)?, 6);
+        assert_eq!(catalog.source_line(goose)?, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn source_line_falls_back_to_start_when_an_external_edit_is_temporarily_invalid() -> Result<()>
+    {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".codex"))?;
+        let path = home.path().join(".codex/config.toml");
+        fs::write(&path, "[mcp_servers.docs]\ncommand = \"docs-server\"\n")?;
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .first()
+            .expect("registration")
+            .clone();
+
+        fs::write(&path, "[temporarily invalid")?;
+
+        assert_eq!(catalog.source_line(&registration)?, 1);
         Ok(())
     }
 

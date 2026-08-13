@@ -1,14 +1,13 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
 };
 use unicode_width::UnicodeWidthChar;
 
 use super::app::{McpApp, McpDetailLayout, McpFocus};
-use super::edit::McpEditFieldKind;
 use crate::mcp::McpRegistration;
 use crate::tui::common::{centered_rect, key_hints, render_border_beam};
 
@@ -41,8 +40,8 @@ pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
         render_detail(frame, columns[1], app);
     }
     render_footer(frame, areas[2]);
-    if app.editor.is_some() {
-        render_editor(frame, app);
+    if app.pending_delete.is_some() {
+        render_delete_confirmation(frame, app);
     }
 }
 
@@ -117,44 +116,64 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
 
 fn render_list(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
     let compact = area.width < 54;
-    let rows = app.visible.iter().map(|catalog_index| {
+    let mut rows = Vec::with_capacity(app.visible.len().saturating_mul(2));
+    let mut selected_row = None;
+    let mut current_provider = None::<&str>;
+    for (visible_index, catalog_index) in app.visible.iter().enumerate() {
         let registration = &app.registrations[*catalog_index];
+        if current_provider != Some(registration.provider.as_str()) {
+            current_provider = Some(&registration.provider);
+            let count = app
+                .visible
+                .iter()
+                .filter(|index| app.registrations[**index].provider == registration.provider)
+                .count();
+            let mut cells = vec![Cell::from(format!(
+                "◆ {} · {count}",
+                registration.provider.to_ascii_uppercase()
+            ))];
+            cells.resize_with(if compact { 2 } else { 4 }, || Cell::from(""));
+            rows.push(
+                Row::new(cells).style(
+                    Style::default()
+                        .fg(ACCENT)
+                        .bg(Color::Rgb(22, 28, 36))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+        }
+        if visible_index == app.selected_index {
+            selected_row = Some(rows.len());
+        }
         let state = registration_state(registration);
         if compact {
-            Row::new(vec![
+            rows.push(Row::new(vec![
                 Cell::from(format!("{}/{}", registration.scope, registration.name)),
-                Cell::from(registration.provider.clone()),
                 Cell::from(state),
-            ])
+            ]));
         } else {
-            Row::new(vec![
+            rows.push(Row::new(vec![
                 Cell::from(registration.name.clone()),
-                Cell::from(registration.provider.clone()),
                 Cell::from(registration.scope.clone()),
                 Cell::from(registration.transport.as_str()),
                 Cell::from(state),
-            ])
+            ]));
         }
-    });
+    }
     let widths: Vec<Constraint> = if compact {
-        vec![
-            Constraint::Min(12),
-            Constraint::Length(9),
-            Constraint::Length(9),
-        ]
+        vec![Constraint::Min(12), Constraint::Length(9)]
     } else {
         vec![
             Constraint::Min(16),
-            Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(16),
             Constraint::Length(9),
         ]
     };
     let headers = if compact {
-        vec!["SCOPE/NAME", "CLIENT", "STATE"]
+        vec!["SCOPE/NAME", "STATE"]
     } else {
-        vec!["NAME", "CLIENT", "SCOPE", "TRANSPORT", "STATE"]
+        vec!["NAME", "SCOPE", "TRANSPORT", "STATE"]
     };
     let active = app.focus == McpFocus::List && !app.full_screen_detail;
     let title = format!(
@@ -184,7 +203,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
                 .title(title),
         );
     let mut state = TableState::default();
-    state.select((!app.visible.is_empty()).then_some(app.selected_index));
+    state.select(selected_row);
     frame.render_stateful_widget(table, area, &mut state);
 }
 
@@ -270,117 +289,64 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &mut McpApp) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(key_hints(&[
-            ("o", "Open config"),
-            ("e", "Edit basics"),
+            ("o", "Open"),
+            ("e", "Edit"),
+            ("d", "Delete"),
             ("p", "Probe"),
-            ("↑/↓", "Move/scroll"),
-            ("Tab", "Pane"),
-            ("/", "Search"),
-            ("Enter", "Fullscreen"),
-            ("q/Esc", "Back"),
-        ])),
+            ("/", "Find"),
+            ("↵", "Focus"),
+            ("q", "Back"),
+        ]))
+        .alignment(Alignment::Center),
         area,
     );
 }
 
-fn render_editor(frame: &mut Frame<'_>, app: &McpApp) {
-    let editor = app.editor.as_ref().expect("checked MCP editor");
-    let preferred_height = u16::try_from(editor.fields.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(if editor.error.is_some() { 9 } else { 7 });
-    let area = centered_rect(frame.area(), 96, preferred_height);
+fn render_delete_confirmation(frame: &mut Frame<'_>, app: &McpApp) {
+    let Some(registration) = app
+        .pending_delete
+        .and_then(|index| app.registrations.get(index))
+    else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 88, 10);
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(format!(" Edit MCP basics: {} ", editor.selector));
+        .border_style(Style::default().fg(Color::Red))
+        .title(" Delete MCP registration ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let mut lines = vec![
+    let lines = vec![
+        Line::from(Span::styled(
+            "Permanently remove this registration from its native config?",
+            Style::default().fg(Color::Red).bold(),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("Target: ", Style::default().fg(LABEL)),
+            Span::styled(
+                registration.selector.clone(),
+                Style::default().fg(Color::White).bold(),
+            ),
+        ]),
         Line::from(vec![
             Span::styled("Source: ", Style::default().fg(LABEL)),
             Span::styled(
-                editor.source.display().to_string(),
+                registration.source.display().to_string(),
                 Style::default().fg(Color::Gray),
             ),
         ]),
         Line::default(),
+        key_hints(&[("y", "Delete permanently"), ("n/Esc", "Cancel")]),
     ];
-    let value_width = usize::from(inner.width).saturating_sub(27).max(8);
-    for (index, field) in editor.fields.iter().enumerate() {
-        let selected = index == editor.selected;
-        let marker = if selected { "▶" } else { " " };
-        let dirty = if field.is_dirty() { "*" } else { " " };
-        let value = editor_field_value(editor, index, value_width);
-        let value_color = if selected {
-            Color::White
-        } else if field.is_dirty() {
-            Color::Yellow
-        } else {
-            Color::Gray
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{marker}{dirty} {:<22} ", field.kind.label()),
-                Style::default().fg(if selected { ACCENT } else { LABEL }),
-            ),
-            Span::styled(value, Style::default().fg(value_color)),
-        ]));
-    }
-    lines.push(Line::default());
-    if let Some(error) = &editor.error {
-        lines.push(Line::from(Span::styled(
-            format!("Error: {error}"),
-            Style::default().fg(Color::Red),
-        )));
-        lines.push(Line::default());
-    }
-    lines.push(key_hints(&[
-        ("↑/↓", "Field"),
-        ("Enter", "Edit"),
-        ("Space", "Toggle"),
-        ("Ctrl+S", "Save"),
-        ("Esc", "Cancel"),
-    ]));
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-}
-
-fn editor_field_value(editor: &super::edit::McpEditForm, index: usize, max_chars: usize) -> String {
-    let field = &editor.fields[index];
-    if field.kind == McpEditFieldKind::Enabled {
-        return if field.value == "true" {
-            "ON".to_owned()
-        } else {
-            "OFF".to_owned()
-        };
-    }
-    let editing = editor.editing && editor.selected == index;
-    let mut characters = field.value.chars().collect::<Vec<_>>();
-    let cursor = if editing {
-        field.value[..editor.cursor].chars().count()
-    } else {
-        0
-    };
-    if editing {
-        characters.insert(cursor.min(characters.len()), '█');
-    }
-    if characters.len() <= max_chars {
-        return characters.into_iter().collect();
-    }
-    let focus = if editing { cursor } else { 0 };
-    let start = focus.saturating_sub(max_chars.saturating_sub(2) / 2);
-    let start = start.min(characters.len().saturating_sub(max_chars));
-    let mut visible = characters
-        .into_iter()
-        .skip(start)
-        .take(max_chars)
-        .collect::<String>();
-    if start > 0 {
-        visible = format!("…{}", visible.chars().skip(1).collect::<String>());
-    }
-    visible
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 const fn registration_state(registration: &McpRegistration) -> &'static str {

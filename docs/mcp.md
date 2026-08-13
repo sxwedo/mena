@@ -24,9 +24,9 @@ mena mcp --provider codex inspect codegraph --json
 mena mcp --provider codex inspect codegraph --probe --timeout 15
 ```
 
-With an interactive terminal, `mena mcp` opens a searchable two-pane browser.
-The initial detail is entirely static. The same command writes a plain table
-when piped, while `--json` always produces machine-readable output.
+With an interactive terminal, `mena mcp` opens a searchable browser grouped by
+client. The initial detail is entirely static. The same command writes a plain
+table when piped, while `--json` always produces machine-readable output.
 
 Browser keys:
 
@@ -34,10 +34,12 @@ Browser keys:
   configured tools, and source;
 - `↑`/`↓` or `j`/`k` moves the list, then scrolls detail after switching panes;
 - `Tab`, `←`/`→`, or `h`/`l` switches panes without changing selection;
-- `Enter` toggles a full-screen inspector;
-- `o` opens the selected registration's exact source file;
-- `e` opens the built-in basic-configuration editor when the source can be
-  written without losing comments or provider semantics;
+- `Enter` toggles the full-screen Spotlight inspector;
+- `o` opens the selected registration's exact source file at its definition;
+- `e` suspends the browser and edits that definition with `$VISUAL`, `$EDITOR`,
+  or a terminal editor;
+- `d` asks for lowercase-`y` confirmation before permanently removing a
+  writable registration from its native source;
 - `p` explicitly probes the selected registration in a worker thread, so list
   browsing remains responsive; the result stays attached to that registration
   even if selection moves;
@@ -68,38 +70,46 @@ entry; `enabled` is the state declared by that source.
 `mena mcp open <name>` resolves the registration with the same
 `--provider`/`--scope`/`--source` filters and ambiguity checks as `inspect`, then
 opens its exact source file. In the browser, `o` performs the same action for
-the selected row. Mena resolves editors in this order: `$VISUAL`, `$EDITOR`,
-VS Code, Cursor, then the platform opener. Editor commands are split into a
-program and argv and are never passed through a shell.
+the selected row. Both actions locate the selected TOML table or JSON/JSONC/YAML
+key, and supported editors open directly on that one-based line. An unusual but
+valid spelling falls back to line 1 instead of guessing a different entry.
 
-Press `e` for a focused form over non-secret connection fields:
+`e` suspends the TUI, launches a real editor, waits for it to exit, then
+rediscovers the complete filtered catalog. `$VISUAL` and `$EDITOR` take
+precedence; otherwise edit prefers Neovim/Vim/Vi, while open prefers VS Code or
+Cursor. Known editors receive their native line argument. Programs and argv are
+always launched directly, never through a shell. Plugin and managed sources are
+owner-controlled and therefore refuse `e`; `o` remains available when operating
+system permissions allow it.
 
-- `Space` toggles `Enabled` when that client has a native writable setting;
-- `Enter` edits `Command`, `Arguments` (a JSON string array), `URL`, or working
-  directory when applicable;
-- `Ctrl+U` clears the active text field, `Ctrl+S` validates and saves, and
-  `Esc` leaves text entry or closes the form.
+Press `d` to preview the exact selector and source, then lowercase `y` to
+delete. Deletion is supported for Codex TOML and direct JSON sources only. It
+re-reads and validates the native file, removes only the selected registration,
+cleans client policy lists that reference it, preserves unrelated data, and
+uses an atomic permission-preserving replacement. JSONC, YAML, plugin, and
+managed sources fail closed because an automated rewrite cannot safely retain
+their comments or ownership semantics; use `e` and edit them deliberately.
 
-The embedded editor supports Codex TOML and direct JSON sources. It preserves
-unrelated keys and secret-bearing environment/header values, updates only the
-selected registration, writes atomically while retaining file permissions,
-and rediscovers the registration after saving. Codex TOML comments are
-preserved; JSON is normalized with stable pretty formatting. Native shapes are
-respected, including OpenCode v2 `disabled`, Gemini `allowed`/`excluded`, Oh My
-Pi enable/disable lists, and the nearest Claude local project node.
+Editing or deleting a file does not force an already running client to reload;
+use that client's native reload/restart behavior when required.
 
-The form deliberately omits values that Mena redacts. If a changed command,
-argument, or URL still contains `<redacted>`, saving is refused so a placeholder
-can never overwrite a credential. Environment variables, headers,
-authentication, tool policy, unknown fields, and transport changes remain in
-the full-file editor.
+## Beyond the split pane
 
-JSONC and YAML sources use `o` because structured reserialization could remove
-comments. Plugin and managed registrations are also excluded from embedded
-editing because their owner or administrator controls those files. Opening a
-file remains available, subject to operating-system permissions. A saved file
-does not force an already running client to reload; use that client's native
-reload/restart behavior when required.
+The browser already offers a single-canvas Spotlight inspector with `Enter`, so
+deep reading does not require keeping the list visible. A stronger AI-native
+direction would combine three pieces without weakening the evidence model:
+
+1. a prompt-like command palette for intents such as “show disabled Codex
+   registrations” or “open this source”, translated into existing deterministic
+   filters and actions;
+2. compact evidence cards that separate static configuration, live probe facts,
+   warnings, and available actions instead of presenting one long metadata dump;
+3. an action preview that always shows the exact selector, source, and whether
+   an operation will start a server or modify a file before confirmation.
+
+This presentation can feel conversational without inventing lifecycle state or
+letting generated text authorize a probe or destructive action. Static facts,
+live facts, and recommendations should remain visibly distinct.
 
 ## Configuration sources
 
@@ -224,7 +234,7 @@ project-scoped files.
 ## Bounds and safety contract
 
 - Configuration reads are capped at 8 MiB and 10,000 registrations per file.
-- Embedded edits keep the same 8 MiB output cap and use atomic,
+- Catalog-controlled deletion keeps the same 8 MiB output cap and uses atomic,
   permission-preserving replacement.
 - Installed plugin roots and referenced MCP manifest paths are canonicalized
   and must stay inside the plugin cache or marketplace root.
@@ -246,10 +256,10 @@ The MCP feature is a deep module with a small provider-neutral catalog API:
 |---|---|
 | `src/lib.rs` | CLI arguments and command dispatch |
 | `src/controller.rs` | scan/filter/inspect orchestration and exit behavior |
-| `src/tui/mcp/` | search, pane navigation, cached detail, edit form, and probe worker |
-| `src/mcp.rs` | public models, catalog sorting, filters, resolution, edits, and probe gate |
+| `src/tui/mcp/` | grouped search, Spotlight detail, source actions, deletion confirmation, and probe worker |
+| `src/mcp.rs` | public models, catalog sorting, filters, source resolution, mutations, and probe gate |
 | `src/mcp/adapter.rs` | closed discovery seam and private connection material |
-| `src/mcp/adapter/edit.rs` | validated native TOML/JSON basic-field updates |
+| `src/mcp/adapter/edit.rs` | source-line location and validated native TOML/JSON updates/deletion |
 | `src/mcp/adapter/storage.rs` | bounded reads, nearest-project search, profile limits |
 | `src/mcp/adapter/codex.rs` | native TOML normalization |
 | `src/mcp/adapter/json_clients.rs` | Claude, Cursor, Gemini, OpenCode, OMP, and Pi formats |
@@ -264,9 +274,10 @@ Tests live beside these public seams. They cover registration normalization,
 secret redaction (including safe `Debug` output), duplicate resolution, plugin
 enablement/containment and wrapped/top-level manifests, dynamic-helper refusal,
 remote-executor refusal, disabled-server refusal, and an in-memory MCP server
-proving that metadata discovery makes zero tool calls. Edit tests cover native
-provider shapes, unrelated-data preservation, TOML comments, JSONC refusal,
-and redaction-placeholder rejection.
+proving that metadata discovery makes zero tool calls. Mutation tests cover
+source-line location, native provider shapes, unrelated-data preservation,
+TOML comments, policy-list cleanup, JSONC refusal, and redaction-placeholder
+rejection.
 
 ## Upstream format references
 

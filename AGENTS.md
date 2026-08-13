@@ -89,10 +89,11 @@ main.rs
 - `skill.rs` is the filesystem seam for Skill discovery, unique selection,
   canonical root containment, bounded preview reads, and directory listing.
 - `mcp.rs` owns the provider-neutral MCP catalog, stable filters, ambiguity
-  handling, redacted public metadata, safe basic configuration patches, and
-  the explicit live-probe gate. `mcp/adapter.rs` is the closed client-config
-  seam; raw connection values stay private. `mcp/adapter/edit.rs` owns native
-  configuration updates. `mcp/probe.rs` alone may start stdio or contact
+  handling, redacted public metadata, source location, safe configuration
+  mutations, and the explicit live-probe gate. `mcp/adapter.rs` is the closed
+  client-config seam; raw connection values stay private.
+  `mcp/adapter/edit.rs` owns native configuration updates and deletion.
+  `mcp/probe.rs` alone may start stdio or contact
   Streamable HTTP, and only after `--probe` or an explicit `p` action in the
   MCP browser.
 - `controller.rs` orchestrates commands, emits stable JSON or text output, and
@@ -131,8 +132,8 @@ main.rs
   query values, fragments, and secret-bearing argv positions; sanitize errors.
 - Never write redacted values back into MCP files. Re-read and validate the
   native source, preserve unrelated data, and use atomic permission-preserving
-  replacement. Plugin/managed sources and formats that cannot retain comments
-  must fail closed for embedded editing.
+  replacement. Plugin/managed sources must fail closed for mutations, and
+  formats that cannot retain comments must fail closed for automated deletion.
 - Treat MCP server metadata and safety annotations as untrusted claims. Keep
   reads, pages, item counts, schemas, text, timeouts, and cleanup bounded.
 

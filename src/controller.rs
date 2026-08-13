@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::mcp::{McpCatalog, McpProbeStatus};
+use crate::mcp::{McpCatalog, McpProbeStatus, McpRegistration};
 use crate::process::{AgentKind, LiveAgent, discover_live_agents};
 use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
 use crate::settings::{CustomAgentSettings, Settings};
@@ -86,7 +86,8 @@ pub fn run_mcp(args: &McpArgs) -> Result<()> {
                 args.scope.as_deref(),
                 args.source.as_deref(),
             )?;
-            crate::editor::open_file(&detail.registration.source)?;
+            let line = catalog.source_line(&detail.registration)?;
+            crate::editor::open_file_at_line(&detail.registration.source, line)?;
             ui::success(format!(
                 "opened MCP config {}",
                 detail.registration.source.display()
@@ -103,24 +104,40 @@ pub fn run_mcp(args: &McpArgs) -> Result<()> {
             } else if registrations.is_empty() {
                 ui::info("no MCP registrations discovered");
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                let registrations = registrations.into_iter().cloned().collect();
-                let probe_catalog = Arc::clone(&catalog);
-                let update_catalog = Arc::clone(&catalog);
-                tui::manage_mcp(
-                    registrations,
-                    move |registration| {
-                        probe_catalog.inspect_current_registration_with_probe(registration, 10)
-                    },
-                    move |registration, patch| {
-                        update_catalog.update_basic_config(registration, patch)
-                    },
-                )?;
+                run_mcp_tui(&catalog, args, registrations.into_iter().cloned().collect())?;
             } else {
                 print!("{}", render_mcp_table(&registrations));
             }
         }
     }
     Ok(())
+}
+
+fn run_mcp_tui(
+    catalog: &Arc<McpCatalog>,
+    args: &McpArgs,
+    registrations: Vec<McpRegistration>,
+) -> Result<()> {
+    let probe_catalog = Arc::clone(catalog);
+    let locate_catalog = Arc::clone(catalog);
+    let refresh_catalog = Arc::clone(catalog);
+    let delete_catalog = Arc::clone(catalog);
+    let provider = args.provider.clone();
+    let scope = args.scope.clone();
+    let source = args.source.clone();
+    tui::manage_mcp(
+        registrations,
+        move |registration| probe_catalog.inspect_current_registration_with_probe(registration, 10),
+        move |registration| locate_catalog.source_line(registration),
+        move || {
+            refresh_catalog.refresh_selection(
+                provider.as_deref(),
+                scope.as_deref(),
+                source.as_deref(),
+            )
+        },
+        move |registration| delete_catalog.delete_registration(registration),
+    )
 }
 
 pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {

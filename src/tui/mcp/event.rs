@@ -6,15 +6,16 @@ use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 use super::app::{McpApp, McpFocus};
-use super::edit::McpEditAction;
-use crate::mcp::{McpConfigPatch, McpRegistration};
+use crate::mcp::McpRegistration;
 use crate::tui::common::ManagedTerminal;
 use crate::tui::common::is_key_press;
 
 pub(crate) fn run_mcp_browser(
     registrations: Vec<McpRegistration>,
     mut probe: impl FnMut(&McpRegistration) -> Result<crate::mcp::McpDetail> + Send + 'static,
-    mut update: impl FnMut(&McpRegistration, &McpConfigPatch) -> Result<McpRegistration>,
+    mut locate: impl FnMut(&McpRegistration) -> Result<usize>,
+    mut refresh: impl FnMut() -> Result<Vec<McpRegistration>>,
+    mut delete: impl FnMut(&McpRegistration) -> Result<()>,
 ) -> Result<()> {
     let mut app = McpApp::new(registrations);
     let (request_tx, request_rx) = mpsc::sync_channel::<(usize, McpRegistration)>(1);
@@ -83,19 +84,42 @@ pub(crate) fn run_mcp_browser(
                     McpAction::Open { index } => {
                         let registration = app.registrations[index].clone();
                         let path = registration.source.clone();
-                        drop(terminal.take());
-                        let result = crate::editor::open_file(&path).and_then(|()| {
-                            update(&registration, &McpConfigPatch::default()).context(
-                                "configuration opened but the registration could not be refreshed",
-                            )
+                        let result = locate(&registration).and_then(|line| {
+                            drop(terminal.take());
+                            let opened = crate::editor::open_file_at_line(&path, line);
+                            terminal = Some(ManagedTerminal::enter_with_native_selection()?);
+                            opened.and_then(|()| {
+                                refresh().context(
+                                    "configuration opened but the catalog could not be refreshed",
+                                )
+                            })
                         });
-                        terminal = Some(ManagedTerminal::enter_with_native_selection()?);
-                        app.finish_open(index, result);
+                        app.finish_source_action(index, "open", "opened", result);
                     }
-                    McpAction::Save { index, patch } => {
+                    McpAction::Edit { index } => {
                         let registration = app.registrations[index].clone();
-                        let result = update(&registration, &patch);
-                        app.finish_edit(index, result);
+                        let path = registration.source.clone();
+                        let result = locate(&registration).and_then(|line| {
+                            drop(terminal.take());
+                            let edited = crate::editor::edit_file_at_line(&path, line);
+                            terminal = Some(ManagedTerminal::enter_with_native_selection()?);
+                            edited.and_then(|()| {
+                                refresh().context(
+                                    "configuration edited but the catalog could not be refreshed",
+                                )
+                            })
+                        });
+                        app.finish_source_action(index, "edit", "edited", result);
+                    }
+                    McpAction::Delete { index } => {
+                        let registration = app.registrations[index].clone();
+                        let result = match delete(&registration) {
+                            Ok(()) => refresh().context(
+                                "registration was deleted but the catalog could not be refreshed",
+                            ),
+                            Err(error) => Err(error.context("MCP registration was not deleted")),
+                        };
+                        app.finish_delete(index, result);
                     }
                 }
             } else {
@@ -123,12 +147,14 @@ pub(crate) enum McpAction {
     Quit,
     Probe { index: usize },
     Open { index: usize },
-    Save { index: usize, patch: McpConfigPatch },
+    Edit { index: usize },
+    Delete { index: usize },
 }
 
 pub(crate) fn handle_event(app: &mut McpApp, input: &Event) -> McpAction {
     match input {
         Event::Key(key) if is_key_press(key) => handle_key(app, *key),
+        Event::Mouse(_) if app.pending_delete.is_some() => McpAction::Continue,
         Event::Mouse(mouse) => {
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
@@ -156,24 +182,14 @@ pub(crate) fn handle_event(app: &mut McpApp, input: &Event) -> McpAction {
 }
 
 pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
-    if app.editor.is_some() {
-        let mut editor = app.editor.take().expect("checked MCP editor");
-        return match editor.handle_key(key) {
-            McpEditAction::Continue => {
-                app.editor = Some(editor);
+    if let Some(index) = app.pending_delete {
+        return match key.code {
+            KeyCode::Char('y') => McpAction::Delete { index },
+            KeyCode::Char('n') | KeyCode::Esc => {
+                app.cancel_delete();
                 McpAction::Continue
             }
-            McpEditAction::Cancel => McpAction::Continue,
-            McpEditAction::Save(patch) => {
-                if patch.is_empty() {
-                    editor.error = Some("no configuration fields were changed".to_owned());
-                    app.editor = Some(editor);
-                    return McpAction::Continue;
-                }
-                let index = editor.registration_index;
-                app.editor = Some(editor);
-                McpAction::Save { index, patch }
-            }
+            _ => McpAction::Continue,
         };
     }
     if app.is_searching {
@@ -225,8 +241,11 @@ pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
         KeyCode::Char('o') => app
             .selected_catalog_index()
             .map_or(McpAction::Continue, |index| McpAction::Open { index }),
-        KeyCode::Char('e') => {
-            app.begin_edit();
+        KeyCode::Char('e') => app
+            .begin_external_edit()
+            .map_or(McpAction::Continue, |index| McpAction::Edit { index }),
+        KeyCode::Char('d') => {
+            app.begin_delete();
             McpAction::Continue
         }
         KeyCode::Enter => {
@@ -374,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn open_and_edit_keys_target_only_the_selected_registration() {
+    fn source_and_delete_keys_target_only_the_selected_registration() {
         let mut app = McpApp::new(vec![registration("first"), registration("second")]);
         app.select_next();
 
@@ -388,26 +407,26 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
         );
-        assert!(matches!(edit, super::McpAction::Continue));
-        assert!(app.editor.is_some());
+        assert!(matches!(edit, super::McpAction::Edit { index: 1 }));
 
-        handle_key(
+        let request_delete = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
         );
-        let save = handle_key(
+        assert!(matches!(request_delete, super::McpAction::Continue));
+        assert_eq!(app.pending_delete, Some(1));
+
+        let uppercase = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
         );
-        assert!(matches!(
-            save,
-            super::McpAction::Save {
-                index: 1,
-                patch: crate::mcp::McpConfigPatch {
-                    enabled: Some(false),
-                    ..
-                }
-            }
-        ));
+        assert!(matches!(uppercase, super::McpAction::Continue));
+        assert_eq!(app.pending_delete, Some(1));
+
+        let confirm = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(matches!(confirm, super::McpAction::Delete { index: 1 }));
     }
 }

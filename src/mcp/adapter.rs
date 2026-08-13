@@ -80,12 +80,26 @@ pub(super) fn update_basic_config(
     edit::update_basic_config(registration, patch, workspace)
 }
 
-pub(super) fn ensure_basic_config_editable(registration: &McpRegistration) -> Result<()> {
-    edit::ensure_basic_config_editable(registration)
+pub(super) fn source_line(
+    registration: &McpRegistration,
+    workspace: Option<&Path>,
+) -> Result<usize> {
+    edit::source_line(registration, workspace)
 }
 
-pub(super) fn basic_config_can_toggle_enabled(registration: &McpRegistration) -> bool {
-    edit::basic_config_can_toggle_enabled(registration)
+pub(super) fn delete_config(
+    registration: &McpRegistration,
+    workspace: Option<&Path>,
+) -> Result<()> {
+    edit::delete_config(registration, workspace)
+}
+
+pub(super) fn ensure_source_editable(registration: &McpRegistration) -> Result<()> {
+    edit::ensure_source_editable(registration)
+}
+
+pub(super) fn ensure_config_deletable(registration: &McpRegistration) -> Result<()> {
+    edit::ensure_config_deletable(registration)
 }
 
 fn claude_managed_mcp_paths() -> Vec<PathBuf> {

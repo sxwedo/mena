@@ -4,7 +4,6 @@ use anyhow::Result;
 use ratatui::text::Line;
 
 use crate::mcp::{McpDetail, McpRegistration};
-use crate::tui::mcp::edit::McpEditForm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum McpFocus {
@@ -37,7 +36,7 @@ pub(crate) struct McpApp {
     pub(crate) marquee_offset: usize,
     pub(crate) probe_in_progress: Option<usize>,
     pub(crate) exit_after_probe: bool,
-    pub(crate) editor: Option<McpEditForm>,
+    pub(crate) pending_delete: Option<usize>,
     pub(crate) notice: Option<McpNotice>,
     search_index: Vec<String>,
     probe_details: HashMap<usize, McpDetail>,
@@ -63,7 +62,7 @@ impl McpApp {
             marquee_offset: 0,
             probe_in_progress: None,
             exit_after_probe: false,
-            editor: None,
+            pending_delete: None,
             notice: None,
             search_index,
             probe_details: HashMap::new(),
@@ -172,10 +171,34 @@ impl McpApp {
         Some(index)
     }
 
-    pub(crate) fn begin_edit(&mut self) {
+    pub(crate) fn begin_external_edit(&mut self) -> Option<usize> {
         if self.probe_in_progress.is_some() {
             self.notice = Some(McpNotice {
                 message: "wait for the active probe before editing configuration".to_owned(),
+                error: true,
+            });
+            return None;
+        }
+        let index = self.selected_catalog_index()?;
+        match crate::mcp::ensure_source_editable(&self.registrations[index]) {
+            Ok(()) => {
+                self.notice = None;
+                Some(index)
+            }
+            Err(error) => {
+                self.notice = Some(McpNotice {
+                    message: format!("{error:#}"),
+                    error: true,
+                });
+                None
+            }
+        }
+    }
+
+    pub(crate) fn begin_delete(&mut self) {
+        if self.probe_in_progress.is_some() {
+            self.notice = Some(McpNotice {
+                message: "wait for the active probe before deleting configuration".to_owned(),
                 error: true,
             });
             return;
@@ -183,9 +206,9 @@ impl McpApp {
         let Some(index) = self.selected_catalog_index() else {
             return;
         };
-        match McpEditForm::new(index, &self.registrations[index]) {
-            Ok(editor) => {
-                self.editor = Some(editor);
+        match crate::mcp::ensure_config_deletable(&self.registrations[index]) {
+            Ok(()) => {
+                self.pending_delete = Some(index);
                 self.notice = None;
             }
             Err(error) => {
@@ -197,66 +220,85 @@ impl McpApp {
         }
     }
 
-    pub(crate) fn finish_edit(&mut self, index: usize, result: Result<McpRegistration>) {
-        match result.and_then(|updated| self.replace_registration(index, updated)) {
-            Ok(selector) => {
-                self.editor = None;
-                self.notice = Some(McpNotice {
-                    message: format!("saved basic configuration for {selector}"),
-                    error: false,
-                });
-            }
-            Err(error) => {
-                if let Some(editor) = &mut self.editor {
-                    editor.error = Some(format!("{error:#}"));
-                }
-            }
-        }
+    pub(crate) const fn cancel_delete(&mut self) {
+        self.pending_delete = None;
     }
 
-    pub(crate) fn finish_open(&mut self, index: usize, result: Result<McpRegistration>) {
+    pub(crate) fn finish_source_action(
+        &mut self,
+        index: usize,
+        action: &str,
+        completed: &str,
+        result: Result<Vec<McpRegistration>>,
+    ) {
         let source = self.registrations.get(index).map_or_else(
             || "selected MCP source".to_owned(),
             |registration| registration.source.display().to_string(),
         );
         self.notice = Some(match result {
-            Ok(updated) => match self.replace_registration(index, updated) {
-                Ok(_) => McpNotice {
-                    message: format!("opened {source}"),
+            Ok(registrations) => {
+                self.replace_registrations(registrations, index);
+                McpNotice {
+                    message: format!("{completed} {source}"),
                     error: false,
-                },
-                Err(error) => McpNotice {
-                    message: format!("opened config but could not refresh it: {error:#}"),
-                    error: true,
-                },
-            },
+                }
+            }
             Err(error) => McpNotice {
-                message: format!("could not open config: {error:#}"),
+                message: format!("could not {action} config: {error:#}"),
                 error: true,
             },
         });
     }
 
-    fn replace_registration(&mut self, index: usize, updated: McpRegistration) -> Result<String> {
-        let expected = self.registrations.get(index).ok_or_else(|| {
-            anyhow::anyhow!("updated MCP registration has an out-of-range catalog index")
-        })?;
-        if updated.selector != expected.selector || updated.source != expected.source {
-            anyhow::bail!(
-                "updated registration `{}` did not match `{}`",
-                updated.selector,
-                expected.selector
-            );
-        }
-        let selector = updated.selector.clone();
-        self.registrations[index] = updated;
-        self.search_index[index] = registration_search_text(&self.registrations[index]);
-        self.probe_details.remove(&index);
-        self.probe_errors.remove(&index);
-        self.detail_texts.remove(&index);
+    pub(crate) fn finish_delete(&mut self, index: usize, result: Result<Vec<McpRegistration>>) {
+        let selector = self.registrations.get(index).map_or_else(
+            || "selected MCP registration".to_owned(),
+            |registration| registration.selector.clone(),
+        );
+        self.pending_delete = None;
+        self.notice = Some(match result {
+            Ok(registrations) => {
+                self.replace_registrations(registrations, index);
+                McpNotice {
+                    message: format!("deleted {selector}"),
+                    error: false,
+                }
+            }
+            Err(error) => McpNotice {
+                message: format!("{error:#}"),
+                error: true,
+            },
+        });
+    }
+
+    fn replace_registrations(&mut self, registrations: Vec<McpRegistration>, old_index: usize) {
+        let selected_identity = self
+            .registrations
+            .get(old_index)
+            .map(|registration| (registration.selector.clone(), registration.source.clone()));
+        let old_visible_position = self.selected_index;
+        self.registrations = registrations;
+        self.search_index = self
+            .registrations
+            .iter()
+            .map(registration_search_text)
+            .collect();
+        self.probe_details.clear();
+        self.probe_errors.clear();
+        self.detail_texts.clear();
         self.detail_layout = None;
+        self.visible.clear();
+        self.selected_index = 0;
         self.recompute_filter();
-        Ok(selector)
+        self.selected_index = selected_identity
+            .and_then(|(selector, source)| {
+                self.visible.iter().position(|index| {
+                    self.registrations[*index].selector == selector
+                        && self.registrations[*index].source == source
+                })
+            })
+            .unwrap_or_else(|| old_visible_position.min(self.visible.len().saturating_sub(1)));
+        self.reset_detail_scroll();
     }
 
     pub(crate) fn finish_probe(&mut self, index: usize, result: Result<McpDetail>) {
@@ -432,13 +474,13 @@ mod tests {
     }
 
     #[test]
-    fn completed_open_refreshes_the_selected_registration() {
+    fn completed_source_action_refreshes_the_catalog() {
         let original = registration("docs", "codex", "old description");
         let mut refreshed = original.clone();
         refreshed.command = Some("new-server".to_owned());
         let mut app = McpApp::new(vec![original]);
 
-        app.finish_open(0, Ok(refreshed));
+        app.finish_source_action(0, "edit", "edited", Ok(vec![refreshed]));
 
         assert_eq!(
             app.selected_registration()
@@ -448,8 +490,47 @@ mod tests {
         assert!(
             app.notice
                 .as_ref()
-                .is_some_and(|notice| !notice.error && notice.message.starts_with("opened "))
+                .is_some_and(|notice| !notice.error && notice.message.starts_with("edited "))
         );
+    }
+
+    #[test]
+    fn completed_delete_rebuilds_indices_and_keeps_a_valid_selection() {
+        let first = registration("first", "codex", "first");
+        let second = registration("second", "codex", "second");
+        let mut app = McpApp::new(vec![first.clone(), second]);
+        app.select_next();
+        app.begin_delete();
+
+        app.finish_delete(1, Ok(vec![first]));
+
+        assert_eq!(app.registrations.len(), 1);
+        assert_eq!(app.selected_catalog_index(), Some(0));
+        assert_eq!(app.pending_delete, None);
+        assert!(
+            app.notice.as_ref().is_some_and(
+                |notice| !notice.error && notice.message == "deleted codex:user:second"
+            )
+        );
+    }
+
+    #[test]
+    fn source_edit_and_delete_keep_comment_and_owner_boundaries_distinct() {
+        let mut jsonc = registration("docs", "opencode", "docs");
+        jsonc.source_format = McpSourceFormat::Jsonc;
+        let mut app = McpApp::new(vec![jsonc]);
+
+        assert_eq!(app.begin_external_edit(), Some(0));
+        app.begin_delete();
+        assert_eq!(app.pending_delete, None);
+        assert!(app.notice.as_ref().is_some_and(|notice| notice.error));
+
+        let mut plugin = registration("docs", "claude", "docs");
+        plugin.scope = "plugin".to_owned();
+        let mut app = McpApp::new(vec![plugin]);
+
+        assert_eq!(app.begin_external_edit(), None);
+        assert!(app.notice.as_ref().is_some_and(|notice| notice.error));
     }
 
     #[test]

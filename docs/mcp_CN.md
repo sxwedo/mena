@@ -22,17 +22,18 @@ mena mcp --provider codex inspect codegraph --json
 mena mcp --provider codex inspect codegraph --probe --timeout 15
 ```
 
-在交互终端中，`mena mcp` 会打开可搜索的双栏浏览器；初始详情完全来自静态配置。
-管道输出仍是普通表格，`--json` 始终输出机器可读数据。
+在交互终端中，`mena mcp` 会打开按客户端分组的可搜索浏览器；初始详情完全来自静态
+配置。管道输出仍是普通表格，`--json` 始终输出机器可读数据。
 
 浏览器快捷键：
 
 - `/`：按名称、selector、客户端、scope、transport、目标、描述、配置工具和来源搜索；
 - `↑`/`↓` 或 `j`/`k`：在列表移动；切换到详情栏后独立滚动；
 - `Tab`、`←`/`→` 或 `h`/`l`：切换栏位，不改变选中项；
-- `Enter`：切换全屏详情；
-- `o`：打开当前注册对应的准确来源文件；
-- `e`：当来源能够保留注释和客户端语义地安全写回时，打开内置基础配置编辑器；
+- `Enter`：切换全屏 Spotlight 检查器；
+- `o`：打开当前注册的准确来源文件并定位到定义行；
+- `e`：暂停浏览器，通过 `$VISUAL`、`$EDITOR` 或终端编辑器编辑该定义；
+- `d`：预览精确目标，经小写 `y` 确认后从原生配置中永久删除可写注册；
 - `p`：在工作线程显式 probe 当前注册，列表仍可继续操作；即使选择移动，结果也只会
   绑定到发起 probe 的注册；
 - `q`/`Esc`：返回或退出。Probe 运行中退出时，Mena 会等待有界清理完成，避免遗留
@@ -59,29 +60,36 @@ mena mcp --provider codex inspect codegraph --probe --timeout 15
 
 `mena mcp open <name>` 使用与 `inspect` 相同的 `--provider`、`--scope`、
 `--source` 过滤和歧义检查，然后打开该注册的准确来源文件。浏览器中的 `o` 对当前行
-执行同一操作。Mena 按 `$VISUAL`、`$EDITOR`、VS Code、Cursor、系统默认打开器的
-顺序选择编辑器；编辑器始终以“程序 + argv”启动，不经过 Shell。
+执行同一操作。两者都会定位选中的 TOML table 或 JSON/JSONC/YAML key，并按已知
+编辑器的原生参数跳到对应的一基行号；遇到合法但特殊的写法时退回第 1 行，不猜测其他
+注册。
 
-按 `e` 会打开只包含非敏感连接字段的表单：
+`e` 会暂停 TUI，启动真实编辑器并等待退出，然后重新发现完整的当前筛选目录。
+`$VISUAL`、`$EDITOR` 优先；未配置时，编辑优先 Neovim/Vim/Vi，打开优先 VS Code 或
+Cursor。程序与 argv 始终直接启动，不经过 Shell。Plugin 与 managed 来源由其 Owner
+控制，因此拒绝 `e`；操作系统权限允许时仍可用 `o` 查看。
 
-- 客户端存在原生可写开关时，`Space` 切换 `Enabled`；
-- `Enter` 编辑适用的 `Command`、`Arguments`（JSON 字符串数组）、`URL` 或工作目录；
-- `Ctrl+U` 清空当前文本字段，`Ctrl+S` 校验并保存，`Esc` 退出文本编辑或关闭表单。
+按 `d` 会先展示准确 selector 和来源，再要求小写 `y`。删除仅支持 Codex TOML 与直接
+JSON 来源：重新读取并校验原生文件，只移除选中注册，清理引用它的客户端策略列表，
+保留无关数据，并以保留权限的原子替换写回。JSONC、YAML、Plugin 与 managed 来源会
+安全拒绝，因为自动重写无法可靠保留注释或所有权语义；可用 `e` 明确手工编辑。
 
-内置编辑器支持 Codex TOML 和直接 JSON 来源。它只修改选中的注册，保留无关键以及
-环境变量/header 中的敏感值，以原子方式写回并保留文件权限，保存后重新发现该注册。
-Codex TOML 注释保持不变；JSON 会统一为稳定的 pretty 格式。写回遵循各客户端原生
-结构，包括 OpenCode v2 的 `disabled`、Gemini 的 `allowed`/`excluded`、Oh My Pi
-启停列表，以及 Claude local 中距离当前工作目录最近的项目节点。
-
-表单不会暴露 Mena 已脱敏的值。如果修改后的 command、argument 或 URL 仍包含
-`<redacted>`，保存会被拒绝，避免占位符覆盖真实凭据。环境变量、header、认证、工具
-策略、未知字段和 transport 切换仍应使用完整文件编辑器。
-
-JSONC 与 YAML 使用 `o` 打开，因为结构化重写可能删除注释。Plugin 和 managed 注册
-也不允许内置编辑，它们应由所属 Plugin 或管理员控制；在操作系统权限允许时仍可打开
-文件。保存文件不会强制已运行的客户端重新加载，必要时请使用该客户端自己的 reload
+编辑或删除文件不会强制已运行客户端重新加载；必要时请使用该客户端自己的 reload
 或重启机制。
+
+## 超越左右分栏
+
+浏览器现在可用 `Enter` 进入单画布 Spotlight 检查器，深度阅读时不必保留左侧列表。
+更 AI-native 的后续形态可以由三部分组成，同时不削弱证据边界：
+
+1. 类 Prompt 的命令面板，把“只看禁用的 Codex 注册”或“打开这个来源”等意图翻译成
+   现有的确定性筛选与动作；
+2. 紧凑证据卡片，分别展示静态配置、实时 Probe 事实、Warning 与可执行动作，而非一段
+   很长的 metadata；
+3. 动作预览，在确认前始终展示精确 selector、来源，以及是否会启动 Server 或修改文件。
+
+这样可以获得对话式体验，但不会臆造 Agent lifecycle，也不会让生成文本直接授权
+Probe 或破坏性动作。静态事实、实时事实与建议应始终保持可见区分。
 
 ## 配置来源
 
@@ -192,7 +200,7 @@ scope 尤其应先看静态 inspect。
 ## 有界性与安全契约
 
 - 单配置读取上限 8 MiB、单文件最多 10,000 条注册；
-- 内置编辑的输出同样限制为 8 MiB，并以保留权限的原子替换写回；
+- Catalog 控制的删除输出同样限制为 8 MiB，并以保留权限的原子替换写回；
 - 已安装 Plugin 根目录和被引用的 MCP 清单路径先 canonicalize，且必须留在 Plugin
   cache/marketplace 根目录内；
 - Probe timeout 必须在 1–300 秒；
@@ -210,10 +218,10 @@ MCP 功能是一个小接口、深实现的模块：
 |---|---|
 | `src/lib.rs` | CLI 参数与命令分发 |
 | `src/controller.rs` | scan/filter/inspect 编排和退出语义 |
-| `src/tui/mcp/` | 搜索、栏位导航、详情缓存、编辑表单与 Probe 工作线程 |
-| `src/mcp.rs` | 公共模型、排序、筛选、消歧、编辑与 probe gate |
+| `src/tui/mcp/` | 分组搜索、Spotlight 详情、来源动作、删除确认与 Probe 工作线程 |
+| `src/mcp.rs` | 公共模型、排序、筛选、来源定位、变更与 probe gate |
 | `src/mcp/adapter.rs` | 闭合发现 seam 与私有连接材料 |
-| `src/mcp/adapter/edit.rs` | 经校验的原生 TOML/JSON 基础字段写回 |
+| `src/mcp/adapter/edit.rs` | 来源行定位与经校验的原生 TOML/JSON 更新/删除 |
 | `src/mcp/adapter/storage.rs` | 有界读取、最近项目查找、profile 上限 |
 | `src/mcp/adapter/codex.rs` | Codex 原生 TOML 归一化 |
 | `src/mcp/adapter/json_clients.rs` | Claude、Cursor、Gemini、OpenCode、OMP、Pi 格式 |
@@ -227,8 +235,8 @@ MCP 功能是一个小接口、深实现的模块：
 测试与公开 seam 同处，覆盖注册归一化、凭据脱敏（包括安全的 `Debug` 输出）、同名
 消歧、Plugin 启用/路径范围与 wrapped/top-level 清单、动态 helper 拒绝、remote
 executor 拒绝、disabled Server 拒绝，以及一个内存 MCP Server；后者会断言元数据
-发现过程中 Tool 调用次数严格为 0。编辑测试覆盖客户端原生结构、无关数据保留、
-TOML 注释、JSONC 拒绝以及脱敏占位符拒绝。
+发现过程中 Tool 调用次数严格为 0。变更测试覆盖来源行定位、客户端原生结构、无关
+数据保留、TOML 注释、策略列表清理、JSONC 拒绝以及脱敏占位符拒绝。
 
 ## 上游格式参考
 

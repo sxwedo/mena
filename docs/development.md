@@ -20,7 +20,7 @@ main.rs
       ├── mcp.rs             registration model, catalog, and probe gate
       │   ├── adapter.rs     closed client-config discovery seam
       │   │   ├── common.rs  normalization and redaction
-      │   │   ├── edit.rs    native basic-field updates
+      │   │   ├── edit.rs    source location and native config mutations
       │   │   ├── storage.rs bounded configuration I/O
       │   │   ├── codex.rs / json_clients.rs / goose.rs
       │   │   └── plugins.rs enabled-plugin discovery and containment
@@ -49,15 +49,17 @@ connection material. Adapters only read and normalize during a scan. The raw
 command, environment, header, and URL values can cross into `probe.rs` only
 after the caller explicitly requests a live probe.
 
-The MCP TUI owns search, selection, cached detail rendering, and its bounded
-probe worker. The worker calls back through `McpCatalog`; it does not receive or
-reconstruct private adapter connection values.
+The MCP TUI owns grouped search, selection, cached Spotlight detail rendering,
+source actions, deletion confirmation, and its bounded probe worker. The worker
+calls back through `McpCatalog`; it does not receive or reconstruct private
+adapter connection values.
 
-MCP configuration changes cross the same catalog seam. `McpConfigPatch`
-contains only non-secret basic fields; `adapter/edit.rs` re-reads the native
-file, updates the selected provider shape, validates it, and uses `fs.rs` for
-an atomic permission-preserving write. The TUI never parses or writes provider
-configuration directly.
+MCP configuration changes cross the same catalog seam. Source-line lookup and
+deletion re-read the current native file; deletion validates client-specific
+structure and uses `fs.rs` for an atomic permission-preserving write. The
+external editor is launched without a shell, and the TUI refreshes through the
+Catalog after it exits. The TUI never parses or writes provider configuration
+directly.
 
 ## Safety invariants
 
@@ -75,8 +77,9 @@ configuration directly.
 - Never invoke a shell or dynamic credential helper for MCP discovery.
 - Keep secret-bearing MCP values private; serialize only redacted targets and
   binding names/sources.
-- Never persist a redaction placeholder. Keep managed/plugin and
-  comment-bearing unsupported formats out of embedded MCP editing.
+- Never persist a redaction placeholder. Managed/plugin sources cannot be
+  edited or deleted, and comment-bearing formats cannot be deleted
+  automatically.
 - MCP configuration writes must re-read the source, preserve unrelated data,
   validate the native shape, and replace the file atomically.
 - Treat server descriptions, schemas, and safety annotations as untrusted data.
