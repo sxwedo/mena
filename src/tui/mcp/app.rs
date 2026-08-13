@@ -4,6 +4,7 @@ use anyhow::Result;
 use ratatui::text::Line;
 
 use crate::mcp::{McpDetail, McpRegistration};
+use crate::tui::mcp::edit::McpEditForm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum McpFocus {
@@ -15,6 +16,11 @@ pub(crate) struct McpDetailLayout {
     pub(crate) registration_index: usize,
     pub(crate) width: u16,
     pub(crate) lines: Vec<Line<'static>>,
+}
+
+pub(crate) struct McpNotice {
+    pub(crate) message: String,
+    pub(crate) error: bool,
 }
 
 pub(crate) struct McpApp {
@@ -31,6 +37,8 @@ pub(crate) struct McpApp {
     pub(crate) marquee_offset: usize,
     pub(crate) probe_in_progress: Option<usize>,
     pub(crate) exit_after_probe: bool,
+    pub(crate) editor: Option<McpEditForm>,
+    pub(crate) notice: Option<McpNotice>,
     search_index: Vec<String>,
     probe_details: HashMap<usize, McpDetail>,
     probe_errors: HashMap<usize, String>,
@@ -55,6 +63,8 @@ impl McpApp {
             marquee_offset: 0,
             probe_in_progress: None,
             exit_after_probe: false,
+            editor: None,
+            notice: None,
             search_index,
             probe_details: HashMap::new(),
             probe_errors: HashMap::new(),
@@ -155,10 +165,98 @@ impl McpApp {
         }
         let index = self.selected_catalog_index()?;
         self.probe_in_progress = Some(index);
+        self.notice = None;
         self.exit_after_probe = false;
         self.probe_errors.remove(&index);
         self.detail_layout = None;
         Some(index)
+    }
+
+    pub(crate) fn begin_edit(&mut self) {
+        if self.probe_in_progress.is_some() {
+            self.notice = Some(McpNotice {
+                message: "wait for the active probe before editing configuration".to_owned(),
+                error: true,
+            });
+            return;
+        }
+        let Some(index) = self.selected_catalog_index() else {
+            return;
+        };
+        match McpEditForm::new(index, &self.registrations[index]) {
+            Ok(editor) => {
+                self.editor = Some(editor);
+                self.notice = None;
+            }
+            Err(error) => {
+                self.notice = Some(McpNotice {
+                    message: format!("{error:#}"),
+                    error: true,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn finish_edit(&mut self, index: usize, result: Result<McpRegistration>) {
+        match result.and_then(|updated| self.replace_registration(index, updated)) {
+            Ok(selector) => {
+                self.editor = None;
+                self.notice = Some(McpNotice {
+                    message: format!("saved basic configuration for {selector}"),
+                    error: false,
+                });
+            }
+            Err(error) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(format!("{error:#}"));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn finish_open(&mut self, index: usize, result: Result<McpRegistration>) {
+        let source = self.registrations.get(index).map_or_else(
+            || "selected MCP source".to_owned(),
+            |registration| registration.source.display().to_string(),
+        );
+        self.notice = Some(match result {
+            Ok(updated) => match self.replace_registration(index, updated) {
+                Ok(_) => McpNotice {
+                    message: format!("opened {source}"),
+                    error: false,
+                },
+                Err(error) => McpNotice {
+                    message: format!("opened config but could not refresh it: {error:#}"),
+                    error: true,
+                },
+            },
+            Err(error) => McpNotice {
+                message: format!("could not open config: {error:#}"),
+                error: true,
+            },
+        });
+    }
+
+    fn replace_registration(&mut self, index: usize, updated: McpRegistration) -> Result<String> {
+        let expected = self.registrations.get(index).ok_or_else(|| {
+            anyhow::anyhow!("updated MCP registration has an out-of-range catalog index")
+        })?;
+        if updated.selector != expected.selector || updated.source != expected.source {
+            anyhow::bail!(
+                "updated registration `{}` did not match `{}`",
+                updated.selector,
+                expected.selector
+            );
+        }
+        let selector = updated.selector.clone();
+        self.registrations[index] = updated;
+        self.search_index[index] = registration_search_text(&self.registrations[index]);
+        self.probe_details.remove(&index);
+        self.probe_errors.remove(&index);
+        self.detail_texts.remove(&index);
+        self.detail_layout = None;
+        self.recompute_filter();
+        Ok(selector)
     }
 
     pub(crate) fn finish_probe(&mut self, index: usize, result: Result<McpDetail>) {
@@ -330,6 +428,27 @@ mod tests {
             app.selected_detail_text()
                 .expect("first detail")
                 .contains("Runtime metadata: success (7ms)")
+        );
+    }
+
+    #[test]
+    fn completed_open_refreshes_the_selected_registration() {
+        let original = registration("docs", "codex", "old description");
+        let mut refreshed = original.clone();
+        refreshed.command = Some("new-server".to_owned());
+        let mut app = McpApp::new(vec![original]);
+
+        app.finish_open(0, Ok(refreshed));
+
+        assert_eq!(
+            app.selected_registration()
+                .and_then(|entry| entry.command.as_deref()),
+            Some("new-server")
+        );
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|notice| !notice.error && notice.message.starts_with("opened "))
         );
     }
 

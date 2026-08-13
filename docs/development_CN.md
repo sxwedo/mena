@@ -20,6 +20,7 @@ main.rs
       ├── mcp.rs             注册模型、目录与 probe gate
       │   ├── adapter.rs     闭合的客户端配置发现 seam
       │   │   ├── common.rs  归一化与脱敏
+      │   │   ├── edit.rs    原生基础字段写回
       │   │   ├── storage.rs 有界配置 I/O
       │   │   ├── codex.rs / json_clients.rs / goose.rs
       │   │   └── plugins.rs 已启用 Plugin 发现与路径范围
@@ -30,6 +31,7 @@ main.rs
       │   ├── session
       │   └── skill
       ├── settings.rs
+      ├── editor.rs          不经 Shell 的外部编辑器启动
       ├── export.rs / clipboard.rs / fs.rs
       └── view.rs / ui.rs
 ```
@@ -47,6 +49,10 @@ MCP Catalog 同样把公共注册元数据与私有连接材料分开。Adapter 
 MCP TUI 负责搜索、选择、详情渲染缓存和有界 Probe 工作线程。工作线程仍通过
 `McpCatalog` 回调，不接收也不重建 Adapter 的私有连接值。
 
+MCP 配置修改也通过同一个 Catalog seam。`McpConfigPatch` 只包含非敏感基础字段；
+`adapter/edit.rs` 会重新读取原生文件、按客户端结构定点修改、完成校验，并通过
+`fs.rs` 原子写入且保留权限。TUI 不直接解析或写入 Provider 配置。
+
 ## 安全不变量
 
 - 原生恢复命令必须分别构造程序和 argv，绝不调用 Shell。
@@ -61,6 +67,9 @@ MCP TUI 负责搜索、选择、详情渲染缓存和有界 Probe 工作线程�
 - MCP probe 不调用 Tool、不读取 Resource、不展开 Prompt。
 - MCP 发现不得调用 Shell 或动态凭据 helper。
 - MCP 敏感值必须保持私有；只序列化脱敏目标以及 binding 名称/来源。
+- 绝不能把脱敏占位符写入文件；managed/plugin 以及无法保留注释的格式不进入内置
+  MCP 编辑器。
+- MCP 配置写入必须重新读取来源、保留无关数据、验证原生结构并原子替换文件。
 - Server 描述、schema 与 safety annotation 都按不可信数据处理。
 
 ## 增加 Provider 支持
@@ -84,7 +93,9 @@ MCP TUI 负责搜索、选择、详情渲染缓存和有界 Probe 工作线程�
    接口测试。
 5. Live transport 只能放进 `mcp/probe.rs`，并保持显式 opt-in、时间/数量/分页
    上限、错误脱敏与零 Tool 调用。
-6. 更新 [MCP 来源与元数据矩阵](mcp_CN.md)。
+6. 若客户端来源可写，在 `mcp/adapter/edit.rs` 增加原生写回行为与接口测试；不得猜测
+   通用 enable 字段。
+7. 更新 [MCP 来源与元数据矩阵](mcp_CN.md)。
 
 ## 验证
 

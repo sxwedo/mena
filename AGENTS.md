@@ -17,6 +17,7 @@ mena skills [--provider <name>] [--scope <scope>]
 mena skills inspect <name>
 mena mcp [--provider <client>] [--scope <scope>] [--source <path>] [--json]
 mena mcp inspect <name> [--probe] [--timeout <seconds>] [--json]
+mena mcp open <name>
 mena config init
 ```
 
@@ -87,10 +88,12 @@ main.rs
 - `skill.rs` is the filesystem seam for Skill discovery, unique selection,
   canonical root containment, bounded preview reads, and directory listing.
 - `mcp.rs` owns the provider-neutral MCP catalog, stable filters, ambiguity
-  handling, redacted public metadata, and explicit live-probe gate.
-  `mcp/adapter.rs` is the closed client-config seam; raw connection values stay
-  private. `mcp/probe.rs` alone may start stdio or contact Streamable HTTP, and
-  only after `--probe` or an explicit `p` action in the MCP browser.
+  handling, redacted public metadata, safe basic configuration patches, and
+  the explicit live-probe gate. `mcp/adapter.rs` is the closed client-config
+  seam; raw connection values stay private. `mcp/adapter/edit.rs` owns native
+  configuration updates. `mcp/probe.rs` alone may start stdio or contact
+  Streamable HTTP, and only after `--probe` or an explicit `p` action in the
+  MCP browser.
 - `controller.rs` orchestrates commands, emits stable JSON or text output, and
   resumes through native argv.
 - `tui/` owns agent launch, session management, Skill and MCP browsing, search,
@@ -125,6 +128,10 @@ main.rs
   resource contents, or render prompts.
 - Never serialize MCP environment/header/auth values. Redact URL userinfo,
   query values, fragments, and secret-bearing argv positions; sanitize errors.
+- Never write redacted values back into MCP files. Re-read and validate the
+  native source, preserve unrelated data, and use atomic permission-preserving
+  replacement. Plugin/managed sources and formats that cannot retain comments
+  must fail closed for embedded editing.
 - Treat MCP server metadata and safety annotations as untrusted claims. Keep
   reads, pages, item counts, schemas, text, timeouts, and cleanup bounded.
 
@@ -159,8 +166,9 @@ from another application.
 - Add MCP client formats through `mcp/adapter.rs`, normalize in focused
   adapters, and add interface fixtures for source/scope discovery, ambiguity,
   redaction, environment expansion, plugin containment, and probe paths.
-- Keep MCP TUI probing behind `McpCatalog`; do not expose private connections to
-  `tui/mcp/`. Probe results must remain keyed to their originating registration.
+- Keep MCP TUI probing and configuration editing behind `McpCatalog`; do not
+  expose private connections or provider-native write logic to `tui/mcp/`.
+  Probe results must remain keyed to their originating registration.
 - Preserve saved-session selectors (`provider:session-id`) and JSON field names
   unless making an explicitly versioned breaking change.
 - Keep `README.md` and `README_CN.md` concise and synchronized. Put detailed

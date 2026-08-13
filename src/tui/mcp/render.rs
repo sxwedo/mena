@@ -2,12 +2,15 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
+};
 use unicode_width::UnicodeWidthChar;
 
 use super::app::{McpApp, McpDetailLayout, McpFocus};
+use super::edit::McpEditFieldKind;
 use crate::mcp::McpRegistration;
-use crate::tui::common::{key_hints, render_border_beam};
+use crate::tui::common::{centered_rect, key_hints, render_border_beam};
 
 const ACCENT: Color = Color::Cyan;
 const ACTIVE_BORDER: Color = Color::Cyan;
@@ -38,6 +41,9 @@ pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
         render_detail(frame, columns[1], app);
     }
     render_footer(frame, areas[2]);
+    if app.editor.is_some() {
+        render_editor(frame, app);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
@@ -66,6 +72,19 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
             Span::styled(
                 format!(" ({}/{})", app.visible.len(), app.registrations.len()),
                 Style::default().fg(Color::DarkGray),
+            ),
+        ]
+    } else if let Some(notice) = &app.notice {
+        vec![
+            Span::styled(" MENA MCP ", Style::default().fg(ACCENT).bold()),
+            Span::styled("│ ", Style::default().fg(SEPARATOR)),
+            Span::styled(
+                notice.message.clone(),
+                Style::default().fg(if notice.error {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
             ),
         ]
     } else {
@@ -251,6 +270,8 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &mut McpApp) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(key_hints(&[
+            ("o", "Open config"),
+            ("e", "Edit basics"),
             ("p", "Probe"),
             ("↑/↓", "Move/scroll"),
             ("Tab", "Pane"),
@@ -260,6 +281,106 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect) {
         ])),
         area,
     );
+}
+
+fn render_editor(frame: &mut Frame<'_>, app: &McpApp) {
+    let editor = app.editor.as_ref().expect("checked MCP editor");
+    let preferred_height = u16::try_from(editor.fields.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(if editor.error.is_some() { 9 } else { 7 });
+    let area = centered_rect(frame.area(), 96, preferred_height);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(format!(" Edit MCP basics: {} ", editor.selector));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Source: ", Style::default().fg(LABEL)),
+            Span::styled(
+                editor.source.display().to_string(),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::default(),
+    ];
+    let value_width = usize::from(inner.width).saturating_sub(27).max(8);
+    for (index, field) in editor.fields.iter().enumerate() {
+        let selected = index == editor.selected;
+        let marker = if selected { "▶" } else { " " };
+        let dirty = if field.is_dirty() { "*" } else { " " };
+        let value = editor_field_value(editor, index, value_width);
+        let value_color = if selected {
+            Color::White
+        } else if field.is_dirty() {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{marker}{dirty} {:<22} ", field.kind.label()),
+                Style::default().fg(if selected { ACCENT } else { LABEL }),
+            ),
+            Span::styled(value, Style::default().fg(value_color)),
+        ]));
+    }
+    lines.push(Line::default());
+    if let Some(error) = &editor.error {
+        lines.push(Line::from(Span::styled(
+            format!("Error: {error}"),
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::default());
+    }
+    lines.push(key_hints(&[
+        ("↑/↓", "Field"),
+        ("Enter", "Edit"),
+        ("Space", "Toggle"),
+        ("Ctrl+S", "Save"),
+        ("Esc", "Cancel"),
+    ]));
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn editor_field_value(editor: &super::edit::McpEditForm, index: usize, max_chars: usize) -> String {
+    let field = &editor.fields[index];
+    if field.kind == McpEditFieldKind::Enabled {
+        return if field.value == "true" {
+            "ON".to_owned()
+        } else {
+            "OFF".to_owned()
+        };
+    }
+    let editing = editor.editing && editor.selected == index;
+    let mut characters = field.value.chars().collect::<Vec<_>>();
+    let cursor = if editing {
+        field.value[..editor.cursor].chars().count()
+    } else {
+        0
+    };
+    if editing {
+        characters.insert(cursor.min(characters.len()), '█');
+    }
+    if characters.len() <= max_chars {
+        return characters.into_iter().collect();
+    }
+    let focus = if editing { cursor } else { 0 };
+    let start = focus.saturating_sub(max_chars.saturating_sub(2) / 2);
+    let start = start.min(characters.len().saturating_sub(max_chars));
+    let mut visible = characters
+        .into_iter()
+        .skip(start)
+        .take(max_chars)
+        .collect::<String>();
+    if start > 0 {
+        visible = format!("…{}", visible.chars().skip(1).collect::<String>());
+    }
+    visible
 }
 
 const fn registration_state(registration: &McpRegistration) -> &'static str {

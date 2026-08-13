@@ -44,6 +44,7 @@ mena ss --provider cursor     # filter sessions by provider
 mena skills                   # browse installed Agent Skills
 mena sk inspect ponytail      # inspect one uniquely named Skill
 mena mcp                      # interactively browse MCP registrations
+mena mcp open codegraph       # open a registration's source config
 mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
 ```
 
@@ -52,7 +53,7 @@ mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena sessions` / `mena ss` | Search, inspect, resume, export, and delete sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
-| `mena mcp` | Search, inspect, and explicitly probe MCP registrations |
+| `mena mcp` | Browse, open/edit configuration, inspect, and explicitly probe MCP registrations |
 | `mena config init` | Create `~/.config/mena/config.toml` |
 
 ## Provider support

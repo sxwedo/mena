@@ -15,6 +15,7 @@ mena mcp
 mena mcp --json
 mena mcp --provider codex --scope project
 mena mcp --source .codex/config.toml
+mena mcp --provider codex open codegraph
 
 mena mcp --provider codex inspect codegraph
 mena mcp --provider codex inspect codegraph --json
@@ -30,6 +31,8 @@ mena mcp --provider codex inspect codegraph --probe --timeout 15
 - `↑`/`↓` 或 `j`/`k`：在列表移动；切换到详情栏后独立滚动；
 - `Tab`、`←`/`→` 或 `h`/`l`：切换栏位，不改变选中项；
 - `Enter`：切换全屏详情；
+- `o`：打开当前注册对应的准确来源文件；
+- `e`：当来源能够保留注释和客户端语义地安全写回时，打开内置基础配置编辑器；
 - `p`：在工作线程显式 probe 当前注册，列表仍可继续操作；即使选择移动，结果也只会
   绑定到发起 probe 的注册；
 - `q`/`Esc`：返回或退出。Probe 运行中退出时，Mena 会等待有界清理完成，避免遗留
@@ -51,6 +54,34 @@ mena mcp --provider codex inspect codegraph --probe --timeout 15
 这里审计的是“配置声明”，不是对客户端最终合并运行状态的复刻。客户端 trust
 规则、managed policy、命令行覆盖或运行中缓存仍可能屏蔽一条记录；`enabled` 表示
 该来源中声明的状态。
+
+## 打开与编辑配置
+
+`mena mcp open <name>` 使用与 `inspect` 相同的 `--provider`、`--scope`、
+`--source` 过滤和歧义检查，然后打开该注册的准确来源文件。浏览器中的 `o` 对当前行
+执行同一操作。Mena 按 `$VISUAL`、`$EDITOR`、VS Code、Cursor、系统默认打开器的
+顺序选择编辑器；编辑器始终以“程序 + argv”启动，不经过 Shell。
+
+按 `e` 会打开只包含非敏感连接字段的表单：
+
+- 客户端存在原生可写开关时，`Space` 切换 `Enabled`；
+- `Enter` 编辑适用的 `Command`、`Arguments`（JSON 字符串数组）、`URL` 或工作目录；
+- `Ctrl+U` 清空当前文本字段，`Ctrl+S` 校验并保存，`Esc` 退出文本编辑或关闭表单。
+
+内置编辑器支持 Codex TOML 和直接 JSON 来源。它只修改选中的注册，保留无关键以及
+环境变量/header 中的敏感值，以原子方式写回并保留文件权限，保存后重新发现该注册。
+Codex TOML 注释保持不变；JSON 会统一为稳定的 pretty 格式。写回遵循各客户端原生
+结构，包括 OpenCode v2 的 `disabled`、Gemini 的 `allowed`/`excluded`、Oh My Pi
+启停列表，以及 Claude local 中距离当前工作目录最近的项目节点。
+
+表单不会暴露 Mena 已脱敏的值。如果修改后的 command、argument 或 URL 仍包含
+`<redacted>`，保存会被拒绝，避免占位符覆盖真实凭据。环境变量、header、认证、工具
+策略、未知字段和 transport 切换仍应使用完整文件编辑器。
+
+JSONC 与 YAML 使用 `o` 打开，因为结构化重写可能删除注释。Plugin 和 managed 注册
+也不允许内置编辑，它们应由所属 Plugin 或管理员控制；在操作系统权限允许时仍可打开
+文件。保存文件不会强制已运行的客户端重新加载，必要时请使用该客户端自己的 reload
+或重启机制。
 
 ## 配置来源
 
@@ -161,6 +192,7 @@ scope 尤其应先看静态 inspect。
 ## 有界性与安全契约
 
 - 单配置读取上限 8 MiB、单文件最多 10,000 条注册；
+- 内置编辑的输出同样限制为 8 MiB，并以保留权限的原子替换写回；
 - 已安装 Plugin 根目录和被引用的 MCP 清单路径先 canonicalize，且必须留在 Plugin
   cache/marketplace 根目录内；
 - Probe timeout 必须在 1–300 秒；
@@ -178,9 +210,10 @@ MCP 功能是一个小接口、深实现的模块：
 |---|---|
 | `src/lib.rs` | CLI 参数与命令分发 |
 | `src/controller.rs` | scan/filter/inspect 编排和退出语义 |
-| `src/tui/mcp/` | 搜索、栏位导航、详情缓存与 Probe 工作线程 |
-| `src/mcp.rs` | 公共模型、排序、筛选、消歧与 probe gate |
+| `src/tui/mcp/` | 搜索、栏位导航、详情缓存、编辑表单与 Probe 工作线程 |
+| `src/mcp.rs` | 公共模型、排序、筛选、消歧、编辑与 probe gate |
 | `src/mcp/adapter.rs` | 闭合发现 seam 与私有连接材料 |
+| `src/mcp/adapter/edit.rs` | 经校验的原生 TOML/JSON 基础字段写回 |
 | `src/mcp/adapter/storage.rs` | 有界读取、最近项目查找、profile 上限 |
 | `src/mcp/adapter/codex.rs` | Codex 原生 TOML 归一化 |
 | `src/mcp/adapter/json_clients.rs` | Claude、Cursor、Gemini、OpenCode、OMP、Pi 格式 |
@@ -188,12 +221,14 @@ MCP 功能是一个小接口、深实现的模块：
 | `src/mcp/adapter/plugins.rs` | 已启用 Claude/Codex Plugin 的发现与路径约束 |
 | `src/mcp/adapter/common.rs` | 公共归一化、脱敏、raw/public 分离 |
 | `src/mcp/probe.rs` | 显式 rmcp client、transport、目录上限、运行时模型 |
+| `src/editor.rs` | 不经过 Shell 的外部编辑器选择与启动 |
 | `src/view.rs` | 人类可读表格与 detail |
 
 测试与公开 seam 同处，覆盖注册归一化、凭据脱敏（包括安全的 `Debug` 输出）、同名
 消歧、Plugin 启用/路径范围与 wrapped/top-level 清单、动态 helper 拒绝、remote
 executor 拒绝、disabled Server 拒绝，以及一个内存 MCP Server；后者会断言元数据
-发现过程中 Tool 调用次数严格为 0。
+发现过程中 Tool 调用次数严格为 0。编辑测试覆盖客户端原生结构、无关数据保留、
+TOML 注释、JSONC 拒绝以及脱敏占位符拒绝。
 
 ## 上游格式参考
 

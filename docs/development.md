@@ -20,6 +20,7 @@ main.rs
       ├── mcp.rs             registration model, catalog, and probe gate
       │   ├── adapter.rs     closed client-config discovery seam
       │   │   ├── common.rs  normalization and redaction
+      │   │   ├── edit.rs    native basic-field updates
       │   │   ├── storage.rs bounded configuration I/O
       │   │   ├── codex.rs / json_clients.rs / goose.rs
       │   │   └── plugins.rs enabled-plugin discovery and containment
@@ -30,6 +31,7 @@ main.rs
       │   ├── session
       │   └── skill
       ├── settings.rs
+      ├── editor.rs          shell-free external editor launch
       ├── export.rs / clipboard.rs / fs.rs
       └── view.rs / ui.rs
 ```
@@ -51,6 +53,12 @@ The MCP TUI owns search, selection, cached detail rendering, and its bounded
 probe worker. The worker calls back through `McpCatalog`; it does not receive or
 reconstruct private adapter connection values.
 
+MCP configuration changes cross the same catalog seam. `McpConfigPatch`
+contains only non-secret basic fields; `adapter/edit.rs` re-reads the native
+file, updates the selected provider shape, validates it, and uses `fs.rs` for
+an atomic permission-preserving write. The TUI never parses or writes provider
+configuration directly.
+
 ## Safety invariants
 
 - Construct native resume program and argv separately; never invoke a shell.
@@ -67,6 +75,10 @@ reconstruct private adapter connection values.
 - Never invoke a shell or dynamic credential helper for MCP discovery.
 - Keep secret-bearing MCP values private; serialize only redacted targets and
   binding names/sources.
+- Never persist a redaction placeholder. Keep managed/plugin and
+  comment-bearing unsupported formats out of embedded MCP editing.
+- MCP configuration writes must re-read the source, preserve unrelated data,
+  validate the native shape, and replace the file atomically.
 - Treat server descriptions, schemas, and safety annotations as untrusted data.
 
 ## Adding provider support
@@ -93,7 +105,9 @@ compiled-in provider.
    fields, redaction, environment expansion, and malformed transport.
 5. Add live transport support only in `mcp/probe.rs`, with explicit opt-in,
    time/item/page bounds, sanitized errors, and zero tool calls.
-6. Update [the MCP source and metadata matrix](mcp.md).
+6. If the client is writable, add native update behavior and interface tests in
+   `mcp/adapter/edit.rs`; do not infer a generic enable field.
+7. Update [the MCP source and metadata matrix](mcp.md).
 
 ## Verification
 

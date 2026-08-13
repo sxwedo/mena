@@ -10,6 +10,14 @@ mod probe;
 
 use adapter::discover_mcp_servers;
 
+pub fn ensure_basic_config_editable(registration: &McpRegistration) -> Result<()> {
+    adapter::ensure_basic_config_editable(registration)
+}
+
+pub fn basic_config_can_toggle_enabled(registration: &McpRegistration) -> bool {
+    adapter::basic_config_can_toggle_enabled(registration)
+}
+
 /// Transport or host mechanism used to expose an MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +152,31 @@ pub struct McpRegistration {
     pub extra_fields: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// A partial update to the non-secret connection fields of one MCP registration.
+///
+/// An outer [`Option`] distinguishes an unchanged field from a requested
+/// update. For nullable fields, `Some(None)` removes the field from the native
+/// configuration while `Some(Some(value))` replaces it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpConfigPatch {
+    pub enabled: Option<bool>,
+    pub command: Option<Option<String>>,
+    pub args: Option<Vec<String>>,
+    pub url: Option<Option<String>>,
+    pub cwd: Option<Option<PathBuf>>,
+}
+
+impl McpConfigPatch {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.command.is_none()
+            && self.args.is_none()
+            && self.url.is_none()
+            && self.cwd.is_none()
+    }
 }
 
 /// Runtime server identity returned by the MCP initialization handshake.
@@ -374,6 +407,8 @@ pub struct McpDetail {
 pub struct McpCatalog {
     registrations: Vec<McpRegistration>,
     connections: Vec<adapter::McpConnection>,
+    home: Option<PathBuf>,
+    workspace: Option<PathBuf>,
 }
 
 impl fmt::Debug for McpCatalog {
@@ -409,12 +444,43 @@ impl McpCatalog {
         Ok(Self {
             registrations,
             connections,
+            home: home.map(Path::to_path_buf),
+            workspace: workspace.map(Path::to_path_buf),
         })
     }
 
     #[must_use]
     pub fn registrations(&self) -> &[McpRegistration] {
         &self.registrations
+    }
+
+    /// Atomically update basic connection fields in one registration's native
+    /// configuration and return the freshly rediscovered registration.
+    ///
+    /// Secret-bearing environment and header values are never part of the
+    /// patch, and unmodified native fields are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registration is stale, its source is read-only
+    /// or unsupported, the patch is invalid, or the updated catalog cannot be
+    /// rediscovered.
+    pub fn update_basic_config(
+        &self,
+        registration: &McpRegistration,
+        patch: &McpConfigPatch,
+    ) -> Result<McpRegistration> {
+        let current = Self::scan(self.home.as_deref(), self.workspace.as_deref())?;
+        let current_index = current.resolve_identity_index(registration)?;
+        let current_registration = &current.registrations[current_index];
+        if patch.is_empty() {
+            return Ok(current_registration.clone());
+        }
+
+        adapter::update_basic_config(current_registration, patch, self.workspace.as_deref())?;
+        let refreshed = Self::scan(self.home.as_deref(), self.workspace.as_deref())?;
+        let index = refreshed.resolve_identity_index(current_registration)?;
+        Ok(refreshed.registrations[index].clone())
     }
 
     /// Select registrations using normalized provider, scope, and source filters.
@@ -492,7 +558,7 @@ impl McpCatalog {
         Ok(self.probe_index(index, timeout_seconds))
     }
 
-    pub(crate) fn inspect_registration_with_probe(
+    pub(crate) fn inspect_current_registration_with_probe(
         &self,
         registration: &McpRegistration,
         timeout_seconds: u64,
@@ -500,17 +566,9 @@ impl McpCatalog {
         if !(1..=300).contains(&timeout_seconds) {
             bail!("MCP probe timeout must be between 1 and 300 seconds");
         }
-        let index = self
-            .registrations
-            .iter()
-            .position(|candidate| candidate == registration)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "MCP registration `{}` is no longer present in the catalog",
-                    registration.selector
-                )
-            })?;
-        Ok(self.probe_index(index, timeout_seconds))
+        let refreshed = Self::scan(self.home.as_deref(), self.workspace.as_deref())?;
+        let index = refreshed.resolve_identity_index(registration)?;
+        Ok(refreshed.probe_index(index, timeout_seconds))
     }
 
     fn probe_index(&self, index: usize, timeout_seconds: u64) -> McpDetail {
@@ -586,6 +644,32 @@ impl McpCatalog {
             }
         }
     }
+
+    fn resolve_identity_index(&self, registration: &McpRegistration) -> Result<usize> {
+        let matches = self
+            .registrations
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.selector == registration.selector
+                    && candidate.source == registration.source
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [index] => Ok(*index),
+            [] => bail!(
+                "MCP registration `{}` is no longer present in {}",
+                registration.selector,
+                registration.source.display()
+            ),
+            _ => bail!(
+                "MCP registration `{}` is ambiguous in {}",
+                registration.selector,
+                registration.source.display()
+            ),
+        }
+    }
 }
 
 const MCP_PROVIDERS: &[&str] = &[
@@ -615,6 +699,415 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{McpCatalog, McpTransport, McpValueSource};
+
+    #[test]
+    fn basic_edit_updates_only_the_selected_codex_registration() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".codex"))?;
+        let path = home.path().join(".codex/config.toml");
+        fs::write(
+            &path,
+            r#"# keep this file comment
+[features]
+experimental = true
+
+[mcp_servers.docs]
+# keep this server comment
+command = "npx"
+args = ["-y", "@example/docs"]
+cwd = "/old/workspace"
+enabled = true
+env = { API_TOKEN = "keep-secret" }
+
+[mcp_servers.other]
+command = "other-server"
+"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.name == "docs")
+            .expect("docs registration");
+        let updated = catalog.update_basic_config(
+            registration,
+            &super::McpConfigPatch {
+                command: Some(Some("bunx".to_owned())),
+                args: Some(vec!["@example/docs@latest".to_owned()]),
+                cwd: Some(None),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+
+        assert_eq!(updated.command.as_deref(), Some("bunx"));
+        assert_eq!(updated.args, ["@example/docs@latest"]);
+        assert_eq!(updated.cwd, None);
+
+        let content = fs::read_to_string(path)?;
+        assert!(content.contains("# keep this file comment"));
+        assert!(content.contains("# keep this server comment"));
+        assert!(content.contains("API_TOKEN = \"keep-secret\""));
+        assert!(content.contains("[mcp_servers.other]"));
+        assert!(content.contains("command = \"other-server\""));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_basic_edit_patch_rediscovers_external_changes() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".codex"))?;
+        let path = home.path().join(".codex/config.toml");
+        fs::write(
+            &path,
+            r#"[mcp_servers.docs]
+command = "old-server"
+"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.name == "docs")
+            .expect("docs registration");
+        fs::write(
+            &path,
+            r#"[mcp_servers.docs]
+command = "new-server"
+"#,
+        )?;
+
+        let refreshed =
+            catalog.update_basic_config(registration, &super::McpConfigPatch::default())?;
+
+        assert_eq!(refreshed.command.as_deref(), Some("new-server"));
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_preserves_unrelated_json_configuration() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".cursor"))?;
+        let path = home.path().join(".cursor/mcp.json");
+        fs::write(
+            &path,
+            r#"{
+  "theme": "keep-root-setting",
+  "mcpServers": {
+    "docs": {
+      "command": "npx",
+      "args": ["old"],
+      "cwd": "/old/workspace",
+      "enabled": true,
+      "env": {"API_TOKEN": "keep-secret"},
+      "custom": {"keep": true}
+    },
+    "other": {"command": "other-server"}
+  }
+}"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.selector == "cursor:user:docs")
+            .expect("docs registration");
+        let updated = catalog.update_basic_config(
+            registration,
+            &super::McpConfigPatch {
+                command: Some(Some("bunx".to_owned())),
+                args: Some(vec!["@example/docs@latest".to_owned()]),
+                cwd: Some(None),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+
+        assert_eq!(updated.command.as_deref(), Some("bunx"));
+        assert_eq!(updated.args, ["@example/docs@latest"]);
+        assert_eq!(updated.cwd, None);
+
+        let content: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        assert_eq!(content["theme"], "keep-root-setting");
+        assert_eq!(
+            content["mcpServers"]["docs"]["env"]["API_TOKEN"],
+            "keep-secret"
+        );
+        assert_eq!(content["mcpServers"]["docs"]["custom"]["keep"], true);
+        assert_eq!(content["mcpServers"]["other"]["command"], "other-server");
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_uses_opencode_native_command_array() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".config/opencode"))?;
+        let path = home.path().join(".config/opencode/opencode.json");
+        fs::write(
+            &path,
+            r#"{
+  "mcp": {
+    "servers": {
+      "docs": {
+        "type": "local",
+        "command": ["npx", "-y", "old-package"],
+        "disabled": false,
+        "environment": {"API_TOKEN": "keep-secret"}
+      }
+    }
+  }
+}"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.selector == "opencode:user:docs")
+            .expect("docs registration");
+        let updated = catalog.update_basic_config(
+            registration,
+            &super::McpConfigPatch {
+                enabled: Some(false),
+                command: Some(Some("bunx".to_owned())),
+                args: Some(vec!["new-package".to_owned(), "--stdio".to_owned()]),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+
+        assert!(!updated.enabled);
+        assert_eq!(updated.command.as_deref(), Some("bunx"));
+        assert_eq!(updated.args, ["new-package", "--stdio"]);
+        let content: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        assert_eq!(
+            content["mcp"]["servers"]["docs"]["command"],
+            serde_json::json!(["bunx", "new-package", "--stdio"])
+        );
+        assert_eq!(content["mcp"]["servers"]["docs"]["disabled"], true);
+        assert_eq!(
+            content["mcp"]["servers"]["docs"]["environment"]["API_TOKEN"],
+            "keep-secret"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_targets_the_nearest_claude_local_project() -> Result<()> {
+        let home = tempdir()?;
+        let project = home.path().join("work/project");
+        let nested = project.join("nested/current");
+        fs::create_dir_all(&nested)?;
+        let path = home.path().join(".claude.json");
+        let source = serde_json::json!({
+            "projects": {
+                project.to_string_lossy(): {
+                    "mcpServers": {
+                        "docs": {"command": "parent-server"}
+                    }
+                },
+                project.join("nested").to_string_lossy(): {
+                    "mcpServers": {
+                        "docs": {"command": "nested-server"}
+                    }
+                }
+            }
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&source)?)?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), Some(&nested))?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.selector == "claude:local:docs")
+            .expect("local docs registration");
+        assert_eq!(registration.command.as_deref(), Some("nested-server"));
+
+        let updated = catalog.update_basic_config(
+            registration,
+            &super::McpConfigPatch {
+                command: Some(Some("updated-nested-server".to_owned())),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+        assert_eq!(updated.command.as_deref(), Some("updated-nested-server"));
+
+        let content: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        assert_eq!(
+            content["projects"][project.to_string_lossy().as_ref()]["mcpServers"]["docs"]["command"],
+            "parent-server"
+        );
+        assert_eq!(
+            content["projects"][project.join("nested").to_string_lossy().as_ref()]["mcpServers"]["docs"]
+                ["command"],
+            "updated-nested-server"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_updates_omp_native_enabled_lists() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".omp/agent"))?;
+        let path = home.path().join(".omp/agent/mcp.json");
+        fs::write(
+            &path,
+            r#"{
+  "mcpServers": {"docs": {"command": "docs-server"}},
+  "enabledServers": ["docs", "other"],
+  "disabledServers": ["legacy"]
+}"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.selector == "omp:user:docs")
+            .expect("OMP docs registration");
+        let updated = catalog.update_basic_config(
+            registration,
+            &super::McpConfigPatch {
+                enabled: Some(false),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+
+        assert!(!updated.enabled);
+        let content: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        assert_eq!(content["enabledServers"], serde_json::json!(["other"]));
+        assert_eq!(
+            content["disabledServers"],
+            serde_json::json!(["legacy", "docs"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_updates_gemini_allowed_and_excluded_policy() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".gemini"))?;
+        let path = home.path().join(".gemini/settings.json");
+        fs::write(
+            &path,
+            r#"{
+  "mcpServers": {
+    "docs": {"command": "docs-server"},
+    "other": {"command": "other-server"}
+  },
+  "mcp": {
+    "allowed": ["docs"],
+    "excluded": []
+  }
+}"#,
+        )?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.selector == "gemini:user:docs")
+            .expect("Gemini docs registration");
+        let disabled = catalog.update_basic_config(
+            registration,
+            &super::McpConfigPatch {
+                enabled: Some(false),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+        assert!(!disabled.enabled);
+        let content: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        assert_eq!(content["mcp"]["allowed"], serde_json::json!(["docs"]));
+        assert_eq!(content["mcp"]["excluded"], serde_json::json!(["docs"]));
+
+        let enabled = catalog.update_basic_config(
+            &disabled,
+            &super::McpConfigPatch {
+                enabled: Some(true),
+                ..super::McpConfigPatch::default()
+            },
+        )?;
+        assert!(enabled.enabled);
+        let content: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        assert_eq!(content["mcp"]["allowed"], serde_json::json!(["docs"]));
+        assert_eq!(content["mcp"]["excluded"], serde_json::json!([]));
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_refuses_jsonc_without_rewriting_comments() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".config/opencode"))?;
+        let path = home.path().join(".config/opencode/opencode.jsonc");
+        let original = r#"{
+  // This comment must never be normalized away.
+  "mcp": {
+    "docs": {
+      "type": "local",
+      "command": ["docs-server"]
+    }
+  }
+}"#;
+        fs::write(&path, original)?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.selector == "opencode:user:docs")
+            .expect("OpenCode docs registration");
+        let error = catalog
+            .update_basic_config(
+                registration,
+                &super::McpConfigPatch {
+                    command: Some(Some("new-server".to_owned())),
+                    ..super::McpConfigPatch::default()
+                },
+            )
+            .expect_err("JSONC must require the external editor");
+
+        assert!(error.to_string().contains("press `o`"));
+        assert_eq!(fs::read_to_string(path)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn basic_edit_never_writes_redaction_placeholders_over_secrets() -> Result<()> {
+        let home = tempdir()?;
+        fs::create_dir_all(home.path().join(".codex"))?;
+        let path = home.path().join(".codex/config.toml");
+        let original = r#"[mcp_servers.secure]
+command = "secure-server"
+args = ["--api-key", "literal-secret"]
+"#;
+        fs::write(&path, original)?;
+
+        let catalog = McpCatalog::scan(Some(home.path()), None)?;
+        let registration = catalog
+            .registrations()
+            .iter()
+            .find(|registration| registration.name == "secure")
+            .expect("secure registration");
+        assert!(
+            registration
+                .args
+                .iter()
+                .any(|argument| argument == "<redacted>")
+        );
+        let error = catalog
+            .update_basic_config(
+                registration,
+                &super::McpConfigPatch {
+                    args: Some(registration.args.clone()),
+                    ..super::McpConfigPatch::default()
+                },
+            )
+            .expect_err("redacted values must never be persisted");
+
+        assert!(error.to_string().contains("still contains `<redacted>`"));
+        assert_eq!(fs::read_to_string(path)?, original);
+        Ok(())
+    }
 
     #[test]
     fn codex_stdio_registration_is_normalized_without_exposing_secrets() -> Result<()> {

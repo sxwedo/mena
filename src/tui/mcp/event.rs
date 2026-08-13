@@ -6,13 +6,15 @@ use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 use super::app::{McpApp, McpFocus};
-use crate::mcp::McpRegistration;
+use super::edit::McpEditAction;
+use crate::mcp::{McpConfigPatch, McpRegistration};
 use crate::tui::common::ManagedTerminal;
 use crate::tui::common::is_key_press;
 
 pub(crate) fn run_mcp_browser(
     registrations: Vec<McpRegistration>,
     mut probe: impl FnMut(&McpRegistration) -> Result<crate::mcp::McpDetail> + Send + 'static,
+    mut update: impl FnMut(&McpRegistration, &McpConfigPatch) -> Result<McpRegistration>,
 ) -> Result<()> {
     let mut app = McpApp::new(registrations);
     let (request_tx, request_rx) = mpsc::sync_channel::<(usize, McpRegistration)>(1);
@@ -30,7 +32,7 @@ pub(crate) fn run_mcp_browser(
             })
             .context("failed to start MCP probe worker")?,
     );
-    let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+    let mut terminal = Some(ManagedTerminal::enter_with_native_selection()?);
 
     let loop_result = (|| -> Result<()> {
         loop {
@@ -55,6 +57,8 @@ pub(crate) fn run_mcp_browser(
             }
 
             terminal
+                .as_mut()
+                .expect("MCP terminal is active")
                 .terminal
                 .draw(|frame| super::render::draw_mcp(frame, &mut app))
                 .context("failed to draw MCP browser")?;
@@ -76,6 +80,23 @@ pub(crate) fn run_mcp_browser(
                             );
                         }
                     }
+                    McpAction::Open { index } => {
+                        let registration = app.registrations[index].clone();
+                        let path = registration.source.clone();
+                        drop(terminal.take());
+                        let result = crate::editor::open_file(&path).and_then(|()| {
+                            update(&registration, &McpConfigPatch::default()).context(
+                                "configuration opened but the registration could not be refreshed",
+                            )
+                        });
+                        terminal = Some(ManagedTerminal::enter_with_native_selection()?);
+                        app.finish_open(index, result);
+                    }
+                    McpAction::Save { index, patch } => {
+                        let registration = app.registrations[index].clone();
+                        let result = update(&registration, &patch);
+                        app.finish_edit(index, result);
+                    }
                 }
             } else {
                 app.marquee_offset = app.marquee_offset.wrapping_add(1);
@@ -84,7 +105,7 @@ pub(crate) fn run_mcp_browser(
         Ok(())
     })();
 
-    drop(terminal);
+    drop(terminal.take());
     drop(request_tx);
     let worker_result = worker.map_or_else(
         || Ok(()),
@@ -101,6 +122,8 @@ pub(crate) enum McpAction {
     Continue,
     Quit,
     Probe { index: usize },
+    Open { index: usize },
+    Save { index: usize, patch: McpConfigPatch },
 }
 
 pub(crate) fn handle_event(app: &mut McpApp, input: &Event) -> McpAction {
@@ -133,6 +156,26 @@ pub(crate) fn handle_event(app: &mut McpApp, input: &Event) -> McpAction {
 }
 
 pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
+    if app.editor.is_some() {
+        let mut editor = app.editor.take().expect("checked MCP editor");
+        return match editor.handle_key(key) {
+            McpEditAction::Continue => {
+                app.editor = Some(editor);
+                McpAction::Continue
+            }
+            McpEditAction::Cancel => McpAction::Continue,
+            McpEditAction::Save(patch) => {
+                if patch.is_empty() {
+                    editor.error = Some("no configuration fields were changed".to_owned());
+                    app.editor = Some(editor);
+                    return McpAction::Continue;
+                }
+                let index = editor.registration_index;
+                app.editor = Some(editor);
+                McpAction::Save { index, patch }
+            }
+        };
+    }
     if app.is_searching {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => app.is_searching = false,
@@ -179,6 +222,13 @@ pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
         KeyCode::Char('p') => app
             .begin_probe()
             .map_or(McpAction::Continue, |index| McpAction::Probe { index }),
+        KeyCode::Char('o') => app
+            .selected_catalog_index()
+            .map_or(McpAction::Continue, |index| McpAction::Open { index }),
+        KeyCode::Char('e') => {
+            app.begin_edit();
+            McpAction::Continue
+        }
         KeyCode::Enter => {
             if app.selected_registration().is_some() {
                 app.full_screen_detail = !app.full_screen_detail;
@@ -321,5 +371,43 @@ mod tests {
         assert!(matches!(first, super::McpAction::Probe { index: 0 }));
         assert!(matches!(second, super::McpAction::Continue));
         assert_eq!(app.probe_in_progress, Some(0));
+    }
+
+    #[test]
+    fn open_and_edit_keys_target_only_the_selected_registration() {
+        let mut app = McpApp::new(vec![registration("first"), registration("second")]);
+        app.select_next();
+
+        let open = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(matches!(open, super::McpAction::Open { index: 1 }));
+
+        let edit = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+        assert!(matches!(edit, super::McpAction::Continue));
+        assert!(app.editor.is_some());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        let save = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(
+            save,
+            super::McpAction::Save {
+                index: 1,
+                patch: crate::mcp::McpConfigPatch {
+                    enabled: Some(false),
+                    ..
+                }
+            }
+        ));
     }
 }

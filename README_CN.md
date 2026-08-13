@@ -43,6 +43,7 @@ mena ss --provider cursor     # 按 Provider 筛选 Session
 mena skills                   # 浏览已安装的 Agent Skill
 mena sk inspect ponytail      # 检查唯一命名的 Skill
 mena mcp                      # 交互浏览 MCP 注册
+mena mcp open codegraph       # 打开该注册的来源配置
 mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 ```
 
@@ -51,7 +52,7 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
 | `mena sessions` / `mena ss` | 搜索、检查、恢复、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
-| `mena mcp` | 搜索、检查并显式探测 MCP 注册 |
+| `mena mcp` | 浏览、打开/编辑配置、检查并显式探测 MCP 注册 |
 | `mena config init` | 创建 `~/.config/mena/config.toml` |
 
 ## Provider 支持

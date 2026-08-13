@@ -43,6 +43,17 @@ pub(super) fn check_server_count(path: &Path, count: usize) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn check_config_size(path: &Path, bytes: usize) -> Result<()> {
+    if bytes as u64 > MAX_CONFIG_BYTES {
+        bail!(
+            "edited MCP config {} exceeds the {} MiB size limit",
+            path.display(),
+            MAX_CONFIG_BYTES / 1_024 / 1_024
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn find_nearest(
     start: &Path,
     relative: impl AsRef<Path>,

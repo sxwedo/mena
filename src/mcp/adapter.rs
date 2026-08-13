@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::McpRegistration;
+use super::{McpConfigPatch, McpRegistration};
 
 mod codex;
 mod common;
+mod edit;
 mod goose;
 mod json_clients;
 mod plugins;
@@ -69,6 +70,22 @@ pub(super) fn discover_mcp_servers(
         json_clients::parse_project(home, workspace, &mut discovered)?;
     }
     Ok(discovered)
+}
+
+pub(super) fn update_basic_config(
+    registration: &McpRegistration,
+    patch: &McpConfigPatch,
+    workspace: Option<&Path>,
+) -> Result<()> {
+    edit::update_basic_config(registration, patch, workspace)
+}
+
+pub(super) fn ensure_basic_config_editable(registration: &McpRegistration) -> Result<()> {
+    edit::ensure_basic_config_editable(registration)
+}
+
+pub(super) fn basic_config_can_toggle_enabled(registration: &McpRegistration) -> bool {
+    edit::basic_config_can_toggle_enabled(registration)
 }
 
 fn claude_managed_mcp_paths() -> Vec<PathBuf> {

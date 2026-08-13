@@ -39,6 +39,25 @@ fn mcp_browser_renders_a_searchable_list_and_static_detail() {
 }
 
 #[test]
+fn mcp_browser_renders_the_basic_configuration_editor() {
+    let mut app = McpApp::new(vec![fixture_mcp_registration("codegraph")]);
+    app.begin_edit();
+    let mut terminal = Terminal::new(TestBackend::new(110, 28)).expect("test terminal");
+
+    terminal
+        .draw(|frame| draw_mcp(frame, &mut app))
+        .expect("draw MCP editor");
+
+    let screen = buffer_text(terminal.backend().buffer(), 110, 28);
+    assert!(screen.contains("Edit MCP basics: codex:user:codegraph"));
+    assert!(screen.contains("/Users/test/.codex/config.toml"));
+    assert!(screen.contains("Enabled"));
+    assert!(screen.contains("Command"));
+    assert!(screen.contains("Arguments (JSON array)"));
+    assert!(screen.contains("Ctrl+S Save"));
+}
+
+#[test]
 fn session_layout_displays_titles_and_filters_by_them() {
     let session = fixture_session();
     let mut app = SessionsApp::new(vec![session], BTreeSet::default());

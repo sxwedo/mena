@@ -85,6 +85,8 @@ mod tests {
             ],
             vec!["mena", "sk", "inspect", "ponytail", "--json"],
             vec!["mena", "mcp"],
+            vec!["mena", "mcp", "open", "context7"],
+            vec!["mena", "mcp", "--provider", "codex", "open", "context7"],
             vec![
                 "mena",
                 "mcp",

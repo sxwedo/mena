@@ -1,5 +1,6 @@
 use std::io::{self, IsTerminal};
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -28,7 +29,7 @@ use crate::{AgentLaunchArgs, McpArgs, McpSubcommand, SessionsArgs, SkillSubcomma
 pub fn run_mcp(args: &McpArgs) -> Result<()> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().context("could not resolve current directory")?;
-    let catalog = McpCatalog::scan(home.as_deref(), Some(&current_dir))?;
+    let catalog = Arc::new(McpCatalog::scan(home.as_deref(), Some(&current_dir))?);
     match &args.command {
         Some(McpSubcommand::Inspect {
             name,
@@ -73,6 +74,22 @@ pub fn run_mcp(args: &McpArgs) -> Result<()> {
                 bail!("live MCP probe did not succeed: {error}");
             }
         }
+        Some(McpSubcommand::Open { name }) => {
+            if args.json {
+                bail!("--json cannot be used with `mena mcp open`");
+            }
+            let detail = catalog.inspect(
+                name,
+                args.provider.as_deref(),
+                args.scope.as_deref(),
+                args.source.as_deref(),
+            )?;
+            crate::editor::open_file(&detail.registration.source)?;
+            ui::success(format!(
+                "opened MCP config {}",
+                detail.registration.source.display()
+            ));
+        }
         None => {
             let registrations = catalog.select(
                 args.provider.as_deref(),
@@ -85,9 +102,17 @@ pub fn run_mcp(args: &McpArgs) -> Result<()> {
                 ui::info("no MCP registrations discovered");
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
                 let registrations = registrations.into_iter().cloned().collect();
-                tui::manage_mcp(registrations, move |registration| {
-                    catalog.inspect_registration_with_probe(registration, 10)
-                })?;
+                let probe_catalog = Arc::clone(&catalog);
+                let update_catalog = Arc::clone(&catalog);
+                tui::manage_mcp(
+                    registrations,
+                    move |registration| {
+                        probe_catalog.inspect_current_registration_with_probe(registration, 10)
+                    },
+                    move |registration, patch| {
+                        update_catalog.update_basic_config(registration, patch)
+                    },
+                )?;
             } else {
                 print!("{}", render_mcp_table(&registrations));
             }

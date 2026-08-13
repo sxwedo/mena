@@ -17,6 +17,7 @@ mena mcp
 mena mcp --json
 mena mcp --provider codex --scope project
 mena mcp --source .codex/config.toml
+mena mcp --provider codex open codegraph
 
 mena mcp --provider codex inspect codegraph
 mena mcp --provider codex inspect codegraph --json
@@ -34,6 +35,9 @@ Browser keys:
 - `↑`/`↓` or `j`/`k` moves the list, then scrolls detail after switching panes;
 - `Tab`, `←`/`→`, or `h`/`l` switches panes without changing selection;
 - `Enter` toggles a full-screen inspector;
+- `o` opens the selected registration's exact source file;
+- `e` opens the built-in basic-configuration editor when the source can be
+  written without losing comments or provider semantics;
 - `p` explicitly probes the selected registration in a worker thread, so list
   browsing remains responsive; the result stays attached to that registration
   even if selection moves;
@@ -58,6 +62,44 @@ This is an audit of declarations, not a reconstruction of a client's final
 merged runtime state. Client trust rules, managed policy, command-line
 overrides, or a running client's cached state can still suppress a recorded
 entry; `enabled` is the state declared by that source.
+
+## Opening and editing configuration
+
+`mena mcp open <name>` resolves the registration with the same
+`--provider`/`--scope`/`--source` filters and ambiguity checks as `inspect`, then
+opens its exact source file. In the browser, `o` performs the same action for
+the selected row. Mena resolves editors in this order: `$VISUAL`, `$EDITOR`,
+VS Code, Cursor, then the platform opener. Editor commands are split into a
+program and argv and are never passed through a shell.
+
+Press `e` for a focused form over non-secret connection fields:
+
+- `Space` toggles `Enabled` when that client has a native writable setting;
+- `Enter` edits `Command`, `Arguments` (a JSON string array), `URL`, or working
+  directory when applicable;
+- `Ctrl+U` clears the active text field, `Ctrl+S` validates and saves, and
+  `Esc` leaves text entry or closes the form.
+
+The embedded editor supports Codex TOML and direct JSON sources. It preserves
+unrelated keys and secret-bearing environment/header values, updates only the
+selected registration, writes atomically while retaining file permissions,
+and rediscovers the registration after saving. Codex TOML comments are
+preserved; JSON is normalized with stable pretty formatting. Native shapes are
+respected, including OpenCode v2 `disabled`, Gemini `allowed`/`excluded`, Oh My
+Pi enable/disable lists, and the nearest Claude local project node.
+
+The form deliberately omits values that Mena redacts. If a changed command,
+argument, or URL still contains `<redacted>`, saving is refused so a placeholder
+can never overwrite a credential. Environment variables, headers,
+authentication, tool policy, unknown fields, and transport changes remain in
+the full-file editor.
+
+JSONC and YAML sources use `o` because structured reserialization could remove
+comments. Plugin and managed registrations are also excluded from embedded
+editing because their owner or administrator controls those files. Opening a
+file remains available, subject to operating-system permissions. A saved file
+does not force an already running client to reload; use that client's native
+reload/restart behavior when required.
 
 ## Configuration sources
 
@@ -182,6 +224,8 @@ project-scoped files.
 ## Bounds and safety contract
 
 - Configuration reads are capped at 8 MiB and 10,000 registrations per file.
+- Embedded edits keep the same 8 MiB output cap and use atomic,
+  permission-preserving replacement.
 - Installed plugin roots and referenced MCP manifest paths are canonicalized
   and must stay inside the plugin cache or marketplace root.
 - Probe timeout is explicit and limited to 1–300 seconds.
@@ -202,9 +246,10 @@ The MCP feature is a deep module with a small provider-neutral catalog API:
 |---|---|
 | `src/lib.rs` | CLI arguments and command dispatch |
 | `src/controller.rs` | scan/filter/inspect orchestration and exit behavior |
-| `src/tui/mcp/` | search, pane navigation, cached detail, and probe worker |
-| `src/mcp.rs` | public models, catalog sorting, filters, resolution, and probe gate |
+| `src/tui/mcp/` | search, pane navigation, cached detail, edit form, and probe worker |
+| `src/mcp.rs` | public models, catalog sorting, filters, resolution, edits, and probe gate |
 | `src/mcp/adapter.rs` | closed discovery seam and private connection material |
+| `src/mcp/adapter/edit.rs` | validated native TOML/JSON basic-field updates |
 | `src/mcp/adapter/storage.rs` | bounded reads, nearest-project search, profile limits |
 | `src/mcp/adapter/codex.rs` | native TOML normalization |
 | `src/mcp/adapter/json_clients.rs` | Claude, Cursor, Gemini, OpenCode, OMP, and Pi formats |
@@ -212,13 +257,16 @@ The MCP feature is a deep module with a small provider-neutral catalog API:
 | `src/mcp/adapter/plugins.rs` | enabled Claude/Codex plugin discovery and containment |
 | `src/mcp/adapter/common.rs` | common normalization, redaction, and raw/public split |
 | `src/mcp/probe.rs` | explicit rmcp client, transports, catalog bounds, runtime models |
+| `src/editor.rs` | shell-free external editor selection and launch |
 | `src/view.rs` | human-readable table and detail rendering |
 
 Tests live beside these public seams. They cover registration normalization,
 secret redaction (including safe `Debug` output), duplicate resolution, plugin
 enablement/containment and wrapped/top-level manifests, dynamic-helper refusal,
 remote-executor refusal, disabled-server refusal, and an in-memory MCP server
-proving that metadata discovery makes zero tool calls.
+proving that metadata discovery makes zero tool calls. Edit tests cover native
+provider shapes, unrelated-data preservation, TOML comments, JSONC refusal,
+and redaction-placeholder rejection.
 
 ## Upstream format references
 

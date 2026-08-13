@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod controller;
+mod editor;
 mod export;
 mod fs;
 mod mcp;
@@ -16,8 +17,8 @@ mod view;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 pub use mcp::{
-    McpAuthentication, McpCatalog, McpDetail, McpListCapability, McpProbe, McpProbeStatus,
-    McpPromptArgument, McpRegistration, McpResourceCapability, McpRuntimePrompt,
+    McpAuthentication, McpCatalog, McpConfigPatch, McpDetail, McpListCapability, McpProbe,
+    McpProbeStatus, McpPromptArgument, McpRegistration, McpResourceCapability, McpRuntimePrompt,
     McpRuntimeResource, McpRuntimeResourceTemplate, McpRuntimeTool, McpServerCapabilities,
     McpServerIdentity, McpSourceFormat, McpTimeouts, McpToolAnnotations, McpToolPolicy,
     McpTransport, McpValueBinding, McpValueSource,
@@ -151,6 +152,11 @@ pub enum McpSubcommand {
         /// Emit stable machine-readable JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Open the source configuration for one MCP registration
+    Open {
+        /// MCP server name or provider:scope:name selector
+        name: String,
     },
 }
 
