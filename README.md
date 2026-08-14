@@ -79,6 +79,7 @@ an explicit unsupported result instead of guessing provider-owned paths.
 
 ## Documentation
 
+- [Calm Console interface and responsive behavior](docs/interface.md)
 - [Session browser, metrics, export, and deletion](docs/sessions.md)
 - [Agent Skill discovery and browser](docs/skills.md)
 - [MCP catalog, metadata, sources, and safety](docs/mcp.md)

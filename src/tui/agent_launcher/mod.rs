@@ -120,10 +120,10 @@ pub fn select_launch_mode_for_agent(
         ResumeSession(String),
     }
 
-    let mut options = vec![(ModeOption::Fresh, "✨ Start New Session".to_owned())];
+    let mut options = vec![(ModeOption::Fresh, "Start a new session".to_owned())];
     for session in matching_sessions {
         let title = session.title.as_deref().unwrap_or("Untitled session");
-        let label = format!("⚡ Resume: {} ({title})", session.id);
+        let label = format!("Resume {} · {title}", session.id);
         options.push((ModeOption::ResumeSession(session.id.clone()), label));
     }
 

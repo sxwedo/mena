@@ -6,14 +6,160 @@ use anyhow::{Context, Result};
 use crossterm::event::{KeyEvent, KeyEventKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::{DefaultTerminal, layout::Rect};
 
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 
-// ── Palette constants ──────────────────────────────────────────────────────────
+// ── Calm Console design system ────────────────────────────────────────────────
 
-pub(super) const ACCENT: Color = Color::Cyan;
-pub(super) const MUTED: Color = Color::DarkGray;
+/// Shared low-saturation colors for mena's keyboard-first terminal interface.
+///
+/// Focus, information, success, caution, and danger each have one quiet color.
+/// Large surfaces stay neutral so the interface remains comfortable during
+/// long sessions and continues to read clearly in an 80-column terminal.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UiPalette {
+    pub canvas: Color,
+    pub panel: Color,
+    pub panel_alt: Color,
+    pub selection: Color,
+    pub grid: Color,
+    pub border: Color,
+    pub signal: Color,
+    pub success: Color,
+    pub cyan: Color,
+    pub amber: Color,
+    pub danger: Color,
+    pub violet: Color,
+    pub text: Color,
+    pub text_soft: Color,
+    pub muted: Color,
+}
+
+pub(crate) const UI: UiPalette = UiPalette {
+    canvas: Color::Rgb(17, 20, 24),
+    panel: Color::Rgb(23, 27, 33),
+    panel_alt: Color::Rgb(30, 36, 44),
+    selection: Color::Rgb(37, 50, 68),
+    grid: Color::Rgb(43, 50, 60),
+    border: Color::Rgb(52, 61, 73),
+    signal: Color::Rgb(124, 167, 217),
+    success: Color::Rgb(134, 185, 140),
+    cyan: Color::Rgb(121, 184, 199),
+    amber: Color::Rgb(211, 170, 110),
+    danger: Color::Rgb(217, 123, 132),
+    violet: Color::Rgb(169, 155, 203),
+    text: Color::Rgb(225, 230, 235),
+    text_soft: Color::Rgb(168, 176, 186),
+    muted: Color::Rgb(115, 125, 137),
+};
+
+pub(crate) fn render_canvas(frame: &mut ratatui::Frame<'_>) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::new().style(Style::default().bg(UI.canvas).fg(UI.text)),
+        area,
+    );
+}
+
+pub(crate) fn app_header(section: &'static str, context: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(
+            " mena ",
+            Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("· ", Style::default().fg(UI.border)),
+        Span::styled(
+            section,
+            Style::default().fg(UI.signal).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+    ];
+    spans.extend(context);
+    Line::from(spans)
+}
+
+pub(crate) fn panel_title(
+    label: impl Into<String>,
+    meta: Option<String>,
+    active: bool,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(
+            label.into(),
+            Style::default()
+                .fg(if active { UI.text } else { UI.text_soft })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(meta) = meta {
+        spans.extend([
+            Span::styled("  ", Style::default().fg(UI.border)),
+            Span::styled(meta, Style::default().fg(UI.muted)),
+        ]);
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+pub(crate) fn panel_block(title: Line<'_>, active: bool) -> Block<'_> {
+    Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(if active { UI.signal } else { UI.border }))
+        .style(Style::default().bg(UI.panel).fg(UI.text))
+        .title(title)
+}
+
+pub(crate) fn selection_style() -> Style {
+    Style::default()
+        .bg(UI.selection)
+        .fg(UI.text)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub(crate) fn table_header_style() -> Style {
+    Style::default()
+        .fg(UI.text_soft)
+        .bg(UI.panel_alt)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub(crate) fn badge(label: impl Into<String>, color: Color) -> Span<'static> {
+    Span::styled(
+        format!("● {}", label.into()),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+pub(crate) fn scroll_meter(position: usize, max: usize, cells: usize) -> String {
+    let percent = position.saturating_mul(100).checked_div(max).unwrap_or(100);
+    let filled = if max == 0 {
+        cells
+    } else {
+        position
+            .saturating_mul(cells)
+            .checked_div(max)
+            .unwrap_or(cells)
+    }
+    .min(cells);
+    format!(
+        "[{}{}] {percent:>3}%",
+        "■".repeat(filled),
+        "·".repeat(cells.saturating_sub(filled))
+    )
+}
+
+pub(crate) const fn header_inner(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2),
+    )
+}
 
 // ── Color mapping ──────────────────────────────────────────────────────────────
 
@@ -172,7 +318,15 @@ pub(super) const fn is_key_press(key: &KeyEvent) -> bool {
 // ── Key hint rendering ─────────────────────────────────────────────────────────
 
 pub(super) fn key_hints(hints: &[(&str, &str)]) -> Line<'static> {
-    themed_key_hints(hints, ACCENT, Color::Reset, MUTED)
+    themed_key_hints(hints, UI.signal, UI.text_soft, UI.grid)
+}
+
+pub(super) fn responsive_key_hints(
+    width: u16,
+    full: &[(&str, &str)],
+    compact: &[(&str, &str)],
+) -> Line<'static> {
+    key_hints(if width >= 96 { full } else { compact })
 }
 
 pub(super) fn themed_key_hints(
@@ -184,12 +338,14 @@ pub(super) fn themed_key_hints(
     let mut spans = Vec::new();
     for (index, (key, action)) in hints.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  •  ", Style::default().fg(separator_color)));
+            spans.push(Span::styled("  │  ", Style::default().fg(separator_color)));
         }
+        spans.push(Span::styled("[", Style::default().fg(separator_color)));
         spans.push(Span::styled(
             (*key).to_owned(),
             Style::default().fg(key_color).add_modifier(Modifier::BOLD),
         ));
+        spans.push(Span::styled("]", Style::default().fg(separator_color)));
         spans.push(Span::styled(
             format!(" {action}"),
             Style::default().fg(text_color),
@@ -210,119 +366,24 @@ pub(super) fn centered_rect(area: Rect, preferred_width: u16, preferred_height: 
         height,
     )
 }
-// ── Animation: Border Beam (流光边框) ─────────────────────────────────────────
+// ── Header frame ──────────────────────────────────────────────────────────────
 
-/// Render a glowing border beam animated around `area` at tick `tick`.
-/// Covers **all four borders** using buffer-level cell overrides.
-///
-/// The base border is rendered in `beam_color` at ~15% luminosity so the
-/// entire frame is always faintly glowing, then a bright beam head sweeps
-/// around at high contrast — much more visible than a dark base + spot beam.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::many_single_char_names,
-    clippy::suboptimal_flops
-)]
-pub(crate) fn render_border_beam(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    tick: usize,
-    title: &str,
-    _base_color: Color,
-    beam_color: Color,
-) {
+/// Render a quiet, static frame around a screen header.
+pub(crate) fn render_header_frame(frame: &mut ratatui::Frame<'_>, area: Rect, title: &str) {
     if area.width < 4 || area.height < 4 {
         return;
     }
 
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(beam_color))
-        .title(title);
+        .border_type(ratatui::widgets::BorderType::Plain)
+        .border_style(Style::default().fg(UI.border))
+        .style(Style::default().bg(UI.panel).fg(UI.text))
+        .title(Span::styled(
+            title.to_owned(),
+            Style::default().fg(UI.text_soft),
+        ));
     frame.render_widget(block, area);
-
-    let w = area.width;
-    let h = area.height;
-
-    let mut perimeter: Vec<(u16, u16, &str)> = Vec::with_capacity(usize::from(w * 2 + h * 2));
-
-    for dx in 0..w {
-        let sym = if dx == 0 {
-            "╭"
-        } else if dx == w - 1 {
-            "╮"
-        } else {
-            "─"
-        };
-        perimeter.push((area.x + dx, area.y, sym));
-    }
-    for dy in 1..h {
-        let sym = if dy == h - 1 { "╯" } else { "│" };
-        perimeter.push((area.x + w - 1, area.y + dy, sym));
-    }
-    if h > 1 {
-        for dx in (0..w - 1).rev() {
-            let sym = if dx == 0 { "╰" } else { "─" };
-            perimeter.push((area.x + dx, area.y + h - 1, sym));
-        }
-    }
-    if w > 1 {
-        for dy in (1..h - 1).rev() {
-            perimeter.push((area.x, area.y + dy, "│"));
-        }
-    }
-
-    let total = perimeter.len();
-    if total == 0 {
-        return;
-    }
-
-    let (br, bg, bb) = match beam_color {
-        Color::Cyan => (0.0, 255.0, 255.0),
-        Color::Rgb(56, 189, 248) => (56.0, 189.0, 248.0),
-        Color::Yellow => (255.0, 220.0, 0.0),
-        Color::Green => (0.0, 255.0, 120.0),
-        _ => (255.0, 255.0, 255.0),
-    };
-
-    // Base glow floor — the entire perimeter always glows faintly at this level.
-    let glow_floor = 0.12_f32;
-
-    // Beam covers half the perimeter with a smooth quadratic falloff.
-    let beam_len = (total / 2).max(10);
-    let speed = 2;
-    let head = (tick * speed) % total;
-
-    let buf = frame.buffer_mut();
-
-    for (pos, (px, py, sym)) in perimeter.iter().enumerate() {
-        let dist = if pos <= head {
-            head - pos
-        } else {
-            total + head - pos
-        };
-
-        // Start from the glow floor, boost toward 1.0 along the beam trail.
-        let beam_strength = if dist <= beam_len {
-            // Quadratic falloff for a more "laser-like" bright head + soft tail.
-            let linear = 1.0 - (dist as f32 / beam_len as f32);
-            glow_floor + (1.0 - glow_floor) * linear * linear
-        } else {
-            glow_floor
-        };
-
-        let r = (br * beam_strength) as u8;
-        let g = (bg * beam_strength) as u8;
-        let b = (bb * beam_strength) as u8;
-
-        if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(*px, *py)) {
-            cell.set_symbol(sym);
-            cell.set_style(Style::default().fg(Color::Rgb(r, g, b)));
-        }
-    }
 }
 
 // ── Animation: Thinking Orbs (AI 思考/脉冲点阵球) ─────────────────────────────────
@@ -333,24 +394,8 @@ pub(crate) fn thinking_orb_spans(tick: usize, label: &str) -> Vec<Span<'static>>
     let pulse_idx = tick % ORB_PULSE_FRAMES.len();
     let orb_symbol = ORB_PULSE_FRAMES[pulse_idx];
 
-    let color_cycle = match tick % 3 {
-        0 => Color::Cyan,
-        1 => Color::Yellow,
-        _ => Color::Green,
-    };
-
     vec![
-        Span::styled(
-            orb_symbol.to_string(),
-            Style::default()
-                .fg(color_cycle)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" {label} "),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(orb_symbol.to_string(), Style::default().fg(UI.signal)),
+        Span::styled(format!(" {label} "), Style::default().fg(UI.text_soft)),
     ]
 }

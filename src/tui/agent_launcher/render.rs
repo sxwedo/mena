@@ -2,27 +2,24 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table};
 
 use super::AgentLauncherItem;
 use crate::AgentKind;
-use crate::tui::common::{ACCENT, MUTED, centered_rect, render_border_beam};
+use crate::tui::common::{
+    UI, app_header, badge, centered_rect, header_inner, panel_block, panel_title, render_canvas,
+    render_header_frame, responsive_key_hints, selection_style, table_header_style,
+};
 
-// ── Design Tokens ─────────────────────────────────────────────────────────────
-const COLOR_ACCENT: Color = Color::Cyan;
-const COLOR_ACTIVE_BORDER: Color = Color::Cyan;
-const COLOR_INACTIVE_BORDER: Color = Color::Rgb(60, 65, 75);
-const COLOR_SELECTION_BG: Color = Color::Rgb(40, 44, 52);
-const COLOR_LABEL_KEY: Color = Color::Rgb(150, 160, 190);
-const COLOR_SEPARATOR: Color = Color::Rgb(50, 55, 65);
-const COLOR_SKY: Color = Color::Rgb(56, 189, 248);
-const COLOR_CLAUDE: Color = Color::Rgb(217, 119, 87);
-const COLOR_OPENAI: Color = Color::Rgb(134, 200, 118);
-const COLOR_GEMINI: Color = Color::Rgb(66, 133, 244);
-const COLOR_PI: Color = Color::Rgb(200, 150, 255);
-const COLOR_CURSOR: Color = Color::Rgb(120, 170, 255);
-const COLOR_GOOSE: Color = Color::Rgb(250, 204, 21);
-const COLOR_CUSTOM: Color = Color::Rgb(168, 162, 158);
+// Provider colors stay recognizable while sharing the calm, low-saturation palette.
+const COLOR_SKY: Color = UI.cyan;
+const COLOR_CLAUDE: Color = Color::Rgb(194, 141, 119);
+const COLOR_OPENAI: Color = UI.success;
+const COLOR_GEMINI: Color = UI.signal;
+const COLOR_PI: Color = UI.violet;
+const COLOR_CURSOR: Color = Color::Rgb(139, 165, 196);
+const COLOR_GOOSE: Color = UI.amber;
+const COLOR_CUSTOM: Color = UI.text_soft;
 
 /// Returns `(symbol, brand_color)` for each agent — no emoji, pure Unicode
 /// geometric shapes that evoke each brand's visual identity.
@@ -38,14 +35,14 @@ const fn agent_icon(kind: &AgentKind) -> (&'static str, Color) {
         AgentKind::OpenCode => ("▣", COLOR_SKY),
         // π — the actual Greek letter IS the Pi brand
         AgentKind::Pi => ("π", COLOR_PI),
-        // ⚡ lightning bolt — Oh My Pi's energy identity
-        AgentKind::OhMyPi => ("⚡", Color::Yellow),
+        // ϟ lightning sigil — Oh My Pi's energy identity without emoji rendering.
+        AgentKind::OhMyPi => ("ϟ", UI.amber),
         // ❯ prompt cursor — matches Cursor editor's brand
         AgentKind::Cursor => ("❯", COLOR_CURSOR),
         // ◈ diamond — Goose's geometric identity
         AgentKind::Goose => ("◈", COLOR_GOOSE),
-        // ⚙ gear — universal tool/custom symbol
-        AgentKind::Custom(_) => ("⚙", COLOR_CUSTOM),
+        // ◇ neutral operator-defined target.
+        AgentKind::Custom(_) => ("◇", COLOR_CUSTOM),
     }
 }
 
@@ -53,9 +50,10 @@ pub(crate) fn draw_agent_selector(
     frame: &mut Frame<'_>,
     items: &[AgentLauncherItem],
     selected_index: usize,
-    tick: usize,
+    _tick: usize,
 ) {
     let area = frame.area();
+    render_canvas(frame);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
@@ -63,35 +61,21 @@ pub(crate) fn draw_agent_selector(
         Constraint::Length(1), // Footer
     ])
     .split(area);
-    let selected_brand_color = items
-        .get(selected_index)
-        .map_or(COLOR_SKY, |item| agent_icon(&item.kind).1);
+    render_header_frame(frame, chunks[0], " Agent launcher ");
+    let installed = items.iter().filter(|item| item.installed).count();
+    let title_paragraph = Paragraph::new(app_header(
+        "Agents",
+        vec![
+            badge("Local", UI.cyan),
+            Span::styled(
+                format!("  {installed} of {} available", items.len()),
+                Style::default().fg(UI.text_soft),
+            ),
+        ],
+    ));
+    frame.render_widget(title_paragraph, header_inner(chunks[0]));
 
-    // 1. Header with dynamic brand-color Border Beam
-    render_border_beam(
-        frame,
-        chunks[0],
-        tick,
-        " Developer Agent Launcher ",
-        COLOR_INACTIVE_BORDER,
-        selected_brand_color,
-    );
-    let title_paragraph = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " ⚡ MENA LAUNCHER ",
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            "Select & Launch Developer Agent in Current Directory",
-            Style::default().fg(COLOR_LABEL_KEY),
-        ),
-    ]));
-    frame.render_widget(title_paragraph, chunks[0]);
-
-    // 2. Table Rows
+    let compact = chunks[1].width < 88;
     let rows: Vec<Row> = items
         .iter()
         .enumerate()
@@ -101,52 +85,48 @@ pub(crate) fn draw_agent_selector(
             let label = format!("{}", item.kind);
             let (icon, icon_color) = agent_icon(&item.kind);
 
-            let cursor = if selected { "▶ " } else { "  " };
+            let cursor = if selected { "> " } else { "  " };
 
             let (status_text, status_color) = if item.installed {
-                ("[✓ PATH]", Color::Green)
+                ("Ready", UI.success)
             } else {
-                ("[✗ MISSING]", MUTED)
+                ("Missing", UI.muted)
             };
 
             let session_info = if item.session_count > 0 {
                 let title = item.latest_session_title.as_deref().unwrap_or("Untitled");
-                format!("{} session(s) in cwd (latest: {title})", item.session_count)
+                format!("{} session(s) here · latest: {title}", item.session_count)
             } else {
-                "no saved sessions in cwd".to_owned()
+                "No saved sessions in this directory".to_owned()
             };
 
             let name_style = if selected {
                 if item.installed {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(UI.text).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
-                        .fg(Color::Gray)
+                        .fg(UI.text_soft)
                         .add_modifier(Modifier::BOLD)
                 }
             } else if item.installed {
-                Style::default().fg(Color::Reset)
+                Style::default().fg(UI.text)
             } else {
-                Style::default().fg(MUTED)
+                Style::default().fg(UI.muted)
             };
 
-            let session_style = if selected {
-                Style::default().fg(Color::Yellow)
-            } else if item.session_count > 0 {
-                Style::default().fg(Color::Reset)
+            let session_style = if item.session_count > 0 {
+                Style::default().fg(UI.text_soft)
             } else {
-                Style::default().fg(MUTED)
+                Style::default().fg(UI.muted)
             };
 
-            let row_bg = if selected {
-                Style::default().bg(COLOR_SELECTION_BG)
+            let row_style = if selected {
+                selection_style()
             } else {
-                Style::default()
+                Style::default().fg(UI.text).bg(UI.panel)
             };
 
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(Line::from(vec![
                     Span::styled(
                         cursor,
@@ -154,78 +134,62 @@ pub(crate) fn draw_agent_selector(
                     ),
                     Span::styled(format!("{icon} {slug} ({label})"), name_style),
                 ])),
-                Cell::from(Span::styled(status_text, Style::default().fg(status_color))),
-                Cell::from(Span::styled(session_info, session_style)),
-            ])
-            .style(row_bg)
+                Cell::from(badge(status_text, status_color)),
+            ];
+            if !compact {
+                cells.push(Cell::from(Span::styled(session_info, session_style)));
+            }
+            Row::new(cells).style(row_style)
         })
         .collect();
 
-    let widths = [
-        Constraint::Percentage(35),
-        Constraint::Percentage(20),
-        Constraint::Percentage(45),
-    ];
+    let widths = if compact {
+        vec![Constraint::Min(24), Constraint::Length(10)]
+    } else {
+        vec![
+            Constraint::Percentage(35),
+            Constraint::Length(10),
+            Constraint::Min(30),
+        ]
+    };
+    let headers = if compact {
+        vec!["Agent", "Status"]
+    } else {
+        vec!["Agent", "Status", "Current directory / sessions"]
+    };
 
     let table = Table::new(rows, widths)
-        .header(
-            Row::new(vec!["AGENT", "STATUS", "CWD SESSIONS"]).style(
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
+        .header(Row::new(headers).style(table_header_style()))
+        .block(panel_block(
+            panel_title(
+                "Available agents",
+                Some(format!("{} total", items.len())),
+                true,
             ),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(COLOR_ACTIVE_BORDER))
-                .title(" Available Coding Agents "),
-        );
+            true,
+        ));
 
     frame.render_widget(table, chunks[1]);
 
-    // 3. Footer Pill Badges
     let selected_installed = items.get(selected_index).is_none_or(|item| item.installed);
 
-    let footer_spans = if selected_installed {
-        vec![
-            Span::styled(
-                " Enter ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Launch/Select ", Style::default().fg(Color::Gray)),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled(
-                " n ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" New Session ", Style::default().fg(Color::Gray)),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled(
-                " r ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Resume Latest ", Style::default().fg(Color::Gray)),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled(
-                " q/Esc ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Quit ", Style::default().fg(Color::Gray)),
-        ]
+    let footer = if selected_installed {
+        responsive_key_hints(
+            chunks[2].width,
+            &[
+                ("Enter", "select"),
+                ("n", "new"),
+                ("r", "resume latest"),
+                ("↑/↓", "navigate"),
+                ("q", "quit"),
+            ],
+            &[
+                ("Enter", "select"),
+                ("n", "new"),
+                ("r", "resume"),
+                ("q", "quit"),
+            ],
+        )
     } else {
         let homepage = items
             .get(selected_index)
@@ -235,32 +199,19 @@ pub(crate) fn draw_agent_selector(
         } else {
             homepage.to_string()
         };
-        vec![
+        Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(UI.signal).bold()),
             Span::styled(
-                " Enter ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
+                format!(" homepage {clean_url}"),
+                Style::default().fg(UI.text_soft),
             ),
-            Span::styled(
-                format!(" Open Homepage ({clean_url}) "),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled(
-                " q/Esc ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Quit ", Style::default().fg(Color::Gray)),
-        ]
+            Span::styled("  │  ", Style::default().fg(UI.grid)),
+            Span::styled("[q]", Style::default().fg(UI.signal).bold()),
+            Span::styled(" quit", Style::default().fg(UI.text_soft)),
+        ])
     };
 
-    let footer = Paragraph::new(Line::from(footer_spans));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(Paragraph::new(footer), chunks[2]);
 }
 
 pub(crate) fn draw_mode_selector<T>(
@@ -268,9 +219,10 @@ pub(crate) fn draw_mode_selector<T>(
     kind: &AgentKind,
     options: &[(T, String)],
     selected_index: usize,
-    tick: usize,
+    _tick: usize,
 ) {
     let area = frame.area();
+    render_canvas(frame);
 
     // Render as a centered floating modal card (not full-screen)
     let popup_w = u16::min(85, area.width.saturating_sub(4));
@@ -281,16 +233,7 @@ pub(crate) fn draw_mode_selector<T>(
     let popup_area = centered_rect(area, popup_w, popup_h);
     frame.render_widget(Clear, popup_area);
 
-    let (_, kind_color) = agent_icon(kind);
-
-    render_border_beam(
-        frame,
-        popup_area,
-        tick,
-        &format!(" Select Session Mode: {kind} "),
-        COLOR_INACTIVE_BORDER,
-        kind_color,
-    );
+    render_header_frame(frame, popup_area, &format!(" Launch {kind} "));
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
@@ -307,19 +250,11 @@ pub(crate) fn draw_mode_selector<T>(
             Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("Launch Options: {kind} "),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            format!("Choose how to start {kind}"),
+            Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
         ),
     ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" Select Session Mode "),
-    );
+    .block(panel_block(panel_title("Launch mode", None, true), true));
     frame.render_widget(title_paragraph, chunks[0]);
 
     let rows: Vec<Row> = options
@@ -327,20 +262,18 @@ pub(crate) fn draw_mode_selector<T>(
         .enumerate()
         .map(|(idx, (_, label))| {
             let selected = idx == selected_index;
-            let cursor = if selected { "▶ " } else { "  " };
+            let cursor = if selected { "> " } else { "  " };
 
             let name_style = if selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(UI.text).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Reset)
+                Style::default().fg(UI.text_soft)
             };
 
             let row_bg = if selected {
-                Style::default().bg(COLOR_SELECTION_BG)
+                selection_style()
             } else {
-                Style::default()
+                Style::default().bg(UI.panel).fg(UI.text)
             };
 
             Row::new(vec![Cell::from(Span::styled(
@@ -352,35 +285,25 @@ pub(crate) fn draw_mode_selector<T>(
         .collect();
 
     let widths = [Constraint::Percentage(100)];
-    let table = Table::new(rows, widths).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_INACTIVE_BORDER)),
-    );
+    let table = Table::new(rows, widths).block(panel_block(
+        panel_title(
+            "Options",
+            Some(format!("{} available", options.len())),
+            false,
+        ),
+        false,
+    ));
 
     frame.render_widget(table, chunks[1]);
 
-    let footer_spans = vec![
-        Span::styled(
-            " Enter ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Confirm ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " q/Esc ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Cancel ", Style::default().fg(Color::Gray)),
-    ];
-
-    let footer = Paragraph::new(Line::from(footer_spans));
+    let footer = Paragraph::new(responsive_key_hints(
+        chunks[2].width,
+        &[
+            ("Enter", "confirm"),
+            ("↑/↓", "navigate"),
+            ("q/Esc", "cancel"),
+        ],
+        &[("Enter", "confirm"), ("q", "cancel")],
+    ));
     frame.render_widget(footer, chunks[2]);
 }

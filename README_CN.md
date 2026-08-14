@@ -78,6 +78,7 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 
 ## 文档
 
+- [Calm Console 终端界面与响应式行为](docs/interface_CN.md)
 - [Session 浏览、指标、导出与删除](docs/sessions_CN.md)
 - [Agent Skill 发现与浏览](docs/skills_CN.md)
 - [MCP 目录、元数据、来源与安全边界](docs/mcp_CN.md)

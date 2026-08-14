@@ -34,12 +34,13 @@ resume = ["my-agent", "resume", "{session}"]
 
 ```toml
 [ui.session_detail.colors]
-border = "cyan"
-metadata_key = "light-magenta"
-user_content = "light-green"
-assistant_content = "cyan"
-tool_call_content = "dark-gray"
-error_content = "red"
+border = "#7ca7d9"
+metadata_key = "#7ca7d9"
+user_content = "#e1e6eb"
+assistant_content = "#e1e6eb"
+tool_call_content = "#a8b0ba"
+error_content = "#d97b84"
 ```
 
-运行 `mena config init` 生成的模板包含全部可用颜色键及默认值。
+运行 `mena config init` 生成的模板包含全部可用颜色键及默认值。这些默认值与统一的
+[Calm Console 界面](interface_CN.md)一致；已有配置中的显式颜色仍优先生效。

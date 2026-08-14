@@ -11,9 +11,11 @@ use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::Cell;
 
+use super::agent_launcher::{AgentLauncherItem, draw_agent_selector, draw_mode_selector};
 use super::common::*;
 use super::mcp::{app::McpApp, render::draw_mcp};
 use super::session::*;
+use super::skill::render::draw_skills;
 use crate::mcp::{McpRegistration, McpSourceFormat, McpTimeouts, McpToolPolicy, McpTransport};
 use crate::session::{
     AgentSession, DeletionSummary, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
@@ -29,22 +31,22 @@ fn mcp_browser_groups_clients_and_centers_action_hints() {
     claude.provider = "claude".to_owned();
     claude.selector = "claude:user:docs".to_owned();
     let mut app = McpApp::new(vec![claude, codex]);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
 
     terminal
         .draw(|frame| draw_mcp(frame, &mut app))
         .expect("draw MCP browser");
 
-    let screen = buffer_text(terminal.backend().buffer(), 80, 24);
-    assert!(screen.contains("MENA MCP"));
+    let screen = buffer_text(terminal.backend().buffer(), 120, 24);
+    assert!(screen.contains("mena · MCP"));
     assert!(screen.contains("codegraph"));
-    assert!(screen.contains("◆ CLAUDE · 1"));
-    assert!(screen.contains("◆ CODEX · 1"));
+    assert!(screen.contains("claude · 1"));
+    assert!(screen.contains("codex · 1"));
     assert!(screen.contains("Runtime metadata: not probed"));
-    assert!(screen.contains("p Probe"));
-    assert!(screen.contains("d Delete"));
-    assert!(screen.contains("↵ Focus"));
-    assert!(screen.contains("q Back"));
+    assert!(screen.contains("[p] probe"));
+    assert!(screen.contains("[d] delete"));
+    assert!(screen.contains("[Enter] focus"));
+    assert!(screen.contains("[q] back"));
     let footer = screen.lines().last().expect("footer line");
     let left_padding = footer.len() - footer.trim_start().len();
     let right_padding = footer.len() - footer.trim_end().len();
@@ -62,11 +64,117 @@ fn mcp_browser_renders_explicit_delete_confirmation() {
         .expect("draw MCP delete confirmation");
 
     let screen = buffer_text(terminal.backend().buffer(), 110, 28);
-    assert!(screen.contains("Delete MCP registration"));
+    assert!(screen.contains("Delete registration"));
     assert!(screen.contains("codex:user:codegraph"));
     assert!(screen.contains("/Users/test/.codex/config.toml"));
-    assert!(screen.contains("y Delete permanently"));
-    assert!(screen.contains("n/Esc Cancel"));
+    assert!(screen.contains("[y] delete permanently"));
+    assert!(screen.contains("[n/Esc] cancel"));
+}
+
+#[test]
+fn primary_tuis_share_the_calm_console_language() {
+    let items = vec![AgentLauncherItem {
+        kind: AgentKind::Codex,
+        installed: true,
+        session_count: 1,
+        latest_session_id: Some("session-id".to_owned()),
+        latest_session_title: Some("Calm console".to_owned()),
+    }];
+    let mut agent_terminal = Terminal::new(TestBackend::new(100, 18)).expect("agent terminal");
+    agent_terminal
+        .draw(|frame| draw_agent_selector(frame, &items, 0, 0))
+        .expect("draw agent launcher");
+    let agent_screen = buffer_text(agent_terminal.backend().buffer(), 100, 18);
+    assert!(agent_screen.contains("mena · Agents"));
+    assert!(agent_screen.contains("Available agents"));
+    assert!(agent_screen.contains("Ready"));
+
+    let options = [((), "Start a new session".to_owned())];
+    agent_terminal
+        .draw(|frame| draw_mode_selector(frame, &AgentKind::Codex, &options, 0, 0))
+        .expect("draw mode selector");
+    let mode_screen = buffer_text(agent_terminal.backend().buffer(), 100, 18);
+    assert!(mode_screen.contains("Launch mode"));
+    assert!(mode_screen.contains("Options"));
+
+    let skill = crate::skill::AgentSkill {
+        name: "calm-ui".to_owned(),
+        provider: "test".to_owned(),
+        scope: "workspace".to_owned(),
+        path: PathBuf::from("/tmp/calm-ui/SKILL.md"),
+        location: "workspace".to_owned(),
+        is_symlink: false,
+        description: Some("Shared terminal interface".to_owned()),
+        triggers: vec!["ui".to_owned()],
+        valid: true,
+        children: Vec::new(),
+    };
+    let mut skills_app = SkillsApp::new(vec![skill.clone()]);
+    skills_app.current_detail = Some(crate::skill::SkillDetail {
+        skill,
+        content: "# Calm UI\nComfort before decoration.".to_owned(),
+        extra: BTreeMap::new(),
+    });
+    let mut skill_terminal = Terminal::new(TestBackend::new(100, 24)).expect("skill terminal");
+    skill_terminal
+        .draw(|frame| draw_skills(frame, &skills_app))
+        .expect("draw skills");
+    let skill_screen = buffer_text(skill_terminal.backend().buffer(), 100, 24);
+    assert!(skill_screen.contains("mena · Skills"));
+    assert!(skill_screen.contains("Skills"));
+    assert!(skill_screen.contains("Preview"));
+
+    let mut sessions_app = SessionsApp::new(vec![fixture_session()], BTreeSet::new());
+    let mut session_terminal = Terminal::new(TestBackend::new(100, 18)).expect("session terminal");
+    session_terminal
+        .draw(|frame| draw_sessions(frame, &mut sessions_app, 0))
+        .expect("draw sessions");
+    let session_screen = buffer_text(session_terminal.backend().buffer(), 100, 18);
+    assert!(session_screen.contains("mena · Sessions"));
+    assert!(session_screen.contains("All sessions"));
+}
+
+#[test]
+fn narrow_two_pane_browsers_stack_list_above_detail() {
+    let mut mcp_app = McpApp::new(vec![fixture_mcp_registration("codegraph")]);
+    let mut mcp_terminal = Terminal::new(TestBackend::new(80, 28)).expect("MCP terminal");
+    mcp_terminal
+        .draw(|frame| draw_mcp(frame, &mut mcp_app))
+        .expect("draw narrow MCP browser");
+    let mcp_buffer = mcp_terminal.backend().buffer();
+    let list_y = find_text(mcp_buffer, 80, 28, "1 visible · 1 total")
+        .expect("registration list")
+        .1;
+    let detail_y = find_text(mcp_buffer, 80, 28, "Details")
+        .expect("registration details")
+        .1;
+    assert!(detail_y > list_y, "detail must stack below list");
+
+    let skill = crate::skill::AgentSkill {
+        name: "narrow".to_owned(),
+        provider: "test".to_owned(),
+        scope: "workspace".to_owned(),
+        path: PathBuf::from("/tmp/narrow/SKILL.md"),
+        location: "workspace".to_owned(),
+        is_symlink: false,
+        description: None,
+        triggers: Vec::new(),
+        valid: true,
+        children: Vec::new(),
+    };
+    let skills_app = SkillsApp::new(vec![skill]);
+    let mut skill_terminal = Terminal::new(TestBackend::new(80, 28)).expect("skill terminal");
+    skill_terminal
+        .draw(|frame| draw_skills(frame, &skills_app))
+        .expect("draw narrow skill browser");
+    let skill_buffer = skill_terminal.backend().buffer();
+    let tree_y = find_text(skill_buffer, 80, 28, "1 items")
+        .expect("skill list")
+        .1;
+    let source_y = find_text(skill_buffer, 80, 28, "Preview")
+        .expect("skill preview")
+        .1;
+    assert!(source_y > tree_y, "source must stack below tree");
 }
 
 #[test]
@@ -83,7 +191,7 @@ fn session_layout_displays_titles_and_filters_by_them() {
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 100, 18);
     assert!(screen.contains("Fix terminal rendering"));
-    assert!(screen.contains("d delete"));
+    assert!(screen.contains("[d] delete"));
     assert!(screen.lines().all(|line| line.chars().count() == 100));
 }
 
@@ -213,12 +321,12 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
             },
         ],
     });
-    let mut terminal = Terminal::new(TestBackend::new(100, 50)).expect("test terminal");
+    let mut terminal = Terminal::new(TestBackend::new(140, 50)).expect("test terminal");
     terminal
         .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw details");
 
-    let screen = buffer_text(terminal.backend().buffer(), 100, 50);
+    let screen = buffer_text(terminal.backend().buffer(), 140, 50);
     for expected in [
         "Session details",
         "Started",
@@ -237,13 +345,13 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
         "complete first question",
         "complete first answer",
         "complete second answer",
-        "Shift+↑/↓ msg",
-        "p chat",
-        "Shift+P all",
-        "c copy",
-        "r resume",
-        "e export",
-        "Esc close",
+        "[Shift+↑/↓] msg",
+        "[p] chat",
+        "[Shift+P] all",
+        "[c] copy",
+        "[r] resume",
+        "[e] export",
+        "[Esc] close",
     ] {
         assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
     }
@@ -374,18 +482,46 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
 fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
     let session = fixture_session();
     let kinds = [
-        (SessionMessageKind::User, Color::LightGreen),
-        (SessionMessageKind::Assistant, Color::Cyan),
-        (SessionMessageKind::Skill, Color::LightYellow),
-        (SessionMessageKind::ToolCall, Color::DarkGray),
-        (SessionMessageKind::ToolResult, Color::DarkGray),
-        (SessionMessageKind::System, Color::DarkGray),
-        (SessionMessageKind::Error, Color::DarkGray),
+        (
+            SessionMessageKind::User,
+            Color::Rgb(0xd3, 0xaa, 0x6e),
+            Color::Rgb(0xe1, 0xe6, 0xeb),
+        ),
+        (
+            SessionMessageKind::Assistant,
+            Color::Rgb(0x7c, 0xa7, 0xd9),
+            Color::Rgb(0xe1, 0xe6, 0xeb),
+        ),
+        (
+            SessionMessageKind::Skill,
+            Color::Rgb(0xa9, 0x9b, 0xcb),
+            Color::Rgb(0xa8, 0xb0, 0xba),
+        ),
+        (
+            SessionMessageKind::ToolCall,
+            Color::Rgb(0x79, 0xb8, 0xc7),
+            Color::Rgb(0xa8, 0xb0, 0xba),
+        ),
+        (
+            SessionMessageKind::ToolResult,
+            Color::Rgb(0x79, 0xb8, 0xc7),
+            Color::Rgb(0xa8, 0xb0, 0xba),
+        ),
+        (
+            SessionMessageKind::System,
+            Color::Rgb(0x73, 0x7d, 0x89),
+            Color::Rgb(0x73, 0x7d, 0x89),
+        ),
+        (
+            SessionMessageKind::Error,
+            Color::Rgb(0xd9, 0x7b, 0x84),
+            Color::Rgb(0xd9, 0x7b, 0x84),
+        ),
     ];
     let messages = kinds
         .iter()
         .enumerate()
-        .map(|(index, (kind, _))| SessionMessage {
+        .map(|(index, (kind, _, _))| SessionMessage {
             kind: *kind,
             timestamp: None,
             model: None,
@@ -403,10 +539,10 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
         .expect("draw details");
 
     let buffer = terminal.backend().buffer();
-    for (index, (kind, expected_color)) in kinds.iter().enumerate() {
+    for (index, (kind, expected_header, expected_body)) in kinds.iter().enumerate() {
         let header_position = find_text(buffer, 100, 42, kind.label()).expect("message header");
         let header = buffer.cell(header_position).expect("header cell");
-        assert_eq!(header.fg, *expected_color, "{} header color", kind.label());
+        assert_eq!(header.fg, *expected_header, "{} header color", kind.label());
         assert!(
             header.modifier.contains(Modifier::BOLD),
             "{} header should be bold",
@@ -416,7 +552,7 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
         let body = format!("plain-body-{index}");
         let body_position = find_text(buffer, 100, 42, &body).expect("message body");
         let body_cell = buffer.cell(body_position).expect("body cell");
-        assert_eq!(body_cell.fg, *expected_color, "{body} foreground");
+        assert_eq!(body_cell.fg, *expected_body, "{body} foreground");
         assert!(!body_cell.modifier.contains(Modifier::BOLD), "{body} bold");
     }
 }
@@ -454,7 +590,7 @@ fn detail_theme_can_customize_every_text_surface_independently() {
         }],
     });
     app.detail_status = Some(StatusMessage::success("custom status".to_owned()));
-    let mut terminal = Terminal::new(TestBackend::new(100, 35)).expect("test terminal");
+    let mut terminal = Terminal::new(TestBackend::new(140, 35)).expect("test terminal");
 
     terminal
         .draw(|frame| draw_sessions(frame, &mut app, 0))
@@ -475,14 +611,14 @@ fn detail_theme_can_customize_every_text_surface_independently() {
         ("Shift+↑/↓", Color::White),
         ("copy", Color::Gray),
     ] {
-        let position = find_text(buffer, 100, 35, text).expect("configured text");
+        let position = find_text(buffer, 140, 35, text).expect("configured text");
         assert_eq!(buffer.cell(position).expect("configured cell").fg, expected);
     }
     assert_eq!(buffer.cell((2, 1)).expect("popup border").fg, Color::Red);
 }
 
 #[test]
-fn detail_metadata_keys_are_pink_purple() {
+fn detail_metadata_keys_use_calm_focus_blue() {
     let session = fixture_session();
     let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
     app.open_detail(SessionDetail {
@@ -500,7 +636,7 @@ fn detail_metadata_keys_are_pink_purple() {
         let position = find_text(buffer, 100, 30, key).expect("metadata key");
         assert_eq!(
             buffer.cell(position).expect("metadata cell").fg,
-            Color::LightMagenta,
+            Color::Rgb(0x7c, 0xa7, 0xd9),
             "{key} color"
         );
     }
@@ -816,7 +952,7 @@ fn exporting_from_detail_keeps_selection_scroll_and_popup_open() {
     assert!(app.detail.is_some());
     assert!(app.detail_status.as_ref().is_some_and(|status| {
         status.text == "Exported conversation only: /tmp/session-export.md"
-            && status.style.fg == Some(Color::Green)
+            && status.style.fg == Some(UI.success)
     }));
 }
 
@@ -860,7 +996,7 @@ fn copying_from_detail_copies_the_complete_session_and_keeps_context() {
     assert!(app.detail.is_some());
     assert!(app.detail_status.as_ref().is_some_and(|status| {
         status.text == "Copied conversation only to clipboard"
-            && status.style.fg == Some(Color::Green)
+            && status.style.fg == Some(UI.success)
     }));
 }
 
@@ -917,7 +1053,7 @@ fn failed_detail_copy_keeps_context_and_reports_a_red_error() {
     assert!(app.detail.is_some());
     assert!(app.detail_status.as_ref().is_some_and(|status| {
         status.text.contains("Copy failed: clipboard unavailable")
-            && status.style.fg == Some(Color::Red)
+            && status.style.fg == Some(UI.danger)
     }));
 }
 
@@ -949,7 +1085,7 @@ fn failed_detail_export_keeps_context_and_reports_a_red_error() {
     assert!(app.detail.is_some());
     assert!(app.detail_status.as_ref().is_some_and(|status| {
         status.text.contains("Export failed: permission denied")
-            && status.style.fg == Some(Color::Red)
+            && status.style.fg == Some(UI.danger)
     }));
 }
 
@@ -1305,7 +1441,7 @@ fn active_session_renders_green_active_indicator() {
         inactive_cell,
         Cell::from(ratatui::text::Span::styled(
             "Codex",
-            ratatui::style::Style::default().fg(Color::Green)
+            ratatui::style::Style::default().fg(UI.success)
         ))
     );
 }

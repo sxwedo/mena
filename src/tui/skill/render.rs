@@ -2,24 +2,20 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::app::*;
-use crate::tui::common::render_border_beam;
+use crate::tui::common::{
+    UI, app_header, badge, header_inner, panel_block, panel_title, render_canvas,
+    render_header_frame, responsive_key_hints, scroll_meter, selection_style, table_header_style,
+};
 
-// ── Design Tokens ─────────────────────────────────────────────────────────────
-
-const COLOR_ACCENT: Color = Color::Cyan;
-const COLOR_ACTIVE_BORDER: Color = Color::Cyan;
-const COLOR_INACTIVE_BORDER: Color = Color::Rgb(60, 65, 75);
-const COLOR_SELECTION_BG: Color = Color::Rgb(40, 44, 52);
-const COLOR_LABEL_KEY: Color = Color::Rgb(150, 160, 190);
-const COLOR_DIR: Color = Color::Rgb(120, 180, 240);
-const COLOR_SYMLINK: Color = Color::Rgb(240, 200, 100);
-const COLOR_SEPARATOR: Color = Color::Rgb(50, 55, 65);
+const COLOR_DIR: Color = UI.cyan;
+const COLOR_SYMLINK: Color = UI.amber;
 
 pub(crate) fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
     let area = frame.area();
+    render_canvas(frame);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // Header
@@ -28,80 +24,55 @@ pub(crate) fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
     ])
     .split(area);
 
-    // 1. Header
     let count_info = app
         .visible_rows
         .iter()
         .filter(|r| matches!(r, SkillRow::Skill { .. }))
         .count();
 
-    let header_spans = if app.is_searching {
+    let header_context = if app.is_searching {
         vec![
+            badge("Filter", UI.amber),
+            Span::styled("  Query: ", Style::default().fg(UI.muted)),
             Span::styled(
-                " ⚡ MENA SKILLS ",
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled("Search: ", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("{}_", app.search_query),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                format!("{}▌", app.search_query),
+                Style::default().fg(UI.amber).add_modifier(Modifier::BOLD),
             ),
         ]
     } else if !app.search_query.is_empty() {
         vec![
+            badge("Filtered", UI.amber),
             Span::styled(
-                " ⚡ MENA SKILLS ",
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled("Filter: ", Style::default().fg(COLOR_LABEL_KEY)),
-            Span::styled(
-                format!("\"{}\"", app.search_query),
-                Style::default().fg(Color::Yellow),
+                format!("  Query: {}", app.search_query),
+                Style::default().fg(UI.amber),
             ),
             Span::styled(
-                format!(" ({count_info}/{})", app.skills.len()),
-                Style::default().fg(Color::DarkGray),
+                format!("  {count_info}/{} loaded", app.skills.len()),
+                Style::default().fg(UI.muted),
             ),
         ]
     } else {
         vec![
+            badge("All", UI.cyan),
             Span::styled(
-                " ⚡ MENA SKILLS ",
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-            Span::styled(
-                format!("{count_info} skills loaded"),
-                Style::default().fg(COLOR_LABEL_KEY),
+                format!("  {count_info} skills loaded"),
+                Style::default().fg(UI.text_soft),
             ),
         ]
     };
 
-    render_border_beam(
-        frame,
-        chunks[0],
-        app.marquee_offset,
-        " Developer Agent Skills Browser ",
-        COLOR_INACTIVE_BORDER,
-        COLOR_ACCENT,
-    );
+    render_header_frame(frame, chunks[0], " Skills ");
 
-    let header = Paragraph::new(Line::from(header_spans));
-    frame.render_widget(header, chunks[0]);
+    let header = Paragraph::new(app_header("Skills", header_context));
+    frame.render_widget(header, header_inner(chunks[0]));
 
-    // 2. Body
     if app.full_screen_preview {
         render_skill_preview(frame, chunks[1], app);
+    } else if chunks[1].width < 100 {
+        let body_rows = Layout::vertical([Constraint::Percentage(46), Constraint::Percentage(54)])
+            .split(chunks[1]);
+        render_skill_list(frame, body_rows[0], app);
+        render_skill_preview(frame, body_rows[1], app);
     } else {
         let body_chunks = Layout::horizontal([
             Constraint::Percentage(40), // List
@@ -113,85 +84,32 @@ pub(crate) fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
         render_skill_preview(frame, body_chunks[1], app);
     }
 
-    // 3. Footer
-    let symlink_status = if app.show_symlinks { "on" } else { "off" };
-    let footer_spans = vec![
-        Span::styled(
-            " Space/→ ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Expand ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " ← ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Collapse ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " Tab ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Switch Pane ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " ↑/↓ ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Move ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " s ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_SYMLINK)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" Symlinks ({symlink_status}) "),
-            Style::default().fg(Color::Gray),
-        ),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " / ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Search ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " o ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Open ", Style::default().fg(Color::Gray)),
-        Span::styled("│ ", Style::default().fg(COLOR_SEPARATOR)),
-        Span::styled(
-            " q/Esc ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Quit ", Style::default().fg(Color::Gray)),
-    ];
-    let footer = Paragraph::new(Line::from(footer_spans));
+    let footer = Paragraph::new(responsive_key_hints(
+        chunks[2].width,
+        &[
+            ("Space/→", "expand"),
+            ("←", "collapse"),
+            ("Tab", "pane"),
+            ("↑/↓", "move"),
+            (
+                "s",
+                if app.show_symlinks {
+                    "links:on"
+                } else {
+                    "links:off"
+                },
+            ),
+            ("/", "filter"),
+            ("o", "open"),
+            ("q", "quit"),
+        ],
+        &[
+            ("Tab", "pane"),
+            ("/", "filter"),
+            ("o", "open"),
+            ("q", "quit"),
+        ],
+    ));
     frame.render_widget(footer, chunks[2]);
 }
 
@@ -202,10 +120,10 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
 
     for (list_idx, row) in visible.iter().enumerate() {
         let is_selected = list_idx == app.selected_index;
-        let row_bg = if is_selected {
-            Style::default().bg(COLOR_SELECTION_BG)
+        let row_style = if is_selected {
+            selection_style()
         } else {
-            Style::default()
+            Style::default().fg(UI.text).bg(UI.panel)
         };
 
         match row {
@@ -222,15 +140,13 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                     "  "
                 };
 
-                let cursor = if is_selected { "▶ " } else { "  " };
-                let skill_icon = if skill.is_symlink { "🔗 " } else { "📄 " };
+                let cursor = if is_selected { "> " } else { "  " };
+                let skill_icon = if skill.is_symlink { "@ " } else { "◆ " };
                 let name_str = format!("{cursor}{expand_icon}{skill_icon}{}", skill.name);
                 let name_style = if is_selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(UI.text).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Reset)
+                    Style::default().fg(UI.text_soft)
                 };
 
                 let desc_raw = skill.description.as_deref().unwrap_or("-");
@@ -243,9 +159,9 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                 };
 
                 let desc_style = if is_selected {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(UI.text_soft)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(UI.muted)
                 };
 
                 let (type_str, type_color) = if skill.is_symlink {
@@ -253,7 +169,7 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                 } else if *has_children {
                     ("dir", COLOR_DIR)
                 } else {
-                    ("md", Color::DarkGray)
+                    ("md", UI.muted)
                 };
 
                 rows.push(
@@ -265,7 +181,7 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                             Style::default().fg(type_color),
                         )),
                     ])
-                    .style(row_bg),
+                    .style(row_style),
                 );
             }
             SkillRow::Item {
@@ -286,17 +202,15 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                     ""
                 };
 
-                let item_icon = if *is_dir { "📁 " } else { "📄 " };
+                let item_icon = if *is_dir { "▣ " } else { "· " };
                 let name_str = format!("{indent}{connector}{expand_icon}{item_icon}{name}");
 
                 let name_style = if is_selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(UI.text).add_modifier(Modifier::BOLD)
                 } else if *is_dir {
                     Style::default().fg(COLOR_DIR)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(UI.muted)
                 };
 
                 let type_str: String = if *is_dir {
@@ -308,7 +222,7 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                         .unwrap_or("file")
                         .to_string()
                 };
-                let type_color = if *is_dir { COLOR_DIR } else { Color::DarkGray };
+                let type_color = if *is_dir { COLOR_DIR } else { UI.muted };
 
                 rows.push(
                     Row::new(vec![
@@ -319,18 +233,18 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
                             Style::default().fg(type_color),
                         )),
                     ])
-                    .style(row_bg),
+                    .style(row_style),
                 );
             }
         }
     }
 
     let is_active_focus = app.focus == SkillFocus::List && !app.full_screen_preview;
-    let (border_color, title_text) = if is_active_focus {
-        (COLOR_ACTIVE_BORDER, " ▸ Skills Roster ")
-    } else {
-        (COLOR_INACTIVE_BORDER, " Skills Roster ")
-    };
+    let title = panel_title(
+        "Skills",
+        Some(format!("{} items", app.visible_rows.len())),
+        is_active_focus,
+    );
 
     let table = Table::new(
         rows,
@@ -340,20 +254,8 @@ fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {
             Constraint::Length(8), // TYPE (last, narrow)
         ],
     )
-    .header(
-        Row::new(vec!["NAME", "DESCRIPTION", "TYPE"]).style(
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border_color))
-            .title(title_text),
-    );
+    .header(Row::new(vec!["Name", "Description", "Type"]).style(table_header_style()))
+    .block(panel_block(title, is_active_focus));
 
     let mut state = TableState::default();
     if !app.visible_rows.is_empty() {
@@ -368,45 +270,39 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
     let is_active_focus = app.focus == SkillFocus::Detail && !app.full_screen_preview;
 
     let Some(detail) = &app.current_detail else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_INACTIVE_BORDER))
-            .title(" Skill Inspector ");
+        let block = panel_block(
+            panel_title("Preview", None, is_active_focus),
+            is_active_focus,
+        );
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
         let message = app.preview_error.as_deref().unwrap_or("No skill selected");
-        let empty_p = Paragraph::new(message).style(Style::default().fg(Color::DarkGray));
+        let empty_p = Paragraph::new(message).style(Style::default().fg(UI.muted).bg(UI.panel));
         frame.render_widget(empty_p, inner_area);
         return;
     };
 
     let skill = &detail.skill;
 
-    let border_color = if app.full_screen_preview {
-        Color::Yellow
-    } else if is_active_focus {
-        COLOR_ACTIVE_BORDER
-    } else {
-        COLOR_INACTIVE_BORDER
-    };
-
-    let mode_label = if app.full_screen_preview {
-        "[FULLSCREEN]"
-    } else if is_active_focus {
-        "[ACTIVE]"
-    } else {
-        ""
-    };
-
-    let title_text = format!(" ▸ Skill Inspector: {} {mode_label} ", skill.name);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(title_text);
+    let active = is_active_focus || app.full_screen_preview;
+    let title = panel_title(
+        "Preview",
+        Some(format!(
+            "{}{}",
+            skill.name,
+            if app.full_screen_preview {
+                " · Full screen"
+            } else {
+                ""
+            }
+        )),
+        active,
+    );
+    let mut block = panel_block(title, active);
+    if app.full_screen_preview {
+        block = block.border_style(Style::default().fg(UI.signal));
+    }
 
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
@@ -416,78 +312,65 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Name:        ", Style::default().fg(COLOR_LABEL_KEY)),
+            Span::styled("Name:        ", Style::default().fg(UI.muted)),
             Span::styled(
                 &skill.name,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Provider:    ", Style::default().fg(COLOR_LABEL_KEY)),
-            Span::styled(&skill.provider, Style::default().fg(Color::Yellow)),
+            Span::styled("Provider:    ", Style::default().fg(UI.muted)),
+            Span::styled(&skill.provider, Style::default().fg(UI.text_soft)),
             Span::raw("   "),
-            Span::styled("Scope: ", Style::default().fg(COLOR_LABEL_KEY)),
-            Span::styled(&skill.scope, Style::default().fg(COLOR_ACCENT)),
+            Span::styled("Scope: ", Style::default().fg(UI.muted)),
+            Span::styled(&skill.scope, Style::default().fg(UI.cyan)),
             Span::raw("   "),
-            Span::styled("Type: ", Style::default().fg(COLOR_LABEL_KEY)),
+            Span::styled("Type: ", Style::default().fg(UI.muted)),
             Span::styled(
                 if skill.is_symlink { "symlink" } else { "file" },
                 Style::default().fg(if skill.is_symlink {
                     COLOR_SYMLINK
                 } else {
-                    Color::DarkGray
+                    UI.text_soft
                 }),
             ),
             Span::raw("   "),
-            Span::styled("Status: ", Style::default().fg(COLOR_LABEL_KEY)),
+            Span::styled("Status: ", Style::default().fg(UI.muted)),
             Span::styled(
-                if skill.valid {
-                    "✓ valid"
-                } else {
-                    "✗ invalid"
-                },
-                Style::default().fg(if skill.valid {
-                    Color::Green
-                } else {
-                    Color::Red
-                }),
+                if skill.valid { "Valid" } else { "Invalid" },
+                Style::default().fg(if skill.valid { UI.success } else { UI.danger }),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Location:    ", Style::default().fg(COLOR_LABEL_KEY)),
-            Span::styled(&skill.location, Style::default().fg(COLOR_ACCENT)),
+            Span::styled("Location:    ", Style::default().fg(UI.muted)),
+            Span::styled(&skill.location, Style::default().fg(UI.cyan)),
         ]),
         Line::from(vec![
-            Span::styled("Path:        ", Style::default().fg(COLOR_LABEL_KEY)),
+            Span::styled("Path:        ", Style::default().fg(UI.muted)),
             Span::styled(
                 skill.path.display().to_string(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(UI.text_soft),
             ),
         ]),
     ];
 
     if !skill.triggers.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("Triggers:    ", Style::default().fg(COLOR_LABEL_KEY)),
-            Span::styled(
-                skill.triggers.join(", "),
-                Style::default().fg(Color::LightGreen),
-            ),
+            Span::styled("Triggers:    ", Style::default().fg(UI.muted)),
+            Span::styled(skill.triggers.join(", "), Style::default().fg(UI.cyan)),
         ]));
     }
 
     if let Some(desc) = &skill.description {
         lines.push(Line::from(vec![
-            Span::styled("Description: ", Style::default().fg(COLOR_LABEL_KEY)),
-            Span::styled(desc, Style::default().fg(Color::Gray)),
+            Span::styled("Summary:     ", Style::default().fg(UI.muted)),
+            Span::styled(desc, Style::default().fg(UI.text_soft)),
         ]));
     }
 
     lines.push(Line::from(Span::styled(
         &separator_str,
-        Style::default().fg(COLOR_SEPARATOR),
+        Style::default().fg(UI.grid),
     )));
 
     // Markdown content parsing & styling
@@ -498,61 +381,53 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
             in_code_block = !in_code_block;
             lines.push(Line::from(Span::styled(
                 content_line,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(UI.muted),
             )));
             continue;
         }
 
         if in_code_block {
             lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::Rgb(80, 140, 200))),
+                Span::styled("│ ", Style::default().fg(UI.cyan)),
                 Span::styled(
                     content_line.to_string(),
-                    Style::default()
-                        .fg(Color::Rgb(200, 210, 225))
-                        .bg(Color::Rgb(30, 35, 45)),
+                    Style::default().fg(UI.text).bg(UI.panel_alt),
                 ),
             ]));
         } else if let Some(rest) = content_line.strip_prefix("# ") {
             lines.push(Line::from(vec![
-                Span::styled("█ ", Style::default().fg(COLOR_ACCENT)),
+                Span::styled("│ ", Style::default().fg(UI.signal)),
                 Span::styled(
                     rest,
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
                 ),
             ]));
         } else if let Some(rest) = content_line.strip_prefix("## ") {
             lines.push(Line::from(vec![
-                Span::styled("▌ ", Style::default().fg(Color::Yellow)),
+                Span::styled("│ ", Style::default().fg(UI.signal)),
                 Span::styled(
                     rest,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
                 ),
             ]));
         } else if let Some(rest) = content_line.strip_prefix("### ") {
             lines.push(Line::from(vec![
-                Span::styled("▌ ", Style::default().fg(COLOR_LABEL_KEY)),
+                Span::styled("▌ ", Style::default().fg(UI.cyan)),
                 Span::styled(
                     rest,
-                    Style::default()
-                        .fg(COLOR_LABEL_KEY)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(UI.cyan).add_modifier(Modifier::BOLD),
                 ),
             ]));
         } else if content_line.starts_with("---") {
             lines.push(Line::from(Span::styled(
                 &separator_str,
-                Style::default().fg(COLOR_SEPARATOR),
+                Style::default().fg(UI.grid),
             )));
         } else if let Some(rest) = content_line
             .strip_prefix("- ")
             .or_else(|| content_line.strip_prefix("* "))
         {
-            let mut line_spans = vec![Span::styled("  • ", Style::default().fg(COLOR_ACCENT))];
+            let mut line_spans = vec![Span::styled("  + ", Style::default().fg(UI.signal))];
             line_spans.extend(parse_inline_spans(rest));
             lines.push(Line::from(line_spans));
         } else {
@@ -565,20 +440,14 @@ fn render_skill_preview(frame: &mut Frame, area: Rect, app: &SkillsApp) {
     let max_scroll = total_lines.saturating_sub(visible_height);
     let scroll = app.preview_scroll.min(max_scroll);
 
-    let progress_percent = if max_scroll == 0 {
-        100
-    } else {
-        usize::from(scroll) * 100 / usize::from(max_scroll)
-    };
-
-    // Subtitle scroll indicator
     let scroll_info = format!(
-        " [Scroll: {progress_percent}% | Line {}/{total_lines}] ",
-        scroll + 1
+        " {} · line {}/{total_lines} ",
+        scroll_meter(usize::from(scroll), usize::from(max_scroll), 5),
+        scroll + 1,
     );
     let info_paragraph = Paragraph::new(Line::from(Span::styled(
         scroll_info,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(UI.muted).bg(UI.panel),
     )));
 
     let paragraph = Paragraph::new(Text::from(lines))
@@ -613,9 +482,7 @@ fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
             let code_content = &current[start + 1..actual_end];
             spans.push(Span::styled(
                 format!(" {code_content} "),
-                Style::default()
-                    .fg(Color::Rgb(56, 189, 248))
-                    .bg(Color::Rgb(30, 35, 45)),
+                Style::default().fg(UI.cyan).bg(UI.panel_alt),
             ));
             current = &current[actual_end + 1..];
             continue;
@@ -631,9 +498,7 @@ fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
             let bold_content = &current[start + 2..actual_end];
             spans.push(Span::styled(
                 bold_content.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
             ));
             current = &current[actual_end + 2..];
             continue;

@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use ratatui::layout::Constraint;
-use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, TableState, Wrap};
@@ -12,7 +11,7 @@ use ratatui::widgets::{Paragraph, TableState, Wrap};
 use super::event::session_matches;
 use super::render::{fragment_detail_line, session_detail_content, session_project_label};
 use crate::session::{AgentSession, DeletionSummary, DetailScope, SessionDetail};
-use crate::tui::common::SessionDetailTheme;
+use crate::tui::common::{SessionDetailTheme, UI};
 
 pub(crate) type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 pub(crate) type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
@@ -442,7 +441,7 @@ impl StatusMessage {
     pub(crate) fn success(text: String) -> Self {
         Self {
             text,
-            style: Style::default().fg(Color::Green),
+            style: Style::default().fg(UI.success),
             is_error: false,
         }
     }
@@ -450,7 +449,7 @@ impl StatusMessage {
     pub(crate) fn error(text: String) -> Self {
         Self {
             text,
-            style: Style::default().fg(Color::Red),
+            style: Style::default().fg(UI.danger),
             is_error: true,
         }
     }

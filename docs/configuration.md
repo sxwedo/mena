@@ -36,13 +36,15 @@ as `#7dd3fc`.
 
 ```toml
 [ui.session_detail.colors]
-border = "cyan"
-metadata_key = "light-magenta"
-user_content = "light-green"
-assistant_content = "cyan"
-tool_call_content = "dark-gray"
-error_content = "red"
+border = "#7ca7d9"
+metadata_key = "#7ca7d9"
+user_content = "#e1e6eb"
+assistant_content = "#e1e6eb"
+tool_call_content = "#a8b0ba"
+error_content = "#d97b84"
 ```
 
 Run `mena config init` to generate a template containing every supported color
-key and its default.
+key and its default. These defaults match the shared
+[Calm Console interface](interface.md); explicit values in an existing
+configuration continue to take precedence.

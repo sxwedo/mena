@@ -9,8 +9,9 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
 use crate::tui::common::{
-    ACCENT, MUTED, SessionDetailTheme, centered_rect, key_hints, render_border_beam,
-    themed_key_hints, thinking_orb_spans,
+    SessionDetailTheme, UI, app_header, badge, centered_rect, header_inner, key_hints, panel_block,
+    panel_title, render_canvas, render_header_frame, responsive_key_hints, scroll_meter,
+    selection_style, table_header_style, themed_key_hints, thinking_orb_spans,
 };
 use crate::view::{
     TOOL_TOKEN_ACCOUNTING_NOTE, format_duration, format_metric_error, format_model_usage_summary,
@@ -18,7 +19,8 @@ use crate::view::{
     format_tool_summary,
 };
 
-pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, tick: usize) {
+pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, _tick: usize) {
+    render_canvas(frame);
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
@@ -26,21 +28,18 @@ pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, tick: 
     ])
     .split(frame.area());
 
-    render_session_search(frame, areas[0], app, tick);
+    render_session_search(frame, areas[0], app);
     render_session_table_widget(frame, areas[1], app);
     render_session_footer(frame, areas[2], app);
     render_session_detail_popup(frame, app);
     render_delete_confirmation(frame, app);
 }
 
-fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp, tick: usize) {
-    let (beam_color, title) = if app.mode == BrowserMode::Search {
-        (
-            Color::Yellow,
-            " Search — type to filter, Enter apply, Esc clear ",
-        )
+fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
+    let (state_color, state) = if app.mode == BrowserMode::Search {
+        (UI.amber, "Filter")
     } else {
-        (Color::Rgb(56, 189, 248), " Search — press / to filter ")
+        (UI.cyan, "All")
     };
     let query = if app.query.is_empty() {
         "All sessions"
@@ -48,21 +47,40 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp, t
         &app.query
     };
 
-    render_border_beam(frame, area, tick, title, MUTED, beam_color);
+    render_header_frame(frame, area, " Sessions ");
 
     let query_style = if app.mode == BrowserMode::Search {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(UI.amber).add_modifier(Modifier::BOLD)
     } else if app.query.is_empty() {
-        Style::default().fg(MUTED)
+        Style::default().fg(UI.muted)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(UI.text)
     };
 
     frame.render_widget(
-        Paragraph::new(query).style(query_style),
-        Block::new().inner(area),
+        Paragraph::new(app_header(
+            "Sessions",
+            vec![
+                badge(state, state_color),
+                Span::styled("  Search: ", Style::default().fg(UI.muted)),
+                Span::styled(
+                    format!(
+                        "{query}{}",
+                        if app.mode == BrowserMode::Search {
+                            "▌"
+                        } else {
+                            ""
+                        }
+                    ),
+                    query_style,
+                ),
+                Span::styled(
+                    format!("  {}/{} visible", app.filtered.len(), app.sessions.len()),
+                    Style::default().fg(UI.muted),
+                ),
+            ],
+        )),
+        header_inner(area),
     );
 }
 
@@ -94,11 +112,7 @@ pub(crate) fn format_project_display_path(path_str: &str, max_len: usize) -> Str
 fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut SessionsApp) {
     let columns = session_columns(area.width);
     let header = Row::new(columns.iter().map(|column| Cell::from(column.label)))
-        .style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
+        .style(table_header_style())
         .bottom_margin(1);
 
     let display_rows = app.display_rows();
@@ -132,17 +146,15 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
                         let line = Line::from(vec![
                             Span::styled(
                                 icon,
-                                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                                Style::default().fg(UI.signal).add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(" "),
                             Span::styled(
                                 path_display,
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
                             ),
                             Span::raw("  "),
-                            Span::styled(count_label, Style::default().fg(MUTED)),
+                            Span::styled(count_label, Style::default().fg(UI.muted)),
                         ]);
                         cells.push(Cell::from(line));
                     } else {
@@ -158,29 +170,23 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
     }
 
     let grouping_label = app.grouping.label();
-    let table_title = format!(
-        " Sessions  {} shown / {} saved  ·  grouped: {} ",
-        app.filtered.len(),
-        app.sessions.len(),
-        grouping_label,
+    let table_title = panel_title(
+        "Sessions",
+        Some(format!(
+            "{} shown · {} saved · Group: {}",
+            app.filtered.len(),
+            app.sessions.len(),
+            grouping_label
+        )),
+        true,
     );
 
     let table = Table::new(rows, columns.iter().map(|column| column.constraint))
         .header(header)
-        .block(
-            Block::new()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(table_title),
-        )
+        .block(panel_block(table_title, true))
         .column_spacing(1)
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::Rgb(40, 44, 52))
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
+        .row_highlight_style(selection_style())
+        .highlight_symbol("> ");
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
@@ -208,21 +214,25 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     );
     let theme = app.detail_theme;
     let max_scroll = app.detail_max_scroll;
-    let scroll_percent = (app.detail_scroll * 100)
-        .checked_div(max_scroll)
-        .unwrap_or(100);
     let total_h = app
         .detail_layout
         .as_ref()
         .map_or(0, DetailLayoutCache::total_height);
-    let title_text = format!(
-        " Session details [Scroll: {scroll_percent}% | Line {}/{total_h}] ",
-        app.detail_scroll + 1,
+    let title_text = Line::styled(
+        format!(
+            " Session details  {} · line {}/{total_h} ",
+            scroll_meter(app.detail_scroll, max_scroll, 6),
+            app.detail_scroll + 1,
+        ),
+        Style::default()
+            .fg(theme.popup_title)
+            .add_modifier(Modifier::BOLD),
     );
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(UI.panel).fg(UI.text))
         .title_style(Style::default().fg(theme.popup_title))
         .title(title_text);
     let inner = block.inner(popup);
@@ -308,20 +318,34 @@ fn render_detail_status_bar(
 
 fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailTheme) {
     frame.render_widget(
-        Paragraph::new(themed_key_hints(
-            &[
-                ("Shift+↑/↓", "msg"),
-                ("p", "chat"),
-                ("Shift+P", "all"),
-                ("c", "copy"),
-                ("r", "resume"),
-                ("e", "export"),
-                ("Esc", "close"),
-            ],
-            theme.footer_key,
-            theme.footer_text,
-            theme.footer_separator,
-        ))
+        Paragraph::new(if area.width >= 108 {
+            themed_key_hints(
+                &[
+                    ("Shift+↑/↓", "msg"),
+                    ("p", "chat"),
+                    ("Shift+P", "all"),
+                    ("c", "copy"),
+                    ("r", "resume"),
+                    ("e", "export"),
+                    ("Esc", "close"),
+                ],
+                theme.footer_key,
+                theme.footer_text,
+                theme.footer_separator,
+            )
+        } else {
+            themed_key_hints(
+                &[
+                    ("p/P", "scope"),
+                    ("c", "copy"),
+                    ("r", "resume"),
+                    ("Esc", "close"),
+                ],
+                theme.footer_key,
+                theme.footer_text,
+                theme.footer_separator,
+            )
+        })
         .alignment(Alignment::Center),
         area,
     );
@@ -643,18 +667,17 @@ fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
 
 fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
     let footer = app.search_in_progress.as_ref().map_or_else(
-        || footer_for_status(app),
+        || footer_for_status(app, area.width),
         |progress| searching_footer_line(progress, app),
     );
     frame.render_widget(Paragraph::new(footer).alignment(Alignment::Center), area);
 }
 
-fn footer_for_status(app: &SessionsApp) -> Line<'static> {
-    app.status
-        .as_ref()
-        .map_or_else(session_key_hints, |status| {
-            Line::from(Span::styled(status.text.clone(), status.style))
-        })
+fn footer_for_status(app: &SessionsApp, width: u16) -> Line<'static> {
+    app.status.as_ref().map_or_else(
+        || session_key_hints(width),
+        |status| Line::from(Span::styled(status.text.clone(), status.style)),
+    )
 }
 
 fn searching_footer_line(progress: &InProgressSearch, app: &SessionsApp) -> Line<'static> {
@@ -672,16 +695,25 @@ pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) ->
     )
 }
 
-fn session_key_hints() -> Line<'static> {
-    key_hints(&[
-        ("↑/↓", "navigate"),
-        ("/", "search"),
-        ("g", "group"),
-        ("Enter", "details"),
-        ("r", "resume"),
-        ("d", "delete"),
-        ("q", "quit"),
-    ])
+fn session_key_hints(width: u16) -> Line<'static> {
+    responsive_key_hints(
+        width,
+        &[
+            ("↑/↓", "move"),
+            ("/", "filter"),
+            ("g", "group"),
+            ("Enter", "details"),
+            ("r", "resume"),
+            ("d", "delete"),
+            ("q", "quit"),
+        ],
+        &[
+            ("/", "filter"),
+            ("Enter", "details"),
+            ("r", "resume"),
+            ("q", "quit"),
+        ],
+    )
 }
 
 fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
@@ -696,7 +728,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
     let content = Text::from(vec![
         Line::from(Span::styled(
             "Permanently delete this session?",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(UI.danger).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(session.target()),
@@ -704,7 +736,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
         Line::from(""),
         Line::from(Span::styled(
             "This removes native session files and known provider indexes. It cannot be undone.",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(UI.amber),
         )),
         Line::from(""),
         key_hints(&[("y", "delete permanently"), ("n/Esc", "cancel")]),
@@ -714,11 +746,15 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true })
             .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Red))
-                    .title(" Confirm Deletion "),
+                panel_block(
+                    panel_title(
+                        "Delete session",
+                        Some("This cannot be undone".to_owned()),
+                        true,
+                    ),
+                    true,
+                )
+                .border_style(Style::default().fg(UI.danger)),
             ),
         popup,
     );
@@ -729,22 +765,22 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
         vec![
             column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Agent, "AGENT", Constraint::Length(12)),
-            column(SessionColumn::Project, "PROJECT", Constraint::Length(14)),
-            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
-            column(SessionColumn::Updated, "UPDATED", Constraint::Length(11)),
+            column(SessionColumn::Agent, "Agent", Constraint::Length(12)),
+            column(SessionColumn::Project, "Project", Constraint::Length(14)),
+            column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
+            column(SessionColumn::Updated, "Updated", Constraint::Length(11)),
         ]
     } else if width >= 80 {
         vec![
             column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(18)),
+            column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
         ]
     } else {
         vec![
             column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
-            column(SessionColumn::Title, "TITLE / SUMMARY", Constraint::Min(12)),
+            column(SessionColumn::Title, "Title / summary", Constraint::Min(12)),
         ]
     }
 }
@@ -757,20 +793,20 @@ pub(crate) fn session_cell(
     match column {
         SessionColumn::Active => {
             if app.active_targets.contains(&session.target()) {
-                Cell::from(Span::styled("●", Style::default().fg(Color::Green)))
+                Cell::from(Span::styled("●", Style::default().fg(UI.success)))
             } else {
                 Cell::from("")
             }
         }
         SessionColumn::Agent => {
             let color = match session.kind {
-                crate::process::AgentKind::ClaudeCode => Color::Yellow,
-                crate::process::AgentKind::OhMyPi => Color::Cyan,
-                crate::process::AgentKind::Pi => Color::LightMagenta,
-                crate::process::AgentKind::Codex => Color::Green,
-                crate::process::AgentKind::GeminiCli => Color::LightBlue,
-                crate::process::AgentKind::OpenCode => Color::Blue,
-                _ => Color::White,
+                crate::process::AgentKind::ClaudeCode => UI.amber,
+                crate::process::AgentKind::OhMyPi
+                | crate::process::AgentKind::GeminiCli
+                | crate::process::AgentKind::OpenCode => UI.cyan,
+                crate::process::AgentKind::Pi => UI.violet,
+                crate::process::AgentKind::Codex => UI.success,
+                _ => UI.text,
             };
             Cell::from(Span::styled(
                 session.kind.to_string(),
@@ -784,15 +820,13 @@ pub(crate) fn session_cell(
                 .map_or(0, |d| d.as_secs());
             let age_secs = now.saturating_sub(session.updated_at);
             let style = if age_secs < 3600 {
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(UI.success).add_modifier(Modifier::BOLD)
             } else if age_secs < 86400 {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(UI.amber)
             } else if age_secs < 7 * 86400 {
-                Style::default().fg(Color::White)
+                Style::default().fg(UI.text)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(UI.muted)
             };
             Cell::from(Span::styled(age_str, style))
         }
@@ -868,7 +902,7 @@ fn session_detail_line(
 ) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("{label:<8}"),
+            format!("{label:<10}: "),
             Style::default().fg(theme.metadata_key),
         ),
         Span::styled(value, Style::default().fg(theme.metadata_value)),

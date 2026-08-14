@@ -27,12 +27,12 @@ fn styled(value: &str, color: AnsiColor, stderr_output: bool) -> String {
 
 /// Print a neutral status message.
 pub fn info(message: impl Display) {
-    println!("  {} {message}", styled("◇", AnsiColor::BrightBlack, false));
+    println!("{} {message}", styled("mena:", AnsiColor::Cyan, false));
 }
 
 /// Print a successful operation message.
 pub fn success(message: impl Display) {
-    println!("  {} {message}", styled("✓", AnsiColor::Green, false));
+    println!("{} {message}", styled("done:", AnsiColor::Green, false));
 }
 
 /// Convert a result into a conventional process exit code.
@@ -41,7 +41,7 @@ pub fn exit_code(result: anyhow::Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("  {} {error:#}", styled("✗", AnsiColor::Red, true));
+            eprintln!("{} {error:#}", styled("error:", AnsiColor::Red, true));
             ExitCode::FAILURE
         }
     }

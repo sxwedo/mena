@@ -1,24 +1,20 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
-};
+use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use super::app::{McpApp, McpDetailLayout, McpFocus};
 use crate::mcp::McpRegistration;
-use crate::tui::common::{centered_rect, key_hints, render_border_beam};
-
-const ACCENT: Color = Color::Cyan;
-const ACTIVE_BORDER: Color = Color::Cyan;
-const INACTIVE_BORDER: Color = Color::Rgb(60, 65, 75);
-const SELECTION_BG: Color = Color::Rgb(40, 44, 52);
-const LABEL: Color = Color::Rgb(150, 160, 190);
-const SEPARATOR: Color = Color::Rgb(50, 55, 65);
+use crate::tui::common::{
+    UI, app_header, badge, centered_rect, header_inner, key_hints, panel_block, panel_title,
+    render_canvas, render_header_frame, responsive_key_hints, scroll_meter, selection_style,
+    table_header_style,
+};
 
 pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
+    render_canvas(frame);
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(8),
@@ -29,6 +25,11 @@ pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
     render_header(frame, areas[0], app);
     if app.full_screen_detail {
         render_detail(frame, areas[1], app);
+    } else if areas[1].width < 100 {
+        let rows = Layout::vertical([Constraint::Percentage(48), Constraint::Percentage(52)])
+            .split(areas[1]);
+        render_list(frame, rows[0], app);
+        render_detail(frame, rows[1], app);
     } else {
         let list_percent = if areas[1].width >= 130 { 45 } else { 42 };
         let columns = Layout::horizontal([
@@ -46,43 +47,37 @@ pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
-    render_border_beam(
-        frame,
-        area,
-        app.marquee_offset,
-        " MCP Registration Browser ",
-        INACTIVE_BORDER,
-        ACCENT,
-    );
-    let inner = Rect::new(
-        area.x.saturating_add(2),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(4),
-        1,
-    );
-    let spans = if app.is_searching {
+    render_header_frame(frame, area, " MCP registrations ");
+    let context = if app.is_searching {
         vec![
-            Span::styled(" MENA MCP ", Style::default().fg(ACCENT).bold()),
-            Span::styled("│ Filter: ", Style::default().fg(LABEL)),
+            badge("Filter", UI.amber),
+            Span::styled("  Query: ", Style::default().fg(UI.muted)),
             Span::styled(
-                format!("{}█", app.query),
-                Style::default().fg(Color::Yellow),
+                format!("{}▌", app.query),
+                Style::default().fg(UI.amber).bold(),
             ),
             Span::styled(
-                format!(" ({}/{})", app.visible.len(), app.registrations.len()),
-                Style::default().fg(Color::DarkGray),
+                format!(
+                    "  {}/{} visible",
+                    app.visible.len(),
+                    app.registrations.len()
+                ),
+                Style::default().fg(UI.muted),
             ),
         ]
     } else if let Some(notice) = &app.notice {
         vec![
-            Span::styled(" MENA MCP ", Style::default().fg(ACCENT).bold()),
-            Span::styled("│ ", Style::default().fg(SEPARATOR)),
+            badge(
+                if notice.error { "Error" } else { "Done" },
+                if notice.error { UI.danger } else { UI.success },
+            ),
+            Span::raw("  "),
             Span::styled(
                 notice.message.clone(),
                 Style::default().fg(if notice.error {
-                    Color::Red
+                    UI.danger
                 } else {
-                    Color::Green
+                    UI.text_soft
                 }),
             ),
         ]
@@ -106,12 +101,14 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
             },
         );
         vec![
-            Span::styled(" MENA MCP ", Style::default().fg(ACCENT).bold()),
-            Span::styled("│ ", Style::default().fg(SEPARATOR)),
-            Span::styled(probe, Style::default().fg(LABEL)),
+            badge("Static", UI.cyan),
+            Span::styled(format!("  {probe}"), Style::default().fg(UI.text_soft)),
         ]
     };
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    frame.render_widget(
+        Paragraph::new(app_header("MCP", context)),
+        header_inner(area),
+    );
 }
 
 fn render_list(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
@@ -128,16 +125,13 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
                 .iter()
                 .filter(|index| app.registrations[**index].provider == registration.provider)
                 .count();
-            let mut cells = vec![Cell::from(format!(
-                "◆ {} · {count}",
-                registration.provider.to_ascii_uppercase()
-            ))];
+            let mut cells = vec![Cell::from(format!("{} · {count}", registration.provider))];
             cells.resize_with(if compact { 2 } else { 4 }, || Cell::from(""));
             rows.push(
                 Row::new(cells).style(
                     Style::default()
-                        .fg(ACCENT)
-                        .bg(Color::Rgb(22, 28, 36))
+                        .fg(UI.text_soft)
+                        .bg(UI.panel_alt)
                         .add_modifier(Modifier::BOLD),
                 ),
             );
@@ -146,17 +140,22 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
             selected_row = Some(rows.len());
         }
         let state = registration_state(registration);
+        let state_style = match state {
+            "Enabled" => Style::default().fg(UI.success),
+            "Disabled" => Style::default().fg(UI.muted),
+            _ => Style::default().fg(UI.danger),
+        };
         if compact {
             rows.push(Row::new(vec![
                 Cell::from(format!("{}/{}", registration.scope, registration.name)),
-                Cell::from(state),
+                Cell::from(Span::styled(state, state_style)),
             ]));
         } else {
             rows.push(Row::new(vec![
                 Cell::from(registration.name.clone()),
                 Cell::from(registration.scope.clone()),
                 Cell::from(registration.transport.as_str()),
-                Cell::from(state),
+                Cell::from(Span::styled(state, state_style)),
             ]));
         }
     }
@@ -171,37 +170,25 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
         ]
     };
     let headers = if compact {
-        vec!["SCOPE/NAME", "STATE"]
+        vec!["Scope / name", "Status"]
     } else {
-        vec!["NAME", "SCOPE", "TRANSPORT", "STATE"]
+        vec!["Name", "Scope", "Transport", "Status"]
     };
     let active = app.focus == McpFocus::List && !app.full_screen_detail;
-    let title = format!(
-        " {}Registrations ({}/{}) ",
-        if active { "▸ " } else { "" },
-        app.visible.len(),
-        app.registrations.len()
+    let title = panel_title(
+        "Registrations",
+        Some(format!(
+            "{} visible · {} total",
+            app.visible.len(),
+            app.registrations.len()
+        )),
+        active,
     );
     let table = Table::new(rows, widths)
-        .header(Row::new(headers).style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
-        .row_highlight_style(
-            Style::default()
-                .bg(SELECTION_BG)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ")
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(if active {
-                    ACTIVE_BORDER
-                } else {
-                    INACTIVE_BORDER
-                }))
-                .title(title),
-        );
+        .header(Row::new(headers).style(table_header_style()))
+        .row_highlight_style(selection_style())
+        .highlight_symbol("> ")
+        .block(panel_block(title, active));
     let mut state = TableState::default();
     state.select(selected_row);
     frame.render_stateful_widget(table, area, &mut state);
@@ -218,33 +205,30 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &mut McpApp) {
     });
     let active = app.focus == McpFocus::Detail || app.full_screen_detail;
     let title = selected.as_ref().map_or_else(
-        || " MCP Inspector ".to_owned(),
+        || panel_title("Details", None, active),
         |(_, selector, probing)| {
-            format!(
-                " {}MCP Inspector: {selector}{} ",
-                if active { "▸ " } else { "" },
-                if *probing { " [PROBING]" } else { "" }
+            panel_title(
+                "Details",
+                Some(format!(
+                    "{selector}{} · {}",
+                    if *probing { " · probing" } else { "" },
+                    scroll_meter(app.detail_scroll, app.detail_max_scroll, 5)
+                )),
+                active,
             )
         },
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if app.full_screen_detail {
-            Color::Yellow
-        } else if active {
-            ACTIVE_BORDER
-        } else {
-            INACTIVE_BORDER
-        }))
-        .title(title);
+    let mut block = panel_block(title, active);
+    if app.full_screen_detail {
+        block = block.border_style(Style::default().fg(UI.signal));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let Some((registration_index, _, probing)) = selected else {
         frame.render_widget(
             Paragraph::new("No MCP registration selected")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(UI.muted).bg(UI.panel)),
             inner,
         );
         app.detail_scroll = 0;
@@ -288,15 +272,24 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &mut McpApp) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
-        Paragraph::new(key_hints(&[
-            ("o", "Open"),
-            ("e", "Edit"),
-            ("d", "Delete"),
-            ("p", "Probe"),
-            ("/", "Find"),
-            ("↵", "Focus"),
-            ("q", "Back"),
-        ]))
+        Paragraph::new(responsive_key_hints(
+            area.width,
+            &[
+                ("o", "open"),
+                ("e", "edit"),
+                ("d", "delete"),
+                ("p", "probe"),
+                ("/", "filter"),
+                ("Enter", "focus"),
+                ("q", "back"),
+            ],
+            &[
+                ("p", "probe"),
+                ("/", "filter"),
+                ("Enter", "focus"),
+                ("q", "back"),
+            ],
+        ))
         .alignment(Alignment::Center),
         area,
     );
@@ -311,35 +304,39 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &McpApp) {
     };
     let area = centered_rect(frame.area(), 88, 10);
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Red))
-        .title(" Delete MCP registration ");
+    let block = panel_block(
+        panel_title(
+            "Delete registration",
+            Some("This cannot be undone".to_owned()),
+            true,
+        ),
+        true,
+    )
+    .border_style(Style::default().fg(UI.danger));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let lines = vec![
         Line::from(Span::styled(
             "Permanently remove this registration from its native config?",
-            Style::default().fg(Color::Red).bold(),
+            Style::default().fg(UI.danger).bold(),
         )),
         Line::default(),
         Line::from(vec![
-            Span::styled("Target: ", Style::default().fg(LABEL)),
+            Span::styled("Target: ", Style::default().fg(UI.muted)),
             Span::styled(
                 registration.selector.clone(),
-                Style::default().fg(Color::White).bold(),
+                Style::default().fg(UI.text).bold(),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Source: ", Style::default().fg(LABEL)),
+            Span::styled("Source: ", Style::default().fg(UI.muted)),
             Span::styled(
                 registration.source.display().to_string(),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(UI.text_soft),
             ),
         ]),
         Line::default(),
-        key_hints(&[("y", "Delete permanently"), ("n/Esc", "Cancel")]),
+        key_hints(&[("y", "delete permanently"), ("n/Esc", "cancel")]),
     ];
     frame.render_widget(
         Paragraph::new(Text::from(lines))
@@ -351,11 +348,11 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &McpApp) {
 
 const fn registration_state(registration: &McpRegistration) -> &'static str {
     if !registration.valid {
-        "invalid"
+        "Invalid"
     } else if registration.enabled {
-        "enabled"
+        "Enabled"
     } else {
-        "disabled"
+        "Disabled"
     }
 }
 
@@ -420,21 +417,19 @@ fn push_wrapped_character(
 
 fn detail_line_style(line: &str) -> Style {
     if line.starts_with("MCP ") {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default().fg(UI.text).add_modifier(Modifier::BOLD)
     } else if line == "Static registration metadata"
         || line.starts_with("Runtime metadata:")
         || line.starts_with("Runtime tools:")
         || line.starts_with("Runtime prompts:")
         || line.starts_with("Runtime resources:")
     {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(UI.signal).add_modifier(Modifier::BOLD)
     } else if line.contains("Error:") || line.starts_with("Probe request failed:") {
-        Style::default().fg(Color::Red)
+        Style::default().fg(UI.danger)
     } else if line.contains("Warning:") {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(UI.amber)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(UI.text_soft)
     }
 }

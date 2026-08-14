@@ -26,31 +26,31 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Every value below is optional; these commented values document the defaults.
 #
 # [ui.session_detail.colors]
-# border = \"cyan\"
-# popup_title = \"reset\"
-# metadata_key = \"light-magenta\"
-# metadata_value = \"reset\"
-# conversation_header = \"cyan\"
-# empty_text = \"dark-gray\"
-# status_success = \"green\"
-# status_error = \"red\"
-# footer_key = \"cyan\"
-# footer_text = \"reset\"
-# footer_separator = \"dark-gray\"
-# user_header = \"light-green\"
-# user_content = \"light-green\"
-# assistant_header = \"cyan\"
-# assistant_content = \"cyan\"
-# skill_header = \"light-yellow\"
-# skill_content = \"light-yellow\"
-# tool_call_header = \"dark-gray\"
-# tool_call_content = \"dark-gray\"
-# tool_result_header = \"dark-gray\"
-# tool_result_content = \"dark-gray\"
-# system_header = \"dark-gray\"
-# system_content = \"dark-gray\"
-# error_header = \"dark-gray\"
-# error_content = \"dark-gray\"
+# border = \"#7ca7d9\"
+# popup_title = \"#e1e6eb\"
+# metadata_key = \"#7ca7d9\"
+# metadata_value = \"#a8b0ba\"
+# conversation_header = \"#7ca7d9\"
+# empty_text = \"#737d89\"
+# status_success = \"#86b98c\"
+# status_error = \"#d97b84\"
+# footer_key = \"#7ca7d9\"
+# footer_text = \"#a8b0ba\"
+# footer_separator = \"#343d49\"
+# user_header = \"#d3aa6e\"
+# user_content = \"#e1e6eb\"
+# assistant_header = \"#7ca7d9\"
+# assistant_content = \"#e1e6eb\"
+# skill_header = \"#a99bcb\"
+# skill_content = \"#a8b0ba\"
+# tool_call_header = \"#79b8c7\"
+# tool_call_content = \"#a8b0ba\"
+# tool_result_header = \"#79b8c7\"
+# tool_result_content = \"#a8b0ba\"
+# system_header = \"#737d89\"
+# system_content = \"#737d89\"
+# error_header = \"#d97b84\"
+# error_content = \"#d97b84\"
 ";
 
 /// Top-level mena configuration.
@@ -120,31 +120,31 @@ pub struct SessionDetailColorSettings {
 impl Default for SessionDetailColorSettings {
     fn default() -> Self {
         Self {
-            border: ConfigColor::Cyan,
-            popup_title: ConfigColor::Reset,
-            metadata_key: ConfigColor::LightMagenta,
-            metadata_value: ConfigColor::Reset,
-            conversation_header: ConfigColor::Cyan,
-            empty_text: ConfigColor::DarkGray,
-            status_success: ConfigColor::Green,
-            status_error: ConfigColor::Red,
-            footer_key: ConfigColor::Cyan,
-            footer_text: ConfigColor::Reset,
-            footer_separator: ConfigColor::DarkGray,
-            user_header: ConfigColor::LightGreen,
-            user_content: ConfigColor::LightGreen,
-            assistant_header: ConfigColor::Cyan,
-            assistant_content: ConfigColor::Cyan,
-            skill_header: ConfigColor::LightYellow,
-            skill_content: ConfigColor::LightYellow,
-            tool_call_header: ConfigColor::DarkGray,
-            tool_call_content: ConfigColor::DarkGray,
-            tool_result_header: ConfigColor::DarkGray,
-            tool_result_content: ConfigColor::DarkGray,
-            system_header: ConfigColor::DarkGray,
-            system_content: ConfigColor::DarkGray,
-            error_header: ConfigColor::DarkGray,
-            error_content: ConfigColor::DarkGray,
+            border: ConfigColor::Rgb(0x7c, 0xa7, 0xd9),
+            popup_title: ConfigColor::Rgb(0xe1, 0xe6, 0xeb),
+            metadata_key: ConfigColor::Rgb(0x7c, 0xa7, 0xd9),
+            metadata_value: ConfigColor::Rgb(0xa8, 0xb0, 0xba),
+            conversation_header: ConfigColor::Rgb(0x7c, 0xa7, 0xd9),
+            empty_text: ConfigColor::Rgb(0x73, 0x7d, 0x89),
+            status_success: ConfigColor::Rgb(0x86, 0xb9, 0x8c),
+            status_error: ConfigColor::Rgb(0xd9, 0x7b, 0x84),
+            footer_key: ConfigColor::Rgb(0x7c, 0xa7, 0xd9),
+            footer_text: ConfigColor::Rgb(0xa8, 0xb0, 0xba),
+            footer_separator: ConfigColor::Rgb(0x34, 0x3d, 0x49),
+            user_header: ConfigColor::Rgb(0xd3, 0xaa, 0x6e),
+            user_content: ConfigColor::Rgb(0xe1, 0xe6, 0xeb),
+            assistant_header: ConfigColor::Rgb(0x7c, 0xa7, 0xd9),
+            assistant_content: ConfigColor::Rgb(0xe1, 0xe6, 0xeb),
+            skill_header: ConfigColor::Rgb(0xa9, 0x9b, 0xcb),
+            skill_content: ConfigColor::Rgb(0xa8, 0xb0, 0xba),
+            tool_call_header: ConfigColor::Rgb(0x79, 0xb8, 0xc7),
+            tool_call_content: ConfigColor::Rgb(0xa8, 0xb0, 0xba),
+            tool_result_header: ConfigColor::Rgb(0x79, 0xb8, 0xc7),
+            tool_result_content: ConfigColor::Rgb(0xa8, 0xb0, 0xba),
+            system_header: ConfigColor::Rgb(0x73, 0x7d, 0x89),
+            system_content: ConfigColor::Rgb(0x73, 0x7d, 0x89),
+            error_header: ConfigColor::Rgb(0xd9, 0x7b, 0x84),
+            error_content: ConfigColor::Rgb(0xd9, 0x7b, 0x84),
         }
     }
 }
@@ -385,10 +385,13 @@ mod tests {
             toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("default config should parse");
         assert!(settings.agent.custom.is_empty());
         let colors = settings.ui.session_detail.colors;
-        assert_eq!(colors.user_header, ConfigColor::LightGreen);
-        assert_eq!(colors.user_content, ConfigColor::LightGreen);
-        assert_eq!(colors.assistant_header, ConfigColor::Cyan);
-        assert_eq!(colors.tool_result_content, ConfigColor::DarkGray);
+        assert_eq!(colors.user_header, ConfigColor::Rgb(0xd3, 0xaa, 0x6e));
+        assert_eq!(colors.user_content, ConfigColor::Rgb(0xe1, 0xe6, 0xeb));
+        assert_eq!(colors.assistant_header, ConfigColor::Rgb(0x7c, 0xa7, 0xd9));
+        assert_eq!(
+            colors.tool_result_content,
+            ConfigColor::Rgb(0xa8, 0xb0, 0xba)
+        );
     }
 
     #[test]
@@ -425,7 +428,7 @@ assistant_content = "indexed:200"
         assert_eq!(colors.user_content, ConfigColor::Rgb(0xa1, 0xb2, 0xc3));
         assert_eq!(colors.assistant_header, ConfigColor::Indexed(45));
         assert_eq!(colors.assistant_content, ConfigColor::Indexed(200));
-        assert_eq!(colors.tool_call_header, ConfigColor::DarkGray);
+        assert_eq!(colors.tool_call_header, ConfigColor::Rgb(0x79, 0xb8, 0xc7));
     }
 
     #[test]
