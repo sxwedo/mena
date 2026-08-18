@@ -52,29 +52,31 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 |---|---|
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
 | `mena ps` | 列出运行中的编码 Agent 进程 |
-| `mena sessions` / `mena ss` | 搜索、检查、恢复、导出和删除 Session |
+| `mena sessions` / `mena ss` | 搜索、检查、恢复、换 Agent 继续、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
 | `mena mcp` | 分组浏览注册，打开/编辑/删除配置，并显式探测元数据 |
 | `mena config init` | 创建 `~/.config/mena/config.toml` |
 
 ## Provider 支持
 
-| Provider | 启动 | Session | MCP 配置 |
-|---|:---:|:---:|:---:|
-| Claude Code | ✓ | ✓ | ✓ |
-| Codex | ✓ | ✓ | ✓ |
-| Gemini CLI | ✓ | ✓ | ✓ |
-| OpenCode | ✓ | ✓ | ✓ |
-| Pi | ✓ | ✓ | adapter¹ |
-| Oh My Pi | ✓ | ✓ | ✓ |
-| Cursor Agent | ✓ | ✓ | ✓ |
-| Goose | ✓ | — | ✓ |
-| 自定义配置 | ✓ | — | — |
+| Provider | 启动 | Session | 换 Agent 继续 | MCP 配置 |
+|---|:---:|:---:|---|:---:|
+| Claude Code | ✓ | ✓ | 导入 OMP；handoff 到 Codex | ✓ |
+| Codex | ✓ | ✓ | 导入 OMP；handoff 到 Claude | ✓ |
+| Gemini CLI | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
+| OpenCode | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
+| Pi | ✓ | ✓ | handoff 到 Claude/Codex/OMP | adapter¹ |
+| Oh My Pi | ✓ | ✓ | handoff 到 Claude/Codex | ✓ |
+| Cursor Agent | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
+| Goose | ✓ | — | — | ✓ |
+| 自定义配置 | ✓ | — | — | — |
 
 ¹ 仅在安装 `pi-mcp-adapter` 后发现 Pi 条目。
 
 自定义 Agent 和 Goose 没有通用 Session 目录。`mena` 会明确返回不支持，而不会
 猜测 Provider 自己的存储路径。
+在 Session 浏览器中，小写 `r` 执行原生恢复，大写 `R` 选择一个已安装的目标
+Agent。导入与 handoff 的具体语义见 Session 文档。
 
 ## 文档
 
@@ -90,6 +92,8 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 - Session 数据始终保留在各 Provider 的原生本地存储中。
 - 只有 Provider 持久化的用量和成本才会展示；不会根据公开价格推算。
 - 恢复命令使用“程序 + argv”，绝不调用 Shell。
+- 跨 Agent handoff 使用临时私有 Markdown 并新建目标 Session；不会把 Provider
+  运行状态伪装成已迁移。
 - `mena ps` 是一次性只读的 OS 进程快照；其中的状态不是推断出的 Agent 生命周期，
   `--verbose` 会打印可能包含密钥的完整命令行。
 - MCP 浏览器初始只展示静态配置；只有按 `p` 或使用 `--probe` 才启动 stdio 或访问

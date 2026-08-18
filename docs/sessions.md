@@ -34,6 +34,7 @@ transcript up front.
 | `g` | Toggle flat or project-grouped rows |
 | `Enter` / `i` | Open the selected session |
 | `r` | Resume with the provider's native CLI |
+| `R` | Choose another installed agent to continue with |
 | `d`, then lowercase `y` | Permanently delete the selected session |
 | `q` / `Esc` | Close or quit |
 
@@ -47,10 +48,34 @@ Inside the detail view:
 | `p` / `Shift+P` | Show conversation-only / complete transcript |
 | `c` / `e` | Copy / export Markdown using the active preview scope |
 | `r` | Resume this session |
+| `R` | Choose another installed agent to continue with |
 | `Esc` / `q` | Return to the list |
 
 Conversation-only exports end in `-conv.md`; complete exports end in
 `-full.md`. Metadata and per-model usage remain present in both scopes.
+
+## Continue with another agent
+
+Uppercase `R` keeps lowercase `r` native and opens a target selector. Only
+installed targets with a supported route are shown.
+
+| Source session | Target | Transfer |
+|---|---|---|
+| Claude Code | Oh My Pi | Native `omp --from-claude` importer |
+| Codex | Oh My Pi | Native `omp --from-codex` importer |
+| Any other cross-agent route to Claude, Codex, or OMP | Selected target | Handoff into a fresh session |
+
+OMP's import flags open OMP's own source picker because its CLI does not accept
+the already-selected foreign session ID or path. mena displays the source
+target to select. OMP creates its own new session; mena never passes a Claude or
+Codex ID to `omp --resume`.
+
+A handoff loads the complete bounded transcript, writes a temporary Markdown
+file inside the recorded project with private `0600` permissions on Unix, and
+starts the target with a prompt pointing to that file. The file is removed when
+the target process exits. The target receives persisted context, not live
+runtime state: tool results, processes, permissions, hooks, and uncommitted
+workspace state must be verified again. The source session remains unchanged.
 
 ## Persisted metrics
 
@@ -85,6 +110,8 @@ The command does not claim fields that are absent from the catalog record.
 
 Resume commands are constructed as a program plus argv and never passed to a
 shell. The selected project must still exist before mena starts the provider.
+Cross-agent launch commands follow the same shell-free rule. Handoff files are
+private, non-persistent, and never written into a provider's session store.
 
 An active indicator requires exact provider-native evidence:
 

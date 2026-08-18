@@ -11,11 +11,14 @@ use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::Cell;
 
-use super::agent_launcher::{AgentLauncherItem, draw_agent_selector, draw_mode_selector};
+use super::agent_launcher::{
+    AgentLauncherItem, draw_agent_selector, draw_continuation_selector, draw_mode_selector,
+};
 use super::common::*;
 use super::mcp::{app::McpApp, render::draw_mcp};
 use super::session::*;
 use super::skill::render::draw_skills;
+use crate::continuation::{ContinuationMethod, ContinuationTarget};
 use crate::mcp::{McpRegistration, McpSourceFormat, McpTimeouts, McpToolPolicy, McpTransport};
 use crate::session::{
     AgentSession, DeletionSummary, DetailScope, ResponseMetrics, SessionDetail, SessionMessage,
@@ -192,6 +195,7 @@ fn session_layout_displays_titles_and_filters_by_them() {
     let screen = buffer_text(terminal.backend().buffer(), 100, 18);
     assert!(screen.contains("Fix terminal rendering"));
     assert!(screen.contains("[d] delete"));
+    assert!(screen.contains("[R] agent"));
     assert!(screen.lines().all(|line| line.chars().count() == 100));
 }
 
@@ -201,18 +205,43 @@ fn session_target_is_first_and_visible_at_eighty_columns() {
     session.id = "019fbd66-e95f-7dd2-b9b4-37a27a61c272".to_owned();
     let target = session.target();
     let mut app = SessionsApp::new(vec![session], BTreeSet::default());
-    let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("test terminal");
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
 
     terminal
         .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw sessions");
 
-    let screen = buffer_text(terminal.backend().buffer(), 80, 18);
+    let screen = buffer_text(terminal.backend().buffer(), 80, 24);
     assert!(screen.contains(&target));
     assert_eq!(
         session_columns(80).first().map(|column| column.label),
         Some("TARGET")
     );
+}
+
+#[test]
+fn continuation_selector_distinguishes_native_import_from_handoff() {
+    let source = fixture_session();
+    let options = vec![
+        ContinuationTarget {
+            kind: AgentKind::OhMyPi,
+            method: ContinuationMethod::NativeImport,
+        },
+        ContinuationTarget {
+            kind: AgentKind::ClaudeCode,
+            method: ContinuationMethod::Handoff,
+        },
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+    terminal
+        .draw(|frame| draw_continuation_selector(frame, &source, &options, 0))
+        .expect("draw continuation selector");
+
+    let screen = buffer_text(terminal.backend().buffer(), 80, 24);
+    assert!(screen.contains("Continue codex:session-id with"));
+    assert!(screen.contains("Oh My Pi · native import"));
+    assert!(screen.contains("Claude Code · handoff to a new session"));
 }
 
 #[test]
@@ -266,6 +295,41 @@ fn detail_resume_requests_the_same_selected_session_as_the_outer_list() {
 
     assert_eq!(action, DetailAction::Resume);
     assert_eq!(app.selected_session(), Some(&first));
+}
+
+#[test]
+fn detail_continue_with_requests_the_same_selected_session_as_the_outer_list() {
+    let first = fixture_session();
+    let mut second = first.clone();
+    second.id = "second-session".to_owned();
+    let mut app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
+    app.open_detail(SessionDetail {
+        session: first.clone(),
+        messages: Vec::new(),
+    });
+
+    let action = handle_detail_event(
+        &mut app,
+        &Event::Key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+        None,
+        None,
+    );
+
+    assert_eq!(action, DetailAction::ContinueWith);
+    assert_eq!(app.selected_session(), Some(&first));
+}
+
+#[test]
+fn browse_continue_with_returns_the_selected_session() {
+    let first = fixture_session();
+    let mut second = first.clone();
+    second.id = "second-session".to_owned();
+    let app = SessionsApp::new(vec![first.clone(), second], BTreeSet::default());
+
+    let action =
+        session_action_for_key(&app, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+
+    assert_eq!(action, Some(SessionBrowserResult::ContinueWith(first)));
 }
 
 #[test]
@@ -350,6 +414,7 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
         "[Shift+P] all",
         "[c] copy",
         "[r] resume",
+        "[R] agent",
         "[e] export",
         "[Esc] close",
     ] {

@@ -8,6 +8,7 @@
 main.rs
   └── lib.rs                 命令定义与分发
       ├── controller.rs      命令编排
+      ├── continuation.rs    跨 Agent 导入与 handoff 策略
       ├── process.rs         Provider 识别与运行证据
       ├── session.rs         Provider 无关模型与安全控制
       │   └── session/adapter.rs
@@ -39,6 +40,10 @@ main.rs
 Provider Session 通过闭合枚举形成 adapter seam。内置 Provider 都在编译期确定，
 因此新增枚举分支时，发现、关联、详情、恢复与删除会保持穷举检查。
 
+跨 Agent 继续使用 `continuation.rs` 中独立的 seam，集中管理目标矩阵、原生导入 argv、
+临时私有 handoff 和新 Session Prompt。Session TUI 只返回 `Resume` 或
+`ContinueWith`，不解析 Transcript，也不构造 Provider 命令。
+
 Skill Catalog 是 Skill 发现和预览的文件系统 seam。TUI 只消费 Catalog 结果和已
 缓存的目录条目，不直接读取任意路径。
 
@@ -56,6 +61,8 @@ Shell 启动，退出后 TUI 通过 Catalog 刷新。TUI 不直接解析或写�
 ## 安全不变量
 
 - 原生恢复命令必须分别构造程序和 argv，绝不调用 Shell。
+- 跨 Agent 路径必须显式：有 Provider 原生能力时使用导入参数，其余路径通过临时私有
+  handoff 新建 Session。
 - 恢复 argv 只属于启动证据，不能代表当前 Session 身份。
 - 不能根据项目相同或更新时间推断精确运行关联。
 - active 展示只接受精确证据；证据缺失或歧义时，删除保护必须更保守。

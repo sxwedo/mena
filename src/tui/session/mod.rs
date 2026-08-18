@@ -26,7 +26,7 @@ pub(crate) fn manage_sessions(
     mut export: impl FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>,
     mut copy: impl FnMut(&SessionDetail, DetailScope) -> Result<()>,
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
-) -> Result<Option<AgentSession>> {
+) -> Result<Option<SessionBrowserResult>> {
     run_session_browser(
         sessions,
         protection.exact_active_targets,
@@ -47,7 +47,7 @@ fn run_session_browser(
     protected_targets: BTreeSet<String>,
     detail_theme: SessionDetailTheme,
     mut callbacks: SessionBrowserCallbacks<'_>,
-) -> Result<Option<AgentSession>> {
+) -> Result<Option<SessionBrowserResult>> {
     let mut app = SessionsApp::new_with_detail_theme(
         sessions,
         active_targets,
@@ -89,7 +89,16 @@ fn run_session_browser(
                     &mut callbacks.copy,
                 );
                 if action == DetailAction::Resume {
-                    return Ok(app.selected_session().cloned());
+                    return Ok(app
+                        .selected_session()
+                        .cloned()
+                        .map(SessionBrowserResult::Resume));
+                }
+                if action == DetailAction::ContinueWith {
+                    return Ok(app
+                        .selected_session()
+                        .cloned()
+                        .map(SessionBrowserResult::ContinueWith));
                 }
                 if app.mode != BrowserMode::Detail {
                     break;
@@ -130,8 +139,8 @@ fn run_session_browser(
                     KeyCode::End => app.last(),
                     KeyCode::Char('/') => app.mode = BrowserMode::Search,
                     KeyCode::Char('g') => app.cycle_grouping(),
-                    KeyCode::Char('r') => {
-                        return Ok(app.selected_session().cloned());
+                    KeyCode::Char('r' | 'R') => {
+                        return Ok(session_action_for_key(&app, key));
                     }
                     KeyCode::Enter | KeyCode::Char('i') => {
                         if let Some(DisplayRow::GroupHeader { project, .. }) = app.selected_row() {

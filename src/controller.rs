@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::continuation::{continuation_targets, prepare_continuation};
 use crate::mcp::{McpCatalog, McpProbeStatus, McpRegistration};
 use crate::process::{AgentKind, LiveAgent, discover_live_agents};
 use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
@@ -443,11 +444,88 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
                 catalog.delete_session(session)
             },
         )?;
-        if let Some(session) = selected {
-            resume_target(&session.target(), settings)?;
+        if let Some(action) = selected {
+            match action {
+                tui::session::SessionBrowserResult::Resume(session) => {
+                    resume_target(&session.target(), settings)?;
+                }
+                tui::session::SessionBrowserResult::ContinueWith(session) => {
+                    continue_with_agent(&catalog, &session, settings)?;
+                }
+            }
         }
     } else {
         print!("{}", render_session_table(sessions, None));
+    }
+    Ok(())
+}
+
+fn continue_with_agent(
+    catalog: &SessionCatalog,
+    session: &AgentSession,
+    settings: &Settings,
+) -> Result<()> {
+    let targets: Vec<_> = continuation_targets(&session.kind)
+        .into_iter()
+        .filter(|target| target.kind.is_installed(&settings.agent.custom))
+        .collect();
+    if targets.is_empty() {
+        bail!("no supported continuation target is installed; install claude, codex, or omp");
+    }
+    let Some(target) = tui::select_continuation_target(session, &targets)? else {
+        return Ok(());
+    };
+    let prepared = prepare_continuation(session, &target, || catalog.detail(session))?;
+    if target.kind == AgentKind::OhMyPi {
+        ui::info(format!(
+            "OMP will open its importer; select {}",
+            session.target()
+        ));
+    }
+    if let Some(path) = prepared.handoff_path() {
+        ui::info(format!(
+            "created temporary private handoff {}",
+            path.display()
+        ));
+    }
+    execute_continuation(prepared.command(), session, &target.kind)
+}
+
+fn execute_continuation(
+    spec: &NativeResumeCommand,
+    source: &AgentSession,
+    target: &AgentKind,
+) -> Result<()> {
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.args);
+    if let Some(project) = source.project.as_deref() {
+        if !project.is_dir() {
+            bail!(
+                "cannot continue {} with {} because its project directory no longer exists: {}",
+                source.target(),
+                target.slug(),
+                project.display()
+            );
+        }
+        command.current_dir(project);
+    }
+    ui::info(format!(
+        "continuing {} with {}",
+        source.target(),
+        target.slug()
+    ));
+    let status = command.status().with_context(|| {
+        format!(
+            "failed to start `{}`; install it or ensure it is available on PATH",
+            spec.program
+        )
+    })?;
+    if !status.success() {
+        bail!(
+            "{} exited without continuing {} (status: {status})",
+            spec.program,
+            source.target()
+        );
     }
     Ok(())
 }

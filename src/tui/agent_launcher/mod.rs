@@ -7,6 +7,7 @@ use crossterm::event::{self, Event, KeyCode};
 
 pub(crate) use self::render::*;
 use crate::AgentKind;
+use crate::continuation::ContinuationTarget;
 use crate::session::{AgentSession, NativeResumeCommand};
 use crate::tui::common::{ManagedTerminal, is_key_press};
 
@@ -16,6 +17,41 @@ pub struct AgentLauncherItem {
     pub session_count: usize,
     pub latest_session_id: Option<String>,
     pub latest_session_title: Option<String>,
+}
+
+pub fn select_continuation_target(
+    source: &AgentSession,
+    options: &[ContinuationTarget],
+) -> Result<Option<ContinuationTarget>> {
+    if options.is_empty() {
+        return Ok(None);
+    }
+    let mut selected_index = 0;
+    let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+    loop {
+        terminal.terminal.draw(|frame| {
+            draw_continuation_selector(frame, source, options, selected_index);
+        })?;
+        if !event::poll(Duration::from_millis(40)).context("failed to poll terminal input")? {
+            continue;
+        }
+        let input = event::read().context("failed to read terminal input")?;
+        if let Event::Key(key) = input
+            && is_key_press(&key)
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected_index = selected_index.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected_index = (selected_index + 1).min(options.len() - 1);
+                }
+                KeyCode::Enter => return Ok(options.get(selected_index).cloned()),
+                KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                _ => {}
+            }
+        }
+    }
 }
 
 pub fn select_and_launch_agent(

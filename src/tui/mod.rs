@@ -16,7 +16,9 @@ pub(crate) mod skill;
 #[cfg(test)]
 mod tests;
 
-pub use agent_launcher::{select_and_launch_agent, select_launch_mode_for_agent};
+pub use agent_launcher::{
+    select_and_launch_agent, select_continuation_target, select_launch_mode_for_agent,
+};
 pub(crate) use mcp::manage_mcp;
 pub(crate) use session::manage_sessions;
 pub use skill::manage_skills;

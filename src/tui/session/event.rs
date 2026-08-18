@@ -10,6 +10,18 @@ use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail};
 use crate::tui::common::is_key_press;
 
+pub(crate) fn session_action_for_key(
+    app: &SessionsApp,
+    key: KeyEvent,
+) -> Option<SessionBrowserResult> {
+    let session = app.selected_session()?.clone();
+    match key.code {
+        KeyCode::Char('r') => Some(SessionBrowserResult::Resume(session)),
+        KeyCode::Char('R') => Some(SessionBrowserResult::ContinueWith(session)),
+        _ => None,
+    }
+}
+
 /// Advance an in-progress transcript search by one batch, polling (non-blocking)
 /// for an Esc to cancel. Returns `Ok(true)` when a search is in progress and the
 /// caller should `continue` the event loop (redraw next tick); `Ok(false)` when
@@ -198,6 +210,9 @@ pub(crate) fn handle_detail_key(
 ) -> DetailAction {
     if key.code == KeyCode::Char('r') {
         return DetailAction::Resume;
+    }
+    if key.code == KeyCode::Char('R') {
+        return DetailAction::ContinueWith;
     }
     let scope = app.preview_scope;
     match key.code {

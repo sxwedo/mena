@@ -1,6 +1,7 @@
 //! Local-first developer-agent launcher and catalog for sessions, Skills, and MCP servers.
 
 mod clipboard;
+mod continuation;
 mod controller;
 mod editor;
 mod export;

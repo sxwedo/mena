@@ -8,6 +8,7 @@
 main.rs
   └── lib.rs                 command definitions and dispatch
       ├── controller.rs      command orchestration
+      ├── continuation.rs    cross-agent import and handoff policy
       ├── process.rs         provider recognition and live evidence
       ├── session.rs         provider-neutral session model and safety
       │   └── session/adapter.rs
@@ -40,6 +41,11 @@ Provider session behavior is a closed-enum adapter seam. Built-in providers are
 compiled into mena, so adding one makes discovery, association, detail, resume,
 and deletion matches non-exhaustive until each behavior is considered.
 
+Cross-agent continuation has a separate seam in `continuation.rs`. It owns the
+target matrix, native-import argv, temporary private handoffs, and fresh-target
+prompts. The Session TUI returns only `Resume` or `ContinueWith`; it does not
+parse transcripts or construct provider commands.
+
 The Skill catalog is the filesystem seam for Skill discovery and preview. TUI
 code consumes catalog results and cached directory entries rather than reading
 arbitrary paths itself.
@@ -64,6 +70,8 @@ directly.
 ## Safety invariants
 
 - Construct native resume program and argv separately; never invoke a shell.
+- Keep cross-agent routes explicit: native imports use provider-supported flags;
+  all other routes create a fresh session from a temporary private handoff.
 - Treat resume argv as launch evidence, not current session identity.
 - Never infer an exact live association from project equality or recency.
 - Show active state only for exact native evidence; protect deletion more

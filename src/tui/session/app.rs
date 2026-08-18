@@ -78,6 +78,13 @@ impl Grouping {
 pub(crate) enum DetailAction {
     Continue,
     Resume,
+    ContinueWith,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SessionBrowserResult {
+    Resume(AgentSession),
+    ContinueWith(AgentSession),
 }
 
 /// A full-text message search running incrementally so the UI can show

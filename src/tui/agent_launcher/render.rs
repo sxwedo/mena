@@ -6,6 +6,8 @@ use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table};
 
 use super::AgentLauncherItem;
 use crate::AgentKind;
+use crate::continuation::{ContinuationMethod, ContinuationTarget};
+use crate::session::AgentSession;
 use crate::tui::common::{
     UI, app_header, badge, centered_rect, header_inner, panel_block, panel_title, render_canvas,
     render_header_frame, responsive_key_hints, selection_style, table_header_style,
@@ -306,4 +308,78 @@ pub(crate) fn draw_mode_selector<T>(
         &[("Enter", "confirm"), ("q", "cancel")],
     ));
     frame.render_widget(footer, chunks[2]);
+}
+
+pub(crate) fn draw_continuation_selector(
+    frame: &mut Frame<'_>,
+    source: &AgentSession,
+    options: &[ContinuationTarget],
+    selected_index: usize,
+) {
+    let area = frame.area();
+    render_canvas(frame);
+    let popup_w = u16::min(85, area.width.saturating_sub(4));
+    let popup_h = u16::min(
+        u16::try_from(options.len() + 7).unwrap_or(20),
+        area.height.saturating_sub(4),
+    );
+    let popup_area = centered_rect(area, popup_w, popup_h);
+    frame.render_widget(Clear, popup_area);
+    render_header_frame(frame, popup_area, " Continue with agent ");
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(popup_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            format!("Continue {} with", source.target()),
+            Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
+        ))
+        .block(panel_block(
+            panel_title("Selected session", None, true),
+            true,
+        )),
+        chunks[0],
+    );
+
+    let rows = options.iter().enumerate().map(|(index, option)| {
+        let selected = index == selected_index;
+        let cursor = if selected { "> " } else { "  " };
+        let method = match option.method {
+            ContinuationMethod::NativeImport => "native import",
+            ContinuationMethod::Handoff => "handoff to a new session",
+        };
+        let style = if selected {
+            selection_style()
+        } else {
+            Style::default().bg(UI.panel).fg(UI.text_soft)
+        };
+        Row::new([Cell::from(format!("{cursor}{} · {method}", option.kind))]).style(style)
+    });
+    frame.render_widget(
+        Table::new(rows, [Constraint::Percentage(100)]).block(panel_block(
+            panel_title(
+                "Targets",
+                Some(format!("{} available", options.len())),
+                false,
+            ),
+            false,
+        )),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(responsive_key_hints(
+            chunks[2].width,
+            &[
+                ("Enter", "continue"),
+                ("↑/↓", "navigate"),
+                ("q/Esc", "cancel"),
+            ],
+            &[("Enter", "continue"), ("q", "cancel")],
+        )),
+        chunks[2],
+    );
 }

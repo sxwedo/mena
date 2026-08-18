@@ -33,6 +33,7 @@ mena ss --json
 | `g` | 切换平铺或按项目分组 |
 | `Enter` / `i` | 打开选中的 Session |
 | `r` | 使用 Provider 原生 CLI 恢复 |
+| `R` | 选择另一个已安装的 Agent 继续 |
 | `d`，再输入小写 `y` | 永久删除选中的 Session |
 | `q` / `Esc` | 关闭或退出 |
 
@@ -46,10 +47,31 @@ mena ss --json
 | `p` / `Shift+P` | 显示仅对话 / 完整记录 |
 | `c` / `e` | 按当前预览范围复制 / 导出 Markdown |
 | `r` | 恢复当前 Session |
+| `R` | 选择另一个已安装的 Agent 继续 |
 | `Esc` / `q` | 返回列表 |
 
 仅对话导出以 `-conv.md` 结尾，完整导出以 `-full.md` 结尾；两种范围都会保留
 元数据和按模型汇总的用量。
+
+## 换 Agent 继续
+
+大写 `R` 会保留小写 `r` 的原生恢复语义，并打开目标选择器。界面只展示已安装且
+存在受支持路径的目标 Agent。
+
+| 来源 Session | 目标 | 迁移方式 |
+|---|---|---|
+| Claude Code | Oh My Pi | 原生 `omp --from-claude` 导入 |
+| Codex | Oh My Pi | 原生 `omp --from-codex` 导入 |
+| 其他到 Claude、Codex 或 OMP 的跨 Agent 路径 | 所选目标 | handoff 后新建 Session |
+
+OMP 的导入参数仍会打开 OMP 自己的来源选择器，因为其 CLI 不接受 mena 已选中的外部
+Session ID 或路径。mena 会提示需要再次选择的来源 Target。OMP 会生成自己的新
+Session；mena 绝不会把 Claude 或 Codex ID 传给 `omp --resume`。
+
+handoff 会加载有界的完整对话，在记录的项目目录中写入临时 Markdown；Unix 下权限为
+`0600`，目标进程退出后自动删除。目标获得的是持久化上下文，而不是实时运行状态：
+Tool 结果、进程、权限、hook 和未提交工作区状态都必须重新核验。来源 Session 保持
+不变。
 
 ## 持久化指标
 
@@ -82,6 +104,8 @@ mena ss --json
 
 恢复命令始终以“程序 + argv”构造，不经过 Shell；启动前还会确认所选项目目录仍然
 存在。
+跨 Agent 启动同样不经过 Shell。handoff 文件保持私有、非持久化，也不会写入任何
+Provider 的 Session 存储。
 
 绿色 active 标记只接受精确的 Provider 原生证据：
 

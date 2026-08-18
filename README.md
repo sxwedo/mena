@@ -53,29 +53,32 @@ mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
 |---|---|
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena ps` | List running coding-agent processes |
-| `mena sessions` / `mena ss` | Search, inspect, resume, export, and delete sessions |
+| `mena sessions` / `mena ss` | Search, inspect, resume, continue with another agent, export, and delete sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse grouped registrations; open/edit/delete config; explicitly probe metadata |
 | `mena config init` | Create `~/.config/mena/config.toml` |
 
 ## Provider support
 
-| Provider | Launch | Sessions | MCP config |
-|---|:---:|:---:|:---:|
-| Claude Code | ✓ | ✓ | ✓ |
-| Codex | ✓ | ✓ | ✓ |
-| Gemini CLI | ✓ | ✓ | ✓ |
-| OpenCode | ✓ | ✓ | ✓ |
-| Pi | ✓ | ✓ | adapter¹ |
-| Oh My Pi | ✓ | ✓ | ✓ |
-| Cursor Agent | ✓ | ✓ | ✓ |
-| Goose | ✓ | — | ✓ |
-| Custom configuration | ✓ | — | — |
+| Provider | Launch | Sessions | Continue with | MCP config |
+|---|:---:|:---:|---|:---:|
+| Claude Code | ✓ | ✓ | OMP import; Codex handoff | ✓ |
+| Codex | ✓ | ✓ | OMP import; Claude handoff | ✓ |
+| Gemini CLI | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
+| OpenCode | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
+| Pi | ✓ | ✓ | Claude/Codex/OMP handoff | adapter¹ |
+| Oh My Pi | ✓ | ✓ | Claude/Codex handoff | ✓ |
+| Cursor Agent | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
+| Goose | ✓ | — | — | ✓ |
+| Custom configuration | ✓ | — | — | — |
 
 ¹ Pi entries are discovered only when `pi-mcp-adapter` is installed.
 
 Custom agents and Goose do not have a generic session catalog. `mena` returns
 an explicit unsupported result instead of guessing provider-owned paths.
+Inside the session browser, `r` performs native resume and `R` chooses an
+installed target agent. See the session documentation for import and handoff
+semantics.
 
 ## Documentation
 
@@ -92,6 +95,8 @@ an explicit unsupported result instead of guessing provider-owned paths.
 - Usage and cost are shown only when persisted by the provider; values are
   never inferred from public prices.
 - Resume uses program-plus-argv execution, never a shell.
+- Cross-agent handoffs use a temporary private Markdown file and start a fresh
+  target session; provider runtime state is never presented as transferred.
 - `mena ps` is a one-shot, read-only OS process snapshot. Its status is not an
   inferred agent lifecycle; `--verbose` prints full command lines that may contain secrets.
 - The MCP browser starts from static configuration. Only `p` or `--probe`
