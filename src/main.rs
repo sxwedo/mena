@@ -86,6 +86,20 @@ mod tests {
                 "--json",
             ],
             vec!["mena", "sk", "inspect", "ponytail", "--json"],
+            vec!["mena", "memories"],
+            vec!["mena", "ms"],
+            vec![
+                "mena",
+                "ms",
+                "--provider",
+                "claude",
+                "--scope",
+                "user",
+                "--json",
+            ],
+            vec!["mena", "ms", "inspect", "CLAUDE.md", "--json"],
+            vec!["mena", "ms", "open", "codex:user:AGENTS.md"],
+            vec!["mena", "ms", "delete", "CLAUDE.local.md"],
             vec!["mena", "mcp"],
             vec!["mena", "mcp", "open", "context7"],
             vec!["mena", "mcp", "--provider", "codex", "open", "context7"],
@@ -190,6 +204,40 @@ mod tests {
         assert_eq!(args.provider.as_deref(), Some("claude"));
         assert_eq!(args.scope.as_deref(), Some("global"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn ms_is_equivalent_to_memories() {
+        let cli = Cli::try_parse_from([
+            "mena",
+            "ms",
+            "--provider",
+            "claude",
+            "--scope",
+            "project",
+            "--json",
+        ])
+        .expect("ms should parse as the memories command");
+
+        let AgentCommand::Memories(args) = cli.args.command else {
+            panic!("ms did not resolve to memories");
+        };
+        assert_eq!(args.provider.as_deref(), Some("claude"));
+        assert_eq!(args.scope.as_deref(), Some("project"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn memory_selector_and_subcommands_parse() {
+        let cli = Cli::try_parse_from(["mena", "ms", "open", "codex:user:AGENTS.md"])
+            .expect("memory open should parse");
+        let AgentCommand::Memories(args) = cli.args.command else {
+            panic!("ms did not resolve to memories");
+        };
+        let Some(mena::MemorySubcommand::Open { name }) = args.command else {
+            panic!("open subcommand was not parsed");
+        };
+        assert_eq!(name, "codex:user:AGENTS.md");
     }
 
     #[test]

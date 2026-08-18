@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::continuation::{continuation_targets, prepare_continuation};
 use crate::mcp::{McpCatalog, McpProbeStatus, McpRegistration};
+use crate::memory::MemoryCatalog;
 use crate::process::{AgentKind, LiveAgent, discover_live_agents};
 use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
 use crate::settings::{CustomAgentSettings, Settings};
@@ -14,11 +15,12 @@ use crate::skill::SkillCatalog;
 use crate::tui;
 pub use crate::ui;
 use crate::view::{
-    render_mcp_detail, render_mcp_table, render_process_table, render_session_table,
-    render_skill_detail, render_skill_table,
+    render_mcp_detail, render_mcp_table, render_memory_detail, render_memory_table,
+    render_process_table, render_session_table, render_skill_detail, render_skill_table,
 };
 use crate::{
-    AgentLaunchArgs, McpArgs, McpSubcommand, PsArgs, SessionsArgs, SkillSubcommand, SkillsArgs,
+    AgentLaunchArgs, McpArgs, McpSubcommand, MemoriesArgs, MemorySubcommand, PsArgs, SessionsArgs,
+    SkillSubcommand, SkillsArgs,
 };
 
 /// Execute `mena mcp` without contacting any configured server unless an
@@ -139,6 +141,69 @@ fn run_mcp_tui(
         },
         move |registration| delete_catalog.delete_registration(registration),
     )
+}
+
+/// Execute `mena memories` with purely static discovery and bounded reads.
+///
+/// # Errors
+///
+/// Returns an actionable error when a selector is ambiguous, a file cannot be
+/// read within the size bound, or a deletion is refused by validation.
+pub fn run_memories(args: &MemoriesArgs) -> Result<()> {
+    let home = dirs::home_dir();
+    let current_dir = std::env::current_dir().context("could not resolve current directory")?;
+    let catalog = MemoryCatalog::scan(home.as_deref(), Some(&current_dir))?;
+
+    match &args.command {
+        Some(MemorySubcommand::Inspect { name, json }) => {
+            let detail = catalog.inspect(name, args.provider.as_deref(), args.scope.as_deref())?;
+            if *json || args.json {
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                print!("{}", render_memory_detail(&detail));
+            }
+        }
+        Some(MemorySubcommand::Open { name }) => {
+            if args.json {
+                bail!("--json cannot be used with `mena memories open`");
+            }
+            let file = catalog.resolve(name, args.provider.as_deref(), args.scope.as_deref())?;
+            crate::editor::edit_file_at_line(&file.path, 1)?;
+            ui::success(format!("edited memory file {}", file.path.display()));
+        }
+        Some(MemorySubcommand::Delete { name }) => {
+            if args.json {
+                bail!("--json cannot be used with `mena memories delete`");
+            }
+            let file = catalog.resolve(name, args.provider.as_deref(), args.scope.as_deref())?;
+            confirm_delete_memory(&file.path)?;
+            let removed = catalog.delete(&file.path)?;
+            ui::success(format!("deleted memory file {}", removed.display()));
+        }
+        None => {
+            let filtered = catalog.filter(args.provider.as_deref(), args.scope.as_deref())?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&filtered)?);
+            } else if filtered.is_empty() {
+                ui::info("no memory files discovered");
+            } else {
+                print!("{}", render_memory_table(&filtered));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn confirm_delete_memory(path: &std::path::Path) -> Result<()> {
+    print!("delete memory file {}? [y/N] ", path.display());
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if answer.trim() != "y" {
+        bail!("aborted; memory file was not deleted");
+    }
+    Ok(())
 }
 
 pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {

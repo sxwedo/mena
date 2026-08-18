@@ -46,6 +46,8 @@ mena sk inspect ponytail      # 检查唯一命名的 Skill
 mena mcp                      # 交互浏览 MCP 注册
 mena mcp open codegraph       # 打开来源配置并定位到该注册
 mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
+mena memories                 # 列出 Agent 记忆文件
+mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 ```
 
 | 命令 | 用途 |
@@ -55,6 +57,7 @@ mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
 | `mena sessions` / `mena ss` | 搜索、检查、恢复、换 Agent 继续、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
 | `mena mcp` | 分组浏览注册，打开/编辑/删除配置，并显式探测元数据 |
+| `mena memories` / `mena ms` | 列出、读取、编辑和删除 Agent 记忆文件 |
 | `mena config init` | 创建 `~/.config/mena/config.toml` |
 
 ## Provider 支持
@@ -84,6 +87,7 @@ Agent。导入与 handoff 的具体语义见 Session 文档。
 - [Session 浏览、指标、导出与删除](docs/sessions_CN.md)
 - [Agent Skill 发现与浏览](docs/skills_CN.md)
 - [MCP 目录、元数据、来源与安全边界](docs/mcp_CN.md)
+- [Agent 记忆文件](docs/memories_CN.md)
 - [配置](docs/configuration_CN.md)
 - [架构与开发](docs/development_CN.md)
 
@@ -101,6 +105,8 @@ Agent。导入与 handoff 的具体语义见 Session 文档。
 - 运行进程与 Session 的关联必须来自 Provider 原生证据；不确定时删除操作按
   fail-closed 处理。
 - 删除前会验证 Session ID、规范路径、符号链接范围和运行进程保护状态。
+- 记忆发现是静态且有读取上限的；编辑通过配置的编辑器完成，删除需要显式确认
+  并校验根目录包含关系。
 
 完整约束见 [Session 安全说明](docs/sessions_CN.md#安全与运行中-session-关联)。
 

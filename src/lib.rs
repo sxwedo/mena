@@ -7,6 +7,7 @@ mod editor;
 mod export;
 mod fs;
 mod mcp;
+mod memory;
 mod process;
 mod session;
 pub mod settings;
@@ -24,6 +25,7 @@ pub use mcp::{
     McpServerIdentity, McpSourceFormat, McpTimeouts, McpToolAnnotations, McpToolPolicy,
     McpTransport, McpValueBinding, McpValueSource,
 };
+pub use memory::{MemoryCatalog, MemoryDetail, MemoryFile};
 pub use process::{AgentKind, ProcessSnapshot};
 pub use settings::Settings;
 pub use skill::{AgentSkill, SkillCatalog, SkillDetail};
@@ -56,6 +58,46 @@ pub enum AgentCommand {
     Skills(SkillsArgs),
     /// Inspect MCP server registrations and their metadata
     Mcp(McpArgs),
+    /// Inspect, edit, or delete agent memory files
+    #[command(visible_alias = "ms")]
+    Memories(MemoriesArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MemoriesArgs {
+    #[command(subcommand)]
+    pub command: Option<MemorySubcommand>,
+    /// Filter by provider: claude, codex, cursor, or gemini
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Filter by scope: user or project
+    #[arg(long)]
+    pub scope: Option<String>,
+    /// Emit stable machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum MemorySubcommand {
+    /// Read one uniquely identified memory file
+    Inspect {
+        /// Memory file name or provider:scope:name selector
+        name: String,
+        /// Emit stable machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open one memory file in the configured editor
+    Open {
+        /// Memory file name or provider:scope:name selector
+        name: String,
+    },
+    /// Delete one memory file after explicit confirmation
+    Delete {
+        /// Memory file name or provider:scope:name selector
+        name: String,
+    },
 }
 
 /// Mena configuration operations.
@@ -196,6 +238,7 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
         AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
         AgentCommand::Skills(args) => controller::run_skills(&args, settings),
         AgentCommand::Mcp(args) => controller::run_mcp(&args),
+        AgentCommand::Memories(args) => controller::run_memories(&args),
     }
 }
 

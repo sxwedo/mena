@@ -19,6 +19,8 @@ mena skills inspect <name>
 mena mcp [--provider <client>] [--scope <scope>] [--source <path>] [--json]
 mena mcp inspect <name> [--probe] [--timeout <seconds>] [--json]
 mena mcp open <name>
+mena memories [--provider <name>] [--scope <scope>] [--json]
+mena ms inspect|open|delete <name>
 mena config init
 ```
 
@@ -56,6 +58,7 @@ main.rs
       │   └── skill/adapter.rs
       │       ├── detail.rs
       │       └── storage.rs
+      ├── memory.rs
       ├── mcp.rs
       │   ├── adapter.rs
       │   │   ├── common.rs
@@ -101,6 +104,10 @@ main.rs
 - `tui/` owns agent launch, session management, Skill and MCP browsing, search,
   detail views, and destructive-action confirmation. TUI modules must not
   bypass the session, Skill, or MCP catalog seams for provider-owned data.
+- `memory.rs` owns the provider-neutral memory-file catalog: static
+  discovery of native memory and instruction files, stable filters,
+  `provider:scope:name` selectors, ambiguity handling, bounded reads,
+  root-containment validation, and explicit deletion confirmation.
 - `settings.rs` owns `~/.config/mena/config.toml` and creates it atomically with
   restrictive permissions.
 - `fs.rs` provides atomic, permission-preserving writes for native index repair.
@@ -134,6 +141,10 @@ main.rs
   native source, preserve unrelated data, and use atomic permission-preserving
   replacement. Plugin/managed sources must fail closed for mutations, and
   formats that cannot retain comments must fail closed for automated deletion.
+- Memory discovery must stay static: never launch a process to collect
+  memories. Keep memory reads bounded, refuse symlinked entries, re-validate
+  canonical root containment before every read or deletion, and require an
+  explicit lowercase-`y` confirmation before deleting a memory file.
 - Treat MCP server metadata and safety annotations as untrusted claims. Keep
   reads, pages, item counts, schemas, text, timeouts, and cleanup bounded.
 

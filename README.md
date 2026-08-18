@@ -47,6 +47,8 @@ mena sk inspect ponytail      # inspect one uniquely named Skill
 mena mcp                      # interactively browse MCP registrations
 mena mcp open codegraph       # open source config at the registration
 mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
+mena memories                 # list agent memory files
+mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 ```
 
 | Command | Purpose |
@@ -56,6 +58,7 @@ mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
 | `mena sessions` / `mena ss` | Search, inspect, resume, continue with another agent, export, and delete sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse grouped registrations; open/edit/delete config; explicitly probe metadata |
+| `mena memories` / `mena ms` | List, read, edit, and delete agent memory files |
 | `mena config init` | Create `~/.config/mena/config.toml` |
 
 ## Provider support
@@ -86,6 +89,7 @@ semantics.
 - [Session browser, metrics, export, and deletion](docs/sessions.md)
 - [Agent Skill discovery and browser](docs/skills.md)
 - [MCP catalog, metadata, sources, and safety](docs/mcp.md)
+- [Agent memory files](docs/memories.md)
 - [Configuration](docs/configuration.md)
 - [Architecture and development](docs/development.md)
 
@@ -105,6 +109,8 @@ semantics.
   fail closed for deletion.
 - Session deletion validates identifiers, canonical paths, symlink containment,
   and live-process protection before removing data.
+- Memory discovery is static and read-bounded; edits go through the configured
+  editor and deletions require explicit confirmation with root containment.
 
 See [the session safety details](docs/sessions.md#safety-and-live-session-association)
 for the complete contract.

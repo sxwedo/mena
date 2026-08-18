@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 use crate::mcp::{McpDetail, McpProbe, McpRegistration, McpServerCapabilities};
+use crate::memory::{MemoryDetail, MemoryFile};
 use crate::process::LiveAgent;
 use crate::session::{
     AgentSession, MetricError, ModelUsageSummary, ResponseMetrics, TokenUsage, ToolMetrics,
@@ -226,6 +227,102 @@ pub fn render_skill_detail(detail: &SkillDetail) -> String {
         detail.content
     );
     out
+}
+
+pub fn render_memory_table(files: &[MemoryFile]) -> String {
+    let bold_cyan = anstyle::Style::new()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+        .bold();
+    let green =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Green)));
+    let cyan = anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)));
+    let magenta =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)));
+    let yellow =
+        anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Yellow)));
+    let reset = anstyle::Style::new();
+
+    let headers = ["NAME", "PROVIDER", "SCOPE", "SIZE", "LOCATION", "PATH"];
+    let rows: Vec<Vec<String>> = files
+        .iter()
+        .map(|file| {
+            let scope_styled = if file.scope == "user" {
+                format!("{cyan}[{}]{reset}", file.scope)
+            } else {
+                format!("{green}[{}]{reset}", file.scope)
+            };
+            let provider_styled = match file.provider.as_str() {
+                "claude" => format!("{magenta}[{}]{reset}", file.provider),
+                "codex" => format!("{yellow}[{}]{reset}", file.provider),
+                _ => format!("[{}]", file.provider),
+            };
+            vec![
+                format!("{bold_cyan}{}{reset}", file.name),
+                provider_styled,
+                scope_styled,
+                format_bytes(file.size_bytes),
+                file.location.clone(),
+                file.path.display().to_string(),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows)
+}
+
+pub fn render_memory_detail(detail: &MemoryDetail) -> String {
+    let bold_cyan = anstyle::Style::new()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
+        .bold();
+    let bold_magenta = anstyle::Style::new()
+        .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)))
+        .bold();
+    let dim = anstyle::Style::new().dimmed();
+    let reset = anstyle::Style::new();
+
+    let mut out = String::new();
+    let file = &detail.file;
+    let _ = writeln!(
+        out,
+        "╭─────────────────────────────────────────────────────────────"
+    );
+    let _ = writeln!(out, "│ {bold_cyan}Memory File:{reset} {}", file.name);
+    let _ = writeln!(
+        out,
+        "├─────────────────────────────────────────────────────────────"
+    );
+    let _ = writeln!(out, "│ {bold_magenta}Provider:{reset}    {}", file.provider);
+    let _ = writeln!(out, "│ {bold_magenta}Scope:{reset}       {}", file.scope);
+    let _ = writeln!(
+        out,
+        "│ {bold_magenta}Size:{reset}        {}",
+        format_bytes(file.size_bytes)
+    );
+    let _ = writeln!(
+        out,
+        "│ {bold_magenta}Path:{reset}        {dim}{}{reset}",
+        file.path.display()
+    );
+    let _ = writeln!(
+        out,
+        "├─────────────────────────────────────────────────────────────"
+    );
+    out.push_str(&detail.content);
+    if !detail.content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes < KIB {
+        format!("{bytes} B")
+    } else if bytes < MIB {
+        format!("{}.{} KiB", bytes / KIB, (bytes % KIB) * 10 / KIB)
+    } else {
+        format!("{}.{} MiB", bytes / MIB, (bytes % MIB) * 10 / MIB)
+    }
 }
 
 pub fn render_mcp_table(registrations: &[&McpRegistration]) -> String {
