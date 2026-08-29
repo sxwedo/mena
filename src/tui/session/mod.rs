@@ -80,8 +80,29 @@ fn run_session_browser(
         }
 
         let input = crossterm::event::read().context("failed to read terminal input")?;
-        if app.mode == BrowserMode::Detail {
+        if matches!(app.mode, BrowserMode::Detail | BrowserMode::DetailSearch) {
             for input in read_detail_event_batch(input)? {
+                // While the detail search box is open, every key goes to the
+                // query; nothing else in the popup reacts.
+                if app.mode == BrowserMode::DetailSearch
+                    && let Event::Key(key) = &input
+                    && is_key_press(key)
+                {
+                    match key.code {
+                        KeyCode::Enter => app.commit_detail_search(),
+                        KeyCode::Esc => app.cancel_detail_search(),
+                        KeyCode::Backspace => app.backspace_detail_search(),
+                        KeyCode::Char(character)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            app.append_detail_search(character);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 let action = handle_detail_browser_event(
                     &mut app,
                     &input,

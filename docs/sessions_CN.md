@@ -51,6 +51,8 @@ mena ss --json
 | `PgUp` / `PgDn`、`Home` / `End` | 在对话内翻页或跳转 |
 | `Shift+↑` / `Shift+↓` | 在用户与 Assistant 消息之间跳转 |
 | `p` / `Shift+P` | 显示仅对话 / 完整记录 |
+| `/` | 在对话中搜索；`Enter` 保留、`Esc` 取消 |
+| `n` / `N` | 搜索后跳转到下一个 / 上一个匹配 |
 | `c` / `e` | 按当前预览范围复制 / 导出 Markdown |
 | `r` | 恢复当前 Session |
 | `R` | 交接（handoff）给另一个已安装的 Agent |

@@ -268,6 +268,17 @@ pub(crate) fn handle_detail_key(
     }
     let scope = app.preview_scope;
     match key.code {
+        // Vim-style in-detail search: `/` opens an incremental query, and a
+        // committed search navigates with `n`/`N`. Esc clears the search
+        // before it ever closes the popup.
+        KeyCode::Char('/') => app.begin_detail_search(),
+        KeyCode::Char('n') if app.detail_search.is_some() => {
+            app.step_detail_match(true);
+        }
+        KeyCode::Char('N') if app.detail_search.is_some() => {
+            app.step_detail_match(false);
+        }
+        KeyCode::Esc if app.detail_search.is_some() => app.cancel_detail_search(),
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('i' | 'q') => app.close_detail(),
         KeyCode::Char('c')
             if !key.modifiers.intersects(

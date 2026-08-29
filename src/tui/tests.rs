@@ -497,6 +497,113 @@ fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
 }
 
 #[test]
+fn detail_search_finds_lines_and_navigates_with_n_and_n() {
+    let session = fixture_session();
+    let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
+    app.open_detail(SessionDetail {
+        session,
+        messages: vec![
+            SessionMessage {
+                kind: SessionMessageKind::User,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "alpha needle one".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::Assistant,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "beta plain".to_owned(),
+            },
+            SessionMessage {
+                kind: SessionMessageKind::User,
+                timestamp: None,
+                model: None,
+                metrics: SessionMessageMetrics::default(),
+                content: "gamma needle two".to_owned(),
+            },
+        ],
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw details so the layout exists");
+
+    // `/` opens the search box and typing is incremental.
+    app.begin_detail_search();
+    assert_eq!(app.mode, BrowserMode::DetailSearch);
+    for character in "needle".chars() {
+        app.append_detail_search(character);
+    }
+    let search = app.detail_search.as_ref().expect("search state");
+    assert_eq!(search.match_lines.len(), 2);
+    let first = search.match_lines[0];
+    let second = search.match_lines[1];
+    assert_ne!(first, second);
+
+    // The focused match is scrolled into view and `n`/`N` wrap around.
+    let scroll_before = app.detail_scroll;
+    app.step_detail_match(true);
+    assert_eq!(app.detail_search.as_ref().expect("search").cursor, 1);
+    app.step_detail_match(true);
+    assert_eq!(app.detail_search.as_ref().expect("search").cursor, 0);
+    app.step_detail_match(false);
+    assert_eq!(
+        app.detail_search.as_ref().expect("search").cursor,
+        app.detail_search
+            .as_ref()
+            .expect("search")
+            .match_lines
+            .len()
+            - 1
+    );
+    let _ = (scroll_before, first, second);
+
+    // Enter commits (search stays, mode returns to Detail); Esc cancels.
+    app.commit_detail_search();
+    assert_eq!(app.mode, BrowserMode::Detail);
+    assert!(app.detail_search.is_some());
+    app.begin_detail_search();
+    app.cancel_detail_search();
+    assert_eq!(app.mode, BrowserMode::Detail);
+    assert!(app.detail_search.is_none());
+}
+
+#[test]
+fn detail_search_renders_query_and_match_count_in_the_footer() {
+    let session = fixture_session();
+    let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
+    app.open_detail(SessionDetail {
+        session,
+        messages: vec![SessionMessage {
+            kind: SessionMessageKind::User,
+            timestamp: None,
+            model: None,
+            metrics: SessionMessageMetrics::default(),
+            content: "the needle in the haystack".to_owned(),
+        }],
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw details");
+    app.begin_detail_search();
+    app.append_detail_search('e');
+    app.append_detail_search('e');
+
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw search footer");
+    let screen = buffer_text(terminal.backend().buffer(), 120, 30);
+    assert!(screen.contains("/ee▌"));
+    assert!(screen.contains("1 match"));
+    assert!(screen.contains("Enter keep"));
+    assert!(screen.contains("Esc cancel"));
+}
+
+#[test]
 fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
     let session = fixture_session();
     let messages = vec![

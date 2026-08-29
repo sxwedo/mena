@@ -206,7 +206,7 @@ pub(crate) fn group_header_label(project: &str) -> String {
 }
 
 fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
-    if app.mode != BrowserMode::Detail {
+    if !matches!(app.mode, BrowserMode::Detail | BrowserMode::DetailSearch) {
         return;
     }
     if app.detail.is_none() {
@@ -283,18 +283,51 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         .map(|offset| offset.min(app.detail_max_scroll))
         .collect();
     app.detail_primary_offsets.dedup();
-    let (text, local_scroll) = app
-        .detail_layout
-        .as_ref()
-        .expect("detail layout was initialized")
-        .visible_text(app.detail_scroll, usize::from(areas[0].height));
+    let (text, local_scroll) = {
+        let layout = app
+            .detail_layout
+            .as_ref()
+            .expect("detail layout was initialized");
+        let (start, end, local_scroll) =
+            layout.visible_span(app.detail_scroll, usize::from(areas[0].height));
+        if end <= start {
+            (Text::default(), local_scroll)
+        } else {
+            // Search matches carry a quiet band; the focused match glows.
+            let (match_lines, focus_line) = app.detail_search.as_ref().map_or_else(
+                || (&[][..], None),
+                |search| {
+                    (
+                        search.match_lines.as_slice(),
+                        search.match_lines.get(search.cursor).copied(),
+                    )
+                },
+            );
+            let lines = layout.lines[start..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, line)| {
+                    let global = start + offset;
+                    let style = if focus_line == Some(global) {
+                        Style::default().bg(UI.amber)
+                    } else if match_lines.contains(&global) {
+                        Style::default().bg(UI.grid)
+                    } else {
+                        return line.clone();
+                    };
+                    line.clone().patch_style(style)
+                })
+                .collect::<Vec<Line<'static>>>();
+            (Text::from(lines), local_scroll)
+        }
+    };
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
     frame.render_widget(paragraph.scroll((local_scroll, 0)), areas[0]);
     render_detail_status_bar(frame, areas[1], app.detail_status.as_ref(), theme);
-    render_detail_footer(frame, areas[2], theme);
+    render_detail_footer(frame, areas[2], app);
 }
 
 fn render_detail_status_bar(
@@ -322,7 +355,94 @@ fn render_detail_status_bar(
     );
 }
 
-fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailTheme) {
+fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
+    let theme = app.detail_theme;
+    if app.mode == BrowserMode::DetailSearch
+        && let Some(search) = app.detail_search.as_ref()
+    {
+        let query_line = Line::from(vec![
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(theme.footer_key)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{}{}",
+                    search.query,
+                    if app.mode == BrowserMode::DetailSearch {
+                        "▌"
+                    } else {
+                        ""
+                    }
+                ),
+                Style::default().fg(theme.footer_text),
+            ),
+            Span::styled(
+                format!(
+                    "  ·  {} match{}  ·  Enter keep · Esc cancel",
+                    search.match_lines.len(),
+                    if search.match_lines.len() == 1 {
+                        ""
+                    } else {
+                        "es"
+                    }
+                ),
+                Style::default().fg(UI.muted),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(query_line).alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+    // A committed search advertises its position and the n/N jump keys.
+    let search_suffix = app.detail_search.as_ref().map(|search| {
+        let position = if search.match_lines.is_empty() {
+            0
+        } else {
+            search.cursor + 1
+        };
+        format!(
+            "  ·  /{} {}/{} · n/N jump · Esc clear",
+            search.query,
+            position,
+            search.match_lines.len()
+        )
+    });
+    if let Some(suffix) = search_suffix {
+        let hints = if area.width >= 108 {
+            themed_key_hints(
+                &[
+                    ("n/N", "jump"),
+                    ("p", "chat"),
+                    ("c", "copy"),
+                    ("Esc", "clear"),
+                ],
+                theme.footer_key,
+                theme.footer_text,
+                theme.footer_separator,
+            )
+        } else {
+            themed_key_hints(
+                &[("n/N", "jump"), ("Esc", "clear")],
+                theme.footer_key,
+                theme.footer_text,
+                theme.footer_separator,
+            )
+        };
+        let line = Line::from(
+            hints
+                .spans
+                .into_iter()
+                .chain([Span::styled(suffix, Style::default().fg(UI.muted))])
+                .collect::<Vec<Span<'static>>>(),
+        );
+        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+        return;
+    }
     frame.render_widget(
         Paragraph::new(if area.width >= 108 {
             themed_key_hints(
@@ -334,6 +454,7 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailT
                     ("r", "resume"),
                     ("R", "handoff"),
                     ("e", "export"),
+                    ("/", "find"),
                     ("Esc", "close"),
                 ],
                 theme.footer_key,
@@ -347,6 +468,7 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailT
                     ("c", "copy"),
                     ("r", "resume"),
                     ("R", "handoff"),
+                    ("/", "find"),
                     ("Esc", "close"),
                 ],
                 theme.footer_key,

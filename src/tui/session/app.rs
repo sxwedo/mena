@@ -32,7 +32,19 @@ pub(crate) enum BrowserMode {
     Browse,
     Search,
     Detail,
+    /// Incremental text search inside the detail popup (`/`), vim-style:
+    /// `n`/`N` step through matches after Enter commits.
+    DetailSearch,
     ConfirmDelete,
+}
+
+/// An in-detail text search over rendered transcript lines. `match_lines`
+/// index into `DetailLayoutCache::lines`; `cursor` is the focused match.
+#[derive(Debug, Clone)]
+pub(crate) struct DetailSearchState {
+    pub(crate) query: String,
+    pub(crate) match_lines: Vec<usize>,
+    pub(crate) cursor: usize,
 }
 
 /// How the session list is grouped in the table. `Flat` is the single
@@ -141,6 +153,9 @@ pub(crate) struct SessionsApp {
     /// Sessions awaiting the lowercase-`y` confirmation. Empty outside
     /// `ConfirmDelete` mode; holds either one session or every marked one.
     pub(crate) confirm_delete_targets: Vec<AgentSession>,
+    /// Active text search inside the detail popup, if any. Line numbers are
+    /// invalidated (and the search dropped) whenever the layout rebuilds.
+    pub(crate) detail_search: Option<DetailSearchState>,
 }
 
 impl SessionsApp {
@@ -183,6 +198,7 @@ impl SessionsApp {
             preview_scope: DetailScope::Conversation,
             marked_targets: BTreeSet::default(),
             confirm_delete_targets: Vec::new(),
+            detail_search: None,
         };
         app.recompute_filter();
         app
@@ -383,6 +399,9 @@ impl SessionsApp {
         self.detail_max_scroll = 0;
         self.detail_primary_offsets.clear();
         self.detail_layout = None;
+        // Rebuilding the layout reflows every line, so any match positions
+        // from the previous scope are meaningless; drop the search.
+        self.detail_search = None;
     }
 
     pub(crate) fn close_detail(&mut self) {
@@ -392,7 +411,121 @@ impl SessionsApp {
         self.detail_primary_offsets.clear();
         self.detail_layout = None;
         self.detail_status = None;
+        self.detail_search = None;
         self.mode = BrowserMode::Browse;
+    }
+
+    /// Begin an incremental search over the rendered detail lines.
+    pub(crate) fn begin_detail_search(&mut self) {
+        self.detail_search = Some(DetailSearchState {
+            query: String::new(),
+            match_lines: Vec::new(),
+            cursor: 0,
+        });
+        self.mode = BrowserMode::DetailSearch;
+    }
+
+    pub(crate) fn append_detail_search(&mut self, character: char) {
+        if let Some(search) = self.detail_search.as_mut() {
+            search.query.push(character);
+            self.refresh_detail_matches();
+        }
+    }
+
+    pub(crate) fn backspace_detail_search(&mut self) {
+        if let Some(search) = self.detail_search.as_mut() {
+            search.query.pop();
+            self.refresh_detail_matches();
+        }
+    }
+
+    /// Keep the search and return to normal detail navigation.
+    pub(crate) fn commit_detail_search(&mut self) {
+        if self
+            .detail_search
+            .as_ref()
+            .is_none_or(|search| search.query.trim().is_empty())
+        {
+            self.detail_search = None;
+        }
+        if self.mode == BrowserMode::DetailSearch {
+            self.mode = BrowserMode::Detail;
+        }
+    }
+
+    /// Drop the search entirely and return to normal detail navigation.
+    pub(crate) fn cancel_detail_search(&mut self) {
+        self.detail_search = None;
+        if self.mode == BrowserMode::DetailSearch {
+            self.mode = BrowserMode::Detail;
+        }
+    }
+
+    /// Move to the next (`n`) or previous (`N`) match, wrapping around.
+    pub(crate) fn step_detail_match(&mut self, forward: bool) {
+        let Some(search) = self.detail_search.as_mut() else {
+            return;
+        };
+        if search.match_lines.is_empty() {
+            return;
+        }
+        let len = search.match_lines.len();
+        search.cursor = if forward {
+            (search.cursor + 1) % len
+        } else {
+            (search.cursor + len - 1) % len
+        };
+        self.focus_current_detail_match();
+    }
+
+    fn refresh_detail_matches(&mut self) {
+        let query = self
+            .detail_search
+            .as_ref()
+            .map(|search| search.query.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let match_lines = if query.is_empty() {
+            Vec::new()
+        } else {
+            self.detail_layout
+                .as_ref()
+                .map(|layout| {
+                    layout
+                        .lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, line)| {
+                            let mut text = String::new();
+                            for span in &line.spans {
+                                text.push_str(&span.content);
+                            }
+                            text.to_ascii_lowercase().contains(&query)
+                        })
+                        .map(|(index, _)| index)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        if let Some(search) = self.detail_search.as_mut() {
+            search.match_lines = match_lines;
+            search.cursor = 0;
+        }
+        self.focus_current_detail_match();
+    }
+
+    /// Scroll the detail popup so the focused match sits at the viewport top.
+    fn focus_current_detail_match(&mut self) {
+        let Some(search) = self.detail_search.as_ref() else {
+            return;
+        };
+        if let Some(&line) = search.match_lines.get(search.cursor)
+            && let Some(offset) = self
+                .detail_layout
+                .as_ref()
+                .and_then(|layout| layout.line_offsets.get(line).copied())
+        {
+            self.detail_scroll = offset.min(self.detail_max_scroll);
+        }
     }
 
     pub(crate) fn scroll_detail(&mut self, amount: isize) {
@@ -604,13 +737,15 @@ impl DetailLayoutCache {
         self.line_offsets.last().copied().unwrap_or_default()
     }
 
-    pub(crate) fn visible_text(
+    /// The rendered line range `[start, end)` visible at `scroll`, plus the
+    /// scroll offset within the first visible line.
+    pub(crate) fn visible_span(
         &self,
         scroll: usize,
         viewport_height: usize,
-    ) -> (Text<'static>, u16) {
+    ) -> (usize, usize, u16) {
         if self.lines.is_empty() || scroll >= self.total_height() {
-            return (Text::default(), 0);
+            return (0, 0, 0);
         }
 
         let start_index = self
@@ -627,7 +762,8 @@ impl DetailLayoutCache {
             .min(self.lines.len());
 
         (
-            Text::from(self.lines[start_index..end_index].to_vec()),
+            start_index,
+            end_index,
             u16::try_from(local_scroll).unwrap_or(u16::MAX),
         )
     }

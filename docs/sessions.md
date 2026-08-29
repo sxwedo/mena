@@ -60,6 +60,8 @@ Inside the detail view:
 | `PgUp` / `PgDn`, `Home` / `End` | Page or jump within the transcript |
 | `Shift+↑` / `Shift+↓` | Jump between user and assistant messages |
 | `p` / `Shift+P` | Show conversation-only / complete transcript |
+| `/` | Search the transcript; `Enter` keeps, `Esc` cancels |
+| `n` / `N` | Jump to the next / previous match after a search |
 | `c` / `e` | Copy / export Markdown using the active preview scope |
 | `r` | Resume this session |
 | `R` | Hand off to another installed agent |
