@@ -586,7 +586,11 @@ pub(super) fn cursor_global_storage_dirs(home: &Path) -> Vec<PathBuf> {
     clippy::unnecessary_wraps,
     clippy::collapsible_if
 )]
-pub(super) fn scan_cursor(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+pub(super) fn scan_cursor(
+    home: &Path,
+    include_empty: bool,
+    sessions: &mut Vec<AgentSession>,
+) -> Result<()> {
     for global_dir in cursor_global_storage_dirs(home) {
         let db_path = global_dir.join("state.vscdb");
         if !db_path.is_file() {
@@ -624,7 +628,7 @@ pub(super) fn scan_cursor(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
                         if title.is_none() {
                             title = load_cursor_first_user_message_preview(&connection, &id);
                         }
-                        if title.is_none() {
+                        if title.is_none() && !include_empty {
                             continue;
                         }
                         let updated_secs = updated_ms
@@ -679,7 +683,7 @@ pub(super) fn scan_cursor(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
                                             &id,
                                         );
                                     }
-                                    if title.is_none() {
+                                    if title.is_none() && !include_empty {
                                         continue;
                                     }
                                     let project = comp

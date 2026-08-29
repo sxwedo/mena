@@ -42,7 +42,7 @@ pub fn render_process_table(agents: &[LiveAgent], verbose: bool) -> String {
     strip_terminal_controls(&render_table(&headers, &rows))
 }
 
-pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) -> String {
+pub fn render_session_table(sessions: &[AgentSession]) -> String {
     if sessions.is_empty() {
         return "No saved developer-agent sessions found.\n".to_owned();
     }
@@ -50,9 +50,8 @@ pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) 
     let headers = ["TARGET", "AGENT", "PROJECT", "TITLE / SUMMARY", "UPDATED"];
     let rows: Vec<Vec<String>> = sessions
         .iter()
-        .enumerate()
-        .map(|(index, session)| {
-            let mut row = vec![
+        .map(|session| {
+            vec![
                 session.target(),
                 session.kind.to_string(),
                 session
@@ -64,35 +63,10 @@ pub fn render_session_table(sessions: &[AgentSession], selected: Option<usize>) 
                     .clone()
                     .unwrap_or_else(|| "(untitled)".to_owned()),
                 format_age(session.updated_at),
-            ];
-            if let Some(selected) = selected {
-                row.insert(
-                    0,
-                    if selected == index {
-                        ">".to_owned()
-                    } else {
-                        " ".to_owned()
-                    },
-                );
-            }
-            row
+            ]
         })
         .collect();
-    if selected.is_some() {
-        render_table(
-            &[
-                "",
-                "TARGET",
-                "AGENT",
-                "PROJECT",
-                "TITLE / SUMMARY",
-                "UPDATED",
-            ],
-            &rows,
-        )
-    } else {
-        render_table(&headers, &rows)
-    }
+    render_table(&headers, &rows)
 }
 
 pub fn render_skill_table(skills: &[AgentSkill]) -> String {

@@ -9,7 +9,10 @@ use crate::continuation::{continuation_targets, prepare_continuation};
 use crate::mcp::{McpCatalog, McpProbeStatus, McpRegistration};
 use crate::memory::MemoryCatalog;
 use crate::process::{AgentKind, LiveAgent, discover_live_agents};
-use crate::session::{AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command};
+use crate::session::{
+    AgentSession, NativeResumeCommand, SessionCatalog, native_resume_command,
+    session_provider_slugs,
+};
 use crate::settings::{CustomAgentSettings, Settings};
 use crate::skill::SkillCatalog;
 use crate::tui;
@@ -208,7 +211,7 @@ fn confirm_delete_memory(path: &std::path::Path) -> Result<()> {
 
 pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir().context("could not resolve current working directory")?;
-    let catalog = scan_sessions(None)?;
+    let catalog = scan_sessions(None, false)?;
     let custom = &settings.agent.custom;
 
     let cwd_sessions: Vec<AgentSession> = catalog
@@ -464,23 +467,22 @@ fn print_agent_launch_help(
 }
 
 pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
-    if args.limit == Some(0) {
-        bail!("--limit must be at least 1");
-    }
     let provider = args
         .provider
         .as_deref()
         .map(|provider| {
             AgentKind::from_slug(provider).with_context(|| {
                 format!(
-                    "unsupported session provider `{provider}`; use claude, codex, cursor, gemini, opencode, pi, or omp"
+                    "unsupported session provider `{provider}`; use {}",
+                    session_provider_slugs().join(", ")
                 )
             })
         })
         .transpose()?;
-    let catalog = scan_sessions(provider.as_ref())?;
+    let catalog = scan_sessions(provider.as_ref(), args.include_empty)?;
     let count = args
         .limit
+        .and_then(|limit| usize::try_from(limit).ok())
         .unwrap_or_else(|| catalog.sessions().len())
         .min(catalog.sessions().len());
     let sessions = &catalog.sessions()[..count];
@@ -520,7 +522,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             }
         }
     } else {
-        print!("{}", render_session_table(sessions, None));
+        print!("{}", render_session_table(sessions));
     }
     Ok(())
 }
@@ -638,7 +640,7 @@ fn resume_target(target: &str, settings: &Settings) -> Result<()> {
         return execute_resume(&spec, &AgentKind::Custom(name.to_owned()), session_id, None);
     }
     let provider_kind = provider.and_then(AgentKind::from_slug);
-    let catalog = scan_sessions(provider_kind.as_ref())?;
+    let catalog = scan_sessions(provider_kind.as_ref(), false)?;
     let session = catalog.resolve(provider, session_id)?;
     let (kind, id, project) = (
         session.kind.clone(),
@@ -703,10 +705,10 @@ fn custom_resume_spec(
     })
 }
 
-fn scan_sessions(provider: Option<&AgentKind>) -> Result<SessionCatalog> {
+fn scan_sessions(provider: Option<&AgentKind>, include_empty: bool) -> Result<SessionCatalog> {
     let home =
         dirs::home_dir().context("could not resolve the home directory for agent sessions")?;
-    SessionCatalog::scan_provider(&home, provider)
+    SessionCatalog::scan_provider(&home, provider, include_empty)
 }
 
 fn session_protection(

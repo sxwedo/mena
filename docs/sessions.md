@@ -13,8 +13,9 @@ mena ss --include-empty
 mena ss --json
 ```
 
-`--provider` accepts `claude`, `codex`, `cursor`, `gemini`, `opencode`, `pi`,
-or `omp`. `--limit` must be at least 1. Cursor draft sessions without messages
+`--provider` accepts `claude`, `codex`, `cursor`, `gemini`, `goose`, `opencode`,
+`pi`, or `omp`; `goose` has no native local session catalog and always lists
+nothing. `--limit` must be at least 1. Cursor draft sessions without messages
 are hidden unless `--include-empty` is present.
 
 A saved-session target is `provider:session-id`. An unqualified ID or prefix is

@@ -349,6 +349,15 @@ pub struct DeletionSummary {
     pub index_records: usize,
 }
 
+/// Provider slugs accepted by session filters, derived from the built-in
+/// session catalog so error guidance cannot drift from discovery support.
+pub fn session_provider_slugs() -> Vec<String> {
+    adapter::ProviderAdapter::SESSION_CATALOG
+        .iter()
+        .map(|adapter| adapter.kind().slug().to_owned())
+        .collect()
+}
+
 #[derive(Debug, Default)]
 pub struct SessionCatalog {
     home: PathBuf,
@@ -358,14 +367,20 @@ pub struct SessionCatalog {
 impl SessionCatalog {
     #[cfg(test)]
     pub fn scan(home: &Path) -> Result<Self> {
-        Self::scan_provider(home, None)
+        Self::scan_provider(home, None, false)
     }
 
-    pub fn scan_provider(home: &Path, provider: Option<&AgentKind>) -> Result<Self> {
+    /// Scan provider-owned session storage, optionally keeping messageless
+    /// empty draft sessions that discovery hides by default.
+    pub fn scan_provider(
+        home: &Path,
+        provider: Option<&AgentKind>,
+        include_empty: bool,
+    ) -> Result<Self> {
         let mut sessions = Vec::new();
         for adapter in adapter::ProviderAdapter::SESSION_CATALOG {
             if provider.is_none_or(|kind| adapter.matches(kind)) {
-                adapter.discover(home, &mut sessions)?;
+                adapter.discover(home, include_empty, &mut sessions)?;
             }
         }
         sessions.sort_by(|left, right| {
@@ -2423,7 +2438,7 @@ mod tests {
 
         drop(connection);
 
-        let catalog = SessionCatalog::scan_provider(home, None).expect("scan home");
+        let catalog = SessionCatalog::scan_provider(home, None, false).expect("scan home");
         let cursor_sessions: Vec<_> = catalog
             .sessions()
             .iter()
@@ -2458,7 +2473,7 @@ mod tests {
         assert_eq!(summary.index_records, 2);
         assert!(db_path.exists());
 
-        let rescan = SessionCatalog::scan_provider(home, None).expect("rescan home");
+        let rescan = SessionCatalog::scan_provider(home, None, false).expect("rescan home");
         assert!(
             rescan
                 .sessions()
@@ -2543,11 +2558,21 @@ mod tests {
 
         drop(connection);
 
-        let catalog = SessionCatalog::scan_provider(home, None).expect("scan home");
+        let catalog = SessionCatalog::scan_provider(home, None, false).expect("scan home");
         let sessions = catalog.sessions();
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, populated_id);
         assert_eq!(sessions[0].title.as_deref(), Some("Valid question"));
+
+        let expanded =
+            SessionCatalog::scan_provider(home, None, true).expect("scan home with drafts");
+        let expanded_sessions = expanded.sessions();
+        assert_eq!(expanded_sessions.len(), 2);
+        assert!(
+            expanded_sessions
+                .iter()
+                .any(|s| s.id == empty_id && s.title.is_none())
+        );
     }
 }

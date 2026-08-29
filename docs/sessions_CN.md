@@ -13,9 +13,9 @@ mena ss --include-empty
 mena ss --json
 ```
 
-`--provider` 支持 `claude`、`codex`、`cursor`、`gemini`、`opencode`、`pi`
-和 `omp`；`--limit` 必须大于等于 1。Cursor 中没有消息的草稿默认隐藏，传入
-`--include-empty` 后才会显示。
+`--provider` 支持 `claude`、`codex`、`cursor`、`gemini`、`goose`、`opencode`、
+`pi` 和 `omp`；`goose` 没有本地 Session 目录，始终列出为空。`--limit` 必须大于
+等于 1。Cursor 中没有消息的草稿默认隐藏，传入 `--include-empty` 后才会显示。
 
 已保存 Session 的 Target 格式是 `provider:session-id`。只有在结果唯一时，才允许
 省略 Provider 或使用 ID 前缀。

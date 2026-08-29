@@ -133,12 +133,12 @@ pub struct PsArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionsArgs {
-    /// Filter by provider: claude, codex, cursor, gemini, opencode, pi, or omp
+    /// Filter by provider: claude, codex, cursor, gemini, goose, opencode, pi, or omp
     #[arg(long)]
     pub provider: Option<String>,
     /// Show only the most recently updated N sessions
-    #[arg(long)]
-    pub limit: Option<usize>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub limit: Option<u64>,
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,

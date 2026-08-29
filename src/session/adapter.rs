@@ -85,7 +85,7 @@ impl ProviderAdapter {
         }
     }
 
-    const fn kind(self) -> AgentKind {
+    pub(super) const fn kind(self) -> AgentKind {
         match self {
             Self::ClaudeCode => AgentKind::ClaudeCode,
             Self::Codex => AgentKind::Codex,
@@ -155,7 +155,12 @@ impl ProviderAdapter {
             .collect())
     }
 
-    pub(super) fn discover(self, home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+    pub(super) fn discover(
+        self,
+        home: &Path,
+        include_empty: bool,
+        sessions: &mut Vec<AgentSession>,
+    ) -> Result<()> {
         match self {
             Self::ClaudeCode => scan_claude(home, sessions),
             Self::Codex => scan_codex(home, sessions),
@@ -164,7 +169,7 @@ impl ProviderAdapter {
             Self::OpenCode => scan_opencode(home, sessions),
             Self::Pi => scan_pi(home, sessions),
             Self::OhMyPi => scan_oh_my_pi(home, sessions),
-            Self::Cursor => scan_cursor(home, sessions),
+            Self::Cursor => scan_cursor(home, include_empty, sessions),
         }
     }
 
