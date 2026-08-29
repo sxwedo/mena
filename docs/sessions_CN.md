@@ -35,11 +35,13 @@ mena ss --json
 | `a` | 标记或取消标记全部可见 Session |
 | `Enter` / `i` | 打开选中的 Session |
 | `r` | 使用 Provider 原生 CLI 恢复 |
-| `R` | 选择另一个已安装的 Agent 继续 |
+| `R` | 交接（handoff）给另一个已安装的 Agent |
 | `d`，再输入小写 `y` | 永久删除选中的 Session，或所有已标记的 Session |
 | `q` / `Esc` | 退出（存在标记时 `Esc` 先清空标记） |
 
 存在标记时浏览器进入批量模式：底部只显示删除相关按键，单会话按键（`r`、`R`、`Enter`、`g`、`/`）会被锁定并提示先按 `Esc` 清空标记；确认弹窗会列出最多 5 个 Target 并给出明确的按键指引（`y` 删除、`n`/`Esc` 全部保留）。受运行中 Agent 保护的 Session 会被跳过并提示，而不是阻断整批删除。
+
+列表使用紧凑 Target（`provider:ID 前 8 位`）以留出标题空间；详情视图、删除确认、导出、剪贴板内容与 `--json` 输出始终携带完整的 `provider:session-id`。
 
 详情视图按键：
 
@@ -51,7 +53,7 @@ mena ss --json
 | `p` / `Shift+P` | 显示仅对话 / 完整记录 |
 | `c` / `e` | 按当前预览范围复制 / 导出 Markdown |
 | `r` | 恢复当前 Session |
-| `R` | 选择另一个已安装的 Agent 继续 |
+| `R` | 交接（handoff）给另一个已安装的 Agent |
 | `Esc` / `q` | 返回列表 |
 
 仅对话导出以 `-conv.md` 结尾，完整导出以 `-full.md` 结尾；两种范围都会保留

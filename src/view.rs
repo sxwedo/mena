@@ -52,7 +52,7 @@ pub fn render_session_table(sessions: &[AgentSession]) -> String {
         .iter()
         .map(|session| {
             vec![
-                session.target(),
+                session.short_target(),
                 session.kind.to_string(),
                 session
                     .project

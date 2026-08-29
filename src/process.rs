@@ -221,6 +221,19 @@ pub fn recognize_agent(process: &ProcessSnapshot) -> Option<AgentKind> {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
+    // OMP keeps long-lived worker daemons (`__omp_worker_*`, e.g. the broker
+    // and the LSP mux) running after sessions close. They hold no coding
+    // session, so matching them as live agents would fail-closed protect the
+    // whole OMP catalog forever. They are helpers, not interactive agents.
+    if process
+        .command
+        .iter()
+        .skip(1)
+        .any(|argument| argument.starts_with("__omp_worker_"))
+    {
+        return None;
+    }
+
     match executable.as_str() {
         "claude" => return Some(AgentKind::ClaudeCode),
         "codex" => return Some(AgentKind::Codex),

@@ -300,6 +300,16 @@ mod tests {
             )),
             None
         );
+
+        // OMP worker daemons outlive their sessions and hold no transcript;
+        // they must not look like interactive agents.
+        for worker in ["__omp_worker_daemon_broker", "__omp_worker_lsp_mux"] {
+            assert_eq!(
+                recognize_agent(&process("/opt/bin/omp", &["omp", worker])),
+                None,
+                "failed to exclude {worker}"
+            );
+        }
     }
 
     #[test]

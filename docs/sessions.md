@@ -37,7 +37,7 @@ transcript up front.
 | `a` | Mark or unmark every visible session |
 | `Enter` / `i` | Open the selected session |
 | `r` | Resume with the provider's native CLI |
-| `R` | Choose another installed agent to continue with |
+| `R` | Hand off to another installed agent |
 | `d`, then lowercase `y` | Permanently delete the selected session, or every marked session |
 | `q` / `Esc` | Quit (`Esc` first clears marks when any exist) |
 
@@ -47,6 +47,10 @@ they are locked until `Esc` clears the marks, and the confirmation dialog lists
 up to five targets with imperative key guidance (`y` deletes, `n`/`Esc` keeps
 everything). Sessions protected by a running agent are skipped from the batch
 with a notice instead of blocking the whole deletion.
+
+The list shows compact targets (`provider:first-8-id-characters`) to leave
+room for titles; the detail view, delete confirmations, exports, clipboard
+content, and `--json` output always carry the full `provider:session-id`.
 
 Inside the detail view:
 
@@ -58,7 +62,7 @@ Inside the detail view:
 | `p` / `Shift+P` | Show conversation-only / complete transcript |
 | `c` / `e` | Copy / export Markdown using the active preview scope |
 | `r` | Resume this session |
-| `R` | Choose another installed agent to continue with |
+| `R` | Hand off to another installed agent |
 | `Esc` / `q` | Return to the list |
 
 Conversation-only exports end in `-conv.md`; complete exports end in

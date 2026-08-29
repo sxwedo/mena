@@ -39,6 +39,17 @@ impl AgentSession {
     pub(crate) fn target(&self) -> String {
         format!("{}:{}", self.kind.slug(), self.id)
     }
+
+    /// Compact row label for crowded lists: the provider slug plus the first
+    /// ID characters, with the slug right-aligned to the longest built-in
+    /// provider so every ID starts at the same column. Details, exports,
+    /// clipboard content, and JSON output always keep the full target.
+    pub(crate) fn short_target(&self) -> String {
+        const SHORT_ID_CHARS: usize = 8;
+        const PROVIDER_WIDTH: usize = 8;
+        let prefix: String = self.id.chars().take(SHORT_ID_CHARS).collect();
+        format!("{:>PROVIDER_WIDTH$}:{prefix}", self.kind.slug())
+    }
 }
 
 /// Native evidence used to establish an exact process-to-session association.

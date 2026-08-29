@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::Frame;
@@ -100,31 +101,6 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
     );
 }
 
-pub(crate) fn format_project_display_path(path_str: &str, max_len: usize) -> String {
-    let mut formatted = path_str.to_owned();
-    if let Some(home) = dirs::home_dir() {
-        let home_str = home.to_string_lossy();
-        if formatted.starts_with(home_str.as_ref()) {
-            formatted = format!("~{}", &formatted[home_str.len()..]);
-        }
-    }
-    if formatted.chars().count() > max_len && max_len > 12 {
-        let components: Vec<&str> = formatted.split('/').collect();
-        if components.len() > 3 {
-            let prefix = components[0];
-            let first_dir = components[1];
-            let last_dir = components.last().copied().unwrap_or("");
-            let candidate = format!("{prefix}/{first_dir}/.../{last_dir}");
-            if candidate.chars().count() <= max_len {
-                return candidate;
-            }
-        }
-        let truncated: String = formatted.chars().take(max_len - 3).collect();
-        format!("{truncated}...")
-    } else {
-        formatted
-    }
-}
 fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut SessionsApp) {
     let columns = session_columns(area.width);
     let header = Row::new(columns.iter().map(|column| Cell::from(column.label)))
@@ -153,10 +129,11 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
                 for (i, _column) in columns.iter().enumerate() {
                     // Column 0 is the narrow mark column; the project line
                     // starts at the TARGET column so group headers stay
-                    // readable.
+                    // readable. The narrow TARGET column only fits the
+                    // project's directory name.
                     if i == 1 {
                         let icon = if *collapsed { "▸" } else { "▾" };
-                        let path_display = format_project_display_path(project, 52);
+                        let path_display = group_header_label(project);
                         let count_label = if *count == 1 {
                             "(1 session)".to_owned()
                         } else {
@@ -215,6 +192,16 @@ pub(crate) fn session_project_label(session: &AgentSession) -> String {
     session.project.as_deref().map_or_else(
         || "(no project)".to_owned(),
         |project| project.display().to_string(),
+    )
+}
+
+/// Group rows share the narrow TARGET column with short IDs, so they show the
+/// project's directory name instead of the full path; the full path remains
+/// the grouping key and is visible in each session's detail view.
+pub(crate) fn group_header_label(project: &str) -> String {
+    Path::new(project).file_name().map_or_else(
+        || project.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
     )
 }
 
@@ -345,7 +332,7 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailT
                     ("Shift+P", "all"),
                     ("c", "copy"),
                     ("r", "resume"),
-                    ("R", "agent"),
+                    ("R", "handoff"),
                     ("e", "export"),
                     ("Esc", "close"),
                 ],
@@ -359,7 +346,7 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, theme: SessionDetailT
                     ("p/P", "scope"),
                     ("c", "copy"),
                     ("r", "resume"),
-                    ("R", "agent"),
+                    ("R", "handoff"),
                     ("Esc", "close"),
                 ],
                 theme.footer_key,
@@ -516,8 +503,24 @@ fn session_metadata_lines(detail: &SessionDetail, theme: SessionDetailTheme) -> 
         ),
         session_detail_line("Cost", format_cost(session.cost_usd), theme),
         session_detail_line("Log file", session.path.display().to_string(), theme),
+        native_resume_line(session, theme),
         Line::from(""),
     ]
+}
+
+/// The provider-native resume argv rendered as one copyable shell line, so a
+/// user can resume outside mena without reconstructing the flags.
+fn native_resume_line(session: &AgentSession, theme: SessionDetailTheme) -> Line<'static> {
+    let command = crate::session::native_resume_command(&session.kind, &session.id)
+        .ok()
+        .map(|spec| {
+            if spec.args.is_empty() {
+                spec.program
+            } else {
+                format!("{} {}", spec.program, spec.args.join(" "))
+            }
+        });
+    session_detail_line("Resume", command.unwrap_or_else(|| "-".to_owned()), theme)
 }
 
 fn model_usage_lines(detail: &SessionDetail, theme: SessionDetailTheme) -> Vec<Line<'static>> {
@@ -740,7 +743,7 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
             ("/", "filter"),
             ("Enter", "details"),
             ("r", "resume"),
-            ("R", "agent"),
+            ("R", "handoff"),
             ("d", "delete"),
             ("q", "quit"),
         ],
@@ -749,7 +752,7 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
             ("/", "filter"),
             ("Enter", "details"),
             ("r", "resume"),
-            ("R", "agent"),
+            ("R", "handoff"),
             ("q", "quit"),
         ],
     )
@@ -870,7 +873,7 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     if width >= 120 {
         vec![
             column(SessionColumn::Marked, "", Constraint::Length(1)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Agent, "Agent", Constraint::Length(12)),
             column(SessionColumn::Project, "Project", Constraint::Length(14)),
@@ -880,14 +883,14 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     } else if width >= 80 {
         vec![
             column(SessionColumn::Marked, "", Constraint::Length(1)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
         ]
     } else {
         vec![
             column(SessionColumn::Marked, "", Constraint::Length(1)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
+            column(SessionColumn::Target, "TARGET", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(12)),
         ]
@@ -961,7 +964,7 @@ fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsAp
                 "·".to_owned()
             }
         }
-        SessionColumn::Target => session.target(),
+        SessionColumn::Target => session.short_target(),
         SessionColumn::Active => {
             if app.active_targets.contains(&session.target()) {
                 "●".to_owned()

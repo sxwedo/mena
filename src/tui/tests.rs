@@ -195,7 +195,7 @@ fn session_layout_displays_titles_and_filters_by_them() {
     let screen = buffer_text(terminal.backend().buffer(), 100, 18);
     assert!(screen.contains("Fix terminal rendering"));
     assert!(screen.contains("[d] delete"));
-    assert!(screen.contains("[R] agent"));
+    assert!(screen.contains("[R] handoff"));
     assert!(screen.lines().all(|line| line.chars().count() == 100));
 }
 
@@ -204,6 +204,7 @@ fn session_target_is_first_and_visible_at_eighty_columns() {
     let mut session = fixture_session();
     session.id = "019fbd66-e95f-7dd2-b9b4-37a27a61c272".to_owned();
     let target = session.target();
+    let short = session.short_target();
     let mut app = SessionsApp::new(vec![session], BTreeSet::default());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
 
@@ -212,7 +213,11 @@ fn session_target_is_first_and_visible_at_eighty_columns() {
         .expect("draw sessions");
 
     let screen = buffer_text(terminal.backend().buffer(), 80, 24);
-    assert!(screen.contains(&target));
+    // The list shows the short target; the full target is reserved for
+    // details, exports, and JSON output.
+    assert_eq!(short, "   codex:019fbd66");
+    assert!(screen.contains(&short));
+    assert!(!screen.contains(&target));
     // Column 0 is the narrow mark column; TARGET remains the first labeled one.
     assert_eq!(
         session_columns(80).first().map(|column| column.label),
@@ -404,6 +409,8 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
         "125500000",
         "Cost",
         "$1.2500",
+        // The metadata tail carries the copyable native resume command.
+        "codex resume session-id",
         "Conversation — 3 shown (conversation only)",
         "Model usage (1 models)",
         "gpt-5.6 · 1 responses · duration 2m 05.5s · avg TTFT 400ms",
@@ -419,7 +426,7 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
         "[Shift+P] all",
         "[c] copy",
         "[r] resume",
-        "[R] agent",
+        "[R] handoff",
         "[e] export",
         "[Esc] close",
     ] {
@@ -1671,8 +1678,8 @@ fn project_grouping_renders_header_rows_and_allows_selectable_group_headers() {
     let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
     // Both project headers should appear with session count.
-    assert!(screen.contains("▾ /work/p1"));
-    assert!(screen.contains("▾ /work/p2"));
+    assert!(screen.contains("▾ p1"));
+    assert!(screen.contains("▾ p2"));
     assert!(screen.contains("(2 sessions)"));
     // Since header (index 0) is selected, selected_session() is None.
     assert_eq!(app.selected_session(), None);
@@ -1714,7 +1721,7 @@ fn project_grouping_allows_collapsing_and_expanding_groups() {
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
-    assert!(screen.contains("▸ /work/p1"));
+    assert!(screen.contains("▸ p1"));
     assert!(screen.contains("(2 sessions)"));
     assert!(!screen.contains("Alpha one"));
     // Toggle expand on /work/p1
@@ -1731,20 +1738,10 @@ fn session_project_label_buckets_missing_projects() {
     assert_eq!(session_project_label(&session), "/work/x");
 }
 #[test]
-fn format_project_display_path_abbreviates_home_and_truncates() {
-    if let Some(home) = dirs::home_dir() {
-        let full_path = home.join("code/my-project").display().to_string();
-        let formatted = format_project_display_path(&full_path, 40);
-        assert_eq!(formatted, "~/code/my-project");
-
-        let long_path = home
-            .join("code/deeply/nested/directory/structure/my-project")
-            .display()
-            .to_string();
-        let formatted_long = format_project_display_path(&long_path, 30);
-        assert!(formatted_long.contains("..."));
-        assert!(formatted_long.ends_with("my-project"));
-    }
+fn group_headers_show_the_project_directory_name() {
+    assert_eq!(group_header_label("/Users/test/code/mena"), "mena");
+    assert_eq!(group_header_label("(no project)"), "(no project)");
+    assert_eq!(group_header_label("/"), "/");
 }
 #[test]
 fn active_session_renders_green_active_indicator() {
