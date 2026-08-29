@@ -24,6 +24,11 @@ pub struct AgentSession {
     pub title: Option<String>,
     pub project: Option<PathBuf>,
     pub path: PathBuf,
+    /// Additional native transcript files for the same logical session. A
+    /// provider may split one session across several rollout files; `path`
+    /// is the most recently updated one and deletion removes every related
+    /// file alongside it. The catalog lists each logical session once.
+    pub related_paths: BTreeSet<PathBuf>,
     pub started_at: Option<String>,
     pub updated_at: u64,
     pub tokens: Option<u64>,
@@ -390,6 +395,7 @@ impl SessionCatalog {
                 .then_with(|| left.kind.cmp(&right.kind))
                 .then_with(|| left.id.cmp(&right.id))
         });
+        let sessions = Self::dedupe_logical_sessions(sessions);
         Ok(Self {
             home: home.to_path_buf(),
             sessions,
@@ -398,6 +404,29 @@ impl SessionCatalog {
 
     pub fn sessions(&self) -> &[AgentSession] {
         &self.sessions
+    }
+
+    /// Collapse native records describing the same logical session into one
+    /// catalog row: inputs are sorted newest-first, so the first row for a
+    /// `(kind, id)` becomes the primary entry and every additional native
+    /// file joins its `related_paths`. The catalog never lists duplicate
+    /// rows, while deletion and live association still cover every file.
+    fn dedupe_logical_sessions(sessions: Vec<AgentSession>) -> Vec<AgentSession> {
+        let mut primary_index: BTreeMap<(AgentKind, String), usize> = BTreeMap::new();
+        let mut merged: Vec<AgentSession> = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let key = (session.kind.clone(), session.id.clone());
+            if let Some(&position) = primary_index.get(&key) {
+                let primary = &mut merged[position];
+                if session.path != primary.path {
+                    primary.related_paths.insert(session.path);
+                }
+            } else {
+                primary_index.insert(key, merged.len());
+                merged.push(session);
+            }
+        }
+        merged
     }
 
     pub fn resolve(&self, provider: Option<&str>, session_id: &str) -> Result<&AgentSession> {
@@ -505,7 +534,9 @@ impl SessionCatalog {
             .sessions
             .iter()
             .filter(|session| session.kind == selected.kind && session.id == selected.id)
-            .map(|session| session.path.clone())
+            .flat_map(|session| {
+                std::iter::once(session.path.clone()).chain(session.related_paths.iter().cloned())
+            })
             .collect();
         let adapter = adapter::ProviderAdapter::from_kind(&selected.kind)
             .with_context(|| format!("{} sessions do not support local deletion", selected.kind))?;
@@ -780,6 +811,7 @@ fn session(
         project,
         updated_at: modified_seconds(&path)?,
         path,
+        related_paths: BTreeSet::new(),
         started_at,
         tokens,
         cost_usd,
@@ -916,6 +948,7 @@ fn trim_carriage_return(line: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -970,6 +1003,7 @@ mod tests {
                 updated_at: 0,
                 tokens: None,
                 cost_usd: None,
+                related_paths: BTreeSet::new(),
             },
             messages: vec![
                 SessionMessage {
@@ -1014,24 +1048,37 @@ mod tests {
     fn duplicate_native_records_resolve_to_one_logical_session() {
         let temp = tempdir().expect("temp home");
         let session_id = "019fb342-b647-78f3-9391-365724790c7e";
+        let mut rollout_paths = Vec::new();
         for date in ["2026/07/30", "2026/07/31"] {
+            let path = temp
+                .path()
+                .join(format!(".codex/sessions/{date}/duplicate.jsonl"));
             write(
-                &temp
-                    .path()
-                    .join(format!(".codex/sessions/{date}/duplicate.jsonl")),
+                &path,
                 &format!(
                     "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/work/mena\"}}}}\n"
                 ),
             );
+            rollout_paths.push(path);
         }
         let catalog = SessionCatalog::scan(temp.path()).expect("scan duplicate records");
-        assert_eq!(catalog.sessions().len(), 2);
-        assert!(
-            catalog
-                .sessions()
-                .iter()
-                .all(|session| session.kind == AgentKind::Codex && session.id == session_id)
-        );
+
+        // The same logical session spans two rollout files but is listed
+        // once: one file is the primary `path`, the other joins
+        // `related_paths`. (Both are written within the same second, so
+        // either file may sort first.)
+        assert_eq!(catalog.sessions().len(), 1);
+        let session = &catalog.sessions()[0];
+        assert_eq!(session.kind, AgentKind::Codex);
+        assert_eq!(session.id, session_id);
+        assert_eq!(session.related_paths.len(), 1);
+        for path in &rollout_paths {
+            assert!(
+                session.path == *path || session.related_paths.contains(path),
+                "{} must be cataloged exactly once",
+                path.display()
+            );
+        }
 
         let resolved = catalog
             .resolve(Some("codex"), session_id)
@@ -1039,6 +1086,49 @@ mod tests {
 
         assert_eq!(resolved.id, session_id);
         assert_eq!(resolved.kind, AgentKind::Codex);
+
+        // Deleting the one row removes every native file of the session.
+        let summary = catalog
+            .delete_session(resolved)
+            .expect("delete the logical session");
+        assert_eq!(summary.files, 2);
+        for path in &rollout_paths {
+            assert!(!path.exists(), "{} should be removed", path.display());
+        }
+    }
+
+    #[test]
+    fn claude_subagent_transcripts_do_not_duplicate_the_parent_session() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let project = home.join(".claude/projects/-Users-test-project");
+        fs::create_dir_all(project.join("49e35944/subagents")).expect("create subagents dir");
+
+        let parent_id = "49e35944-03f5-4c90-98b9-12688f3bb3b1";
+        write(
+            &project.join(format!("{parent_id}.jsonl")),
+            &format!(
+                "{{\"sessionId\":\"{parent_id}\",\"cwd\":\"/test/project\",\"message\":{{\"role\":\"user\",\"content\":\"Plan the refactor\"}}}}\n"
+            ),
+        );
+        // Subagent files carry the parent session ID; they must not appear
+        // as their own rows.
+        write(
+            &project.join("49e35944/subagents/agent-af4800c76f85cfb61.jsonl"),
+            &format!(
+                "{{\"sessionId\":\"{parent_id}\",\"cwd\":\"/test/project\",\"message\":{{\"role\":\"user\",\"content\":\"Search the codebase\"}}}}\n"
+            ),
+        );
+
+        let catalog = SessionCatalog::scan(home).expect("scan claude home");
+        assert_eq!(catalog.sessions().len(), 1);
+        assert_eq!(catalog.sessions()[0].id, parent_id);
+        assert!(
+            catalog.sessions()[0]
+                .path
+                .file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new(&format!("{parent_id}.jsonl")))
+        );
     }
 
     #[test]

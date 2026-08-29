@@ -30,7 +30,13 @@ impl ProcessEvidence {
     pub(super) fn matches(&self, session: &AgentSession) -> bool {
         match &self.selector {
             ProcessSelector::Id(id) => session.id == *id,
-            ProcessSelector::Path(path) => paths_equivalent(&session.path, path),
+            ProcessSelector::Path(path) => {
+                paths_equivalent(&session.path, path)
+                    || session
+                        .related_paths
+                        .iter()
+                        .any(|related| paths_equivalent(related, path))
+            }
         }
     }
 }

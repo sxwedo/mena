@@ -33,11 +33,20 @@ transcript up front.
 | `/` | Search target, provider, project, and title |
 | `Enter` while searching | Run a cancellable full-transcript search |
 | `g` | Toggle flat or project-grouped rows |
+| `Space` | Toggle a delete mark on the selected row |
+| `a` | Mark or unmark every visible session |
 | `Enter` / `i` | Open the selected session |
 | `r` | Resume with the provider's native CLI |
 | `R` | Choose another installed agent to continue with |
-| `d`, then lowercase `y` | Permanently delete the selected session |
-| `q` / `Esc` | Close or quit |
+| `d`, then lowercase `y` | Permanently delete the selected session, or every marked session |
+| `q` / `Esc` | Quit (`Esc` first clears marks when any exist) |
+
+With marks present the browser enters batch mode: the footer shows only the
+delete actions, single-session keys (`r`, `R`, `Enter`, `g`, `/`) explain that
+they are locked until `Esc` clears the marks, and the confirmation dialog lists
+up to five targets with imperative key guidance (`y` deletes, `n`/`Esc` keeps
+everything). Sessions protected by a running agent are skipped from the batch
+with a notice instead of blocking the whole deletion.
 
 Inside the detail view:
 
@@ -132,7 +141,9 @@ Deletion also rejects:
 - a session absent from the current catalog;
 - unsafe IDs or path traversal;
 - canonical paths or nested symlinks escaping provider-owned roots;
-- a session protected by a running agent.
+- a session protected by a running agent. Batch deletion skips protected
+  sessions and reports them instead of aborting the batch; a protected
+  session is never deleted.
 
 Exports are created atomically, never overwrite an existing file, and use mode
 `0600` on Unix.

@@ -127,7 +127,16 @@ fn run_session_browser(
                 }
                 app.status = None;
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                    KeyCode::Char('q') => return Ok(None),
+                    KeyCode::Esc => {
+                        // With marks present, Esc first drops them; a second
+                        // Esc quits. `q` always quits immediately.
+                        if app.marked_count() > 0 {
+                            app.marked_targets.clear();
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(None);
                     }
@@ -137,6 +146,18 @@ fn run_session_browser(
                     KeyCode::PageDown => app.move_by(10),
                     KeyCode::Home => app.first(),
                     KeyCode::End => app.last(),
+                    KeyCode::Char(' ') => app.toggle_mark(),
+                    KeyCode::Char('a') => app.toggle_mark_visible(),
+                    // Batch mode: marks define a delete set, so single-session
+                    // actions lock until the marks are cleared with Esc.
+                    KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/')
+                        if is_batch_locked_key(&app, &key) =>
+                    {
+                        app.status = Some(StatusMessage::error(
+                            "Batch mode: only d (delete) acts on marks — press Esc to clear marks first"
+                                .to_owned(),
+                        ));
+                    }
                     KeyCode::Char('/') => app.mode = BrowserMode::Search,
                     KeyCode::Char('g') => app.cycle_grouping(),
                     KeyCode::Char('r' | 'R') => {

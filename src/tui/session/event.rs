@@ -7,7 +7,7 @@ use crossterm::event::{
 };
 
 use super::app::*;
-use crate::session::{AgentSession, DetailScope, SessionDetail};
+use crate::session::{AgentSession, DeletionSummary, DetailScope, SessionDetail};
 use crate::tui::common::is_key_press;
 
 pub(crate) fn session_action_for_key(
@@ -49,6 +49,20 @@ pub(crate) fn pump_search(
     Ok(true)
 }
 
+/// Single-session actions stay locked while marks define a delete batch:
+/// resume, continue-with, details, grouping, and filtering all act outside
+/// the batch, so they explain themselves instead of firing.
+pub(crate) fn is_batch_locked_key(app: &SessionsApp, key: &KeyEvent) -> bool {
+    app.marked_count() > 0
+        && matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/')
+        )
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
 pub(crate) fn handle_confirm_delete_key(
     app: &mut SessionsApp,
     key: KeyEvent,
@@ -56,20 +70,58 @@ pub(crate) fn handle_confirm_delete_key(
 ) {
     match key.code {
         KeyCode::Char('y') => {
-            if let Some(session) = app.selected_session().cloned()
-                && let Some(delete) = delete.as_deref_mut()
-            {
-                match delete(&session) {
-                    Ok(summary) => app.deleted(&session, summary),
+            let targets = std::mem::take(&mut app.confirm_delete_targets);
+            if targets.is_empty() {
+                app.mode = BrowserMode::Browse;
+                return;
+            }
+            let Some(delete) = delete.as_deref_mut() else {
+                app.mode = BrowserMode::Browse;
+                return;
+            };
+            // Each deletion goes through the catalog seam, which re-checks
+            // live-session protection fail-closed before removing anything.
+            let mut removed = 0usize;
+            let mut summary = DeletionSummary::default();
+            for session in &targets {
+                match delete(session) {
+                    Ok(deletion) => {
+                        summary.files += deletion.files;
+                        summary.directories += deletion.directories;
+                        summary.index_records += deletion.index_records;
+                        app.apply_deletion(session);
+                        removed += 1;
+                    }
                     Err(error) => {
-                        app.status =
-                            Some(StatusMessage::error(format!("Delete failed: {error:#}")));
+                        app.status = Some(StatusMessage::error(format!(
+                            "Deleted {removed} of {} before failing: {error:#}",
+                            targets.len()
+                        )));
                         app.mode = BrowserMode::Browse;
+                        return;
                     }
                 }
             }
+            app.status = Some(StatusMessage::success(if removed == 1 {
+                format!(
+                    "Permanently deleted {}: {} files, {} directories, {} index records",
+                    targets[0].target(),
+                    summary.files,
+                    summary.directories,
+                    summary.index_records
+                )
+            } else {
+                format!(
+                    "Permanently deleted {removed} sessions: {} files, {} directories, {} index records",
+                    summary.files, summary.directories, summary.index_records
+                )
+            }));
+            app.mode = BrowserMode::Browse;
         }
-        KeyCode::Char('n') | KeyCode::Esc => app.mode = BrowserMode::Browse,
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.confirm_delete_targets.clear();
+            app.mode = BrowserMode::Browse;
+        }
         _ => {}
     }
 }

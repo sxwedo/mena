@@ -315,6 +315,7 @@ fn format_unix_timestamp(timestamp: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
@@ -454,6 +455,7 @@ mod tests {
                 updated_at: 1_767_225_601,
                 tokens: Some(123_456),
                 cost_usd: Some(1.25),
+                related_paths: BTreeSet::new(),
             },
             messages: vec![
                 SessionMessage {

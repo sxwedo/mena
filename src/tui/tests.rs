@@ -213,8 +213,13 @@ fn session_target_is_first_and_visible_at_eighty_columns() {
 
     let screen = buffer_text(terminal.backend().buffer(), 80, 24);
     assert!(screen.contains(&target));
+    // Column 0 is the narrow mark column; TARGET remains the first labeled one.
     assert_eq!(
         session_columns(80).first().map(|column| column.label),
+        Some("")
+    );
+    assert_eq!(
+        session_columns(80).get(1).map(|column| column.label),
         Some("TARGET")
     );
 }
@@ -1171,28 +1176,277 @@ fn running_sessions_cannot_enter_delete_confirmation() {
 }
 
 #[test]
+fn space_marks_survive_filtering_and_drive_batch_confirmation() {
+    let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
+    let first_target = first.target();
+    let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
+
+    // Select the first row and mark it.
+    app.first();
+    app.toggle_mark();
+    assert_eq!(app.marked_count(), 1);
+
+    // Marks are keyed by target, so filtering to the other session keeps it.
+    app.append_search("Second");
+    assert_eq!(app.filtered.len(), 1);
+    assert_eq!(app.marked_count(), 1);
+
+    // `d` with any mark present confirms the marked batch, not the selection.
+    app.clear_message_search();
+    app.request_delete();
+    assert_eq!(app.mode, BrowserMode::ConfirmDelete);
+    assert_eq!(app.confirm_delete_targets.len(), 1);
+    assert_eq!(app.confirm_delete_targets[0].target(), first_target);
+
+    // Cancelling returns to browse with no pending targets.
+    let mut unused: Option<DeleteCallback> = None;
+    handle_confirm_delete_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        &mut unused,
+    );
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert!(app.confirm_delete_targets.is_empty());
+    // Marks persist after a cancelled confirmation.
+    assert_eq!(app.marked_count(), 1);
+}
+
+#[test]
+fn a_toggles_marks_for_every_visible_session() {
+    let sessions = vec![
+        transcript_session("alpha", "First", "/tmp/alpha.jsonl"),
+        transcript_session("beta", "Second", "/tmp/beta.jsonl"),
+        transcript_session("gamma", "Third", "/tmp/gamma.jsonl"),
+    ];
+    let mut app = SessionsApp::new(sessions, BTreeSet::default());
+
+    app.toggle_mark_visible();
+    assert_eq!(app.marked_count(), 3);
+
+    // Marking again clears every visible mark.
+    app.toggle_mark_visible();
+    assert_eq!(app.marked_count(), 0);
+
+    // Marks hidden by a filter stay marked; `a` then only clears the visible.
+    app.first();
+    app.toggle_mark();
+    app.append_search("First");
+    app.toggle_mark_visible();
+    assert_eq!(app.marked_count(), 0);
+    app.query.clear();
+    app.recompute_filter();
+    app.toggle_mark_visible();
+    assert_eq!(app.marked_count(), 3);
+}
+
+#[test]
+fn confirmed_batch_deletion_reports_aggregate_summary() {
+    let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
+    let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
+
+    app.marked_targets.insert("codex:alpha".to_owned());
+    app.marked_targets.insert("codex:beta".to_owned());
+    app.request_delete();
+    assert_eq!(app.mode, BrowserMode::ConfirmDelete);
+    assert_eq!(app.confirm_delete_targets.len(), 2);
+
+    let mut deleted: Vec<String> = Vec::new();
+    let mut delete = |session: &AgentSession| -> Result<DeletionSummary> {
+        deleted.push(session.id.clone());
+        Ok(DeletionSummary {
+            files: 1,
+            directories: 1,
+            index_records: 2,
+        })
+    };
+    let mut callback: Option<DeleteCallback> = Some(&mut delete);
+    handle_confirm_delete_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        &mut callback,
+    );
+
+    assert_eq!(deleted, vec!["alpha".to_owned(), "beta".to_owned()]);
+    assert!(app.sessions.is_empty());
+    assert!(app.marked_targets.is_empty());
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert!(app.status.as_ref().is_some_and(|status| {
+        !status.is_error
+            && status.text.contains("Permanently deleted 2 sessions")
+            && status
+                .text
+                .contains("2 files, 2 directories, 4 index records")
+    }));
+}
+
+#[test]
+fn batch_deletion_stops_at_first_failure() {
+    let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
+    let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
+
+    app.marked_targets.insert("codex:alpha".to_owned());
+    app.marked_targets.insert("codex:beta".to_owned());
+    app.request_delete();
+
+    let mut delete = |session: &AgentSession| -> Result<DeletionSummary> {
+        if session.id == "beta" {
+            anyhow::bail!("provider index is locked");
+        }
+        Ok(DeletionSummary {
+            files: 1,
+            directories: 0,
+            index_records: 0,
+        })
+    };
+    let mut callback: Option<DeleteCallback> = Some(&mut delete);
+    handle_confirm_delete_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        &mut callback,
+    );
+
+    // alpha was removed; beta survives and is still marked for a retry.
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].id, "beta");
+    assert_eq!(app.marked_count(), 1);
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert!(app.status.as_ref().is_some_and(|status| {
+        status.is_error && status.text.contains("Deleted 1 of 2 before failing")
+    }));
+}
+
+#[test]
+fn batch_delete_skips_protected_sessions_and_confirms_the_rest() {
+    let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
+    let second_target = second.target();
+    let mut app = SessionsApp::new_with_detail_theme(
+        vec![first, second],
+        BTreeSet::default(),
+        BTreeSet::from([second_target]),
+        SessionDetailTheme::default(),
+    );
+
+    app.marked_targets.insert("codex:alpha".to_owned());
+    app.marked_targets.insert("codex:beta".to_owned());
+    app.request_delete();
+
+    // The protected target is skipped; the deletable one still confirms.
+    assert_eq!(app.mode, BrowserMode::ConfirmDelete);
+    assert_eq!(app.confirm_delete_targets.len(), 1);
+    assert_eq!(app.confirm_delete_targets[0].id, "alpha");
+    assert!(app.status.as_ref().is_some_and(|status| {
+        !status.is_error && status.text.contains("1 protected session skipped")
+    }));
+}
+
+#[test]
+fn batch_delete_explains_protection_when_nothing_is_deletable() {
+    let session = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let target = session.target();
+    let mut app = SessionsApp::new_with_detail_theme(
+        vec![session],
+        BTreeSet::default(),
+        BTreeSet::from([target]),
+        SessionDetailTheme::default(),
+    );
+
+    app.marked_targets.insert("codex:alpha".to_owned());
+    app.request_delete();
+
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert!(app.confirm_delete_targets.is_empty());
+    assert!(app.status.as_ref().is_some_and(|status| {
+        status.is_error && status.text.contains("whole provider stays protected")
+    }));
+}
+
+#[test]
+fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
+    let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
+    let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
+
+    // No marks: the regular footer advertises resume and details.
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw unmarked sessions");
+    let plain = buffer_text(terminal.backend().buffer(), 120, 24);
+    assert!(plain.contains("[r] resume"));
+
+    // With a mark, the footer switches to delete-only guidance.
+    app.first();
+    app.toggle_mark();
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw marked sessions");
+    let marked = buffer_text(terminal.backend().buffer(), 120, 24);
+    assert!(marked.contains("[d] delete marked"));
+    assert!(marked.contains("[Esc] clear"));
+    assert!(!marked.contains("[r] resume"));
+    assert!(marked.contains("◆ 1 marked for deletion"));
+
+    // Single-session keys lock with an explanation; marking keys stay free.
+    let locked = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+    assert!(is_batch_locked_key(&app, &locked));
+    assert!(!is_batch_locked_key(
+        &app,
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)
+    ));
+    assert!(!is_batch_locked_key(
+        &app,
+        &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+    ));
+    // Without marks the same keys act normally (a clears every visible mark).
+    app.toggle_mark_visible();
+    app.toggle_mark_visible();
+    assert_eq!(app.marked_count(), 0);
+    assert!(!is_batch_locked_key(&app, &locked));
+}
+
+#[test]
+fn delete_confirmation_lists_targets_and_names_the_keys() {
+    let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
+    let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
+    let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
+
+    app.marked_targets.insert("codex:alpha".to_owned());
+    app.marked_targets.insert("codex:beta".to_owned());
+    app.request_delete();
+    assert_eq!(app.mode, BrowserMode::ConfirmDelete);
+
+    let mut terminal = Terminal::new(TestBackend::new(110, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw delete confirmation");
+
+    let screen = buffer_text(terminal.backend().buffer(), 110, 30);
+    assert!(screen.contains("DELETE 2 SESSIONS"));
+    assert!(screen.contains("codex:alpha"));
+    assert!(screen.contains("codex:beta"));
+    // Imperative guidance names each key and its outcome.
+    assert!(screen.contains("Press y"));
+    assert!(screen.contains("delete all 2 sessions permanently"));
+    assert!(screen.contains("Press n or Esc"));
+    assert!(screen.contains("keep everything, nothing is deleted"));
+}
+
+#[test]
 fn confirmed_deletion_removes_all_duplicate_catalog_rows() {
     let session = fixture_session();
     let mut duplicate = session.clone();
     duplicate.path = PathBuf::from("/tmp/duplicate-session.jsonl");
     let mut app = SessionsApp::new(vec![session.clone(), duplicate], BTreeSet::new());
 
-    app.deleted(
-        &session,
-        DeletionSummary {
-            files: 2,
-            directories: 1,
-            index_records: 3,
-        },
-    );
+    app.apply_deletion(&session);
 
     assert!(app.sessions.is_empty());
     assert!(app.filtered.is_empty());
-    assert!(app.status.as_ref().is_some_and(|status| {
-        status
-            .text
-            .contains("2 files, 1 directories, 3 index records")
-    }));
+    assert!(app.marked_targets.is_empty());
 }
 
 fn fixture_session() -> AgentSession {
@@ -1206,6 +1460,7 @@ fn fixture_session() -> AgentSession {
         updated_at: 1,
         tokens: Some(125_500_000),
         cost_usd: None,
+        related_paths: BTreeSet::new(),
     }
 }
 
@@ -1222,6 +1477,7 @@ fn transcript_session(id: &str, title: &str, path: &str) -> AgentSession {
         updated_at: 1,
         tokens: None,
         cost_usd: None,
+        related_paths: BTreeSet::new(),
     }
 }
 

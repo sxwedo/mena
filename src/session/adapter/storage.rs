@@ -61,6 +61,15 @@ pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Resul
 
 pub(super) fn scan_claude(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
     for path in files_with_extension(&home.join(".claude/projects"), "jsonl")? {
+        // Subagent transcripts live under `<session>/subagents/` and carry
+        // the parent session's ID; they are not independently resumable and
+        // would duplicate the parent row, so they stay out of the catalog.
+        if path
+            .components()
+            .any(|component| component.as_os_str() == "subagents")
+        {
+            continue;
+        }
         let mut id = None;
         let mut title = None;
         let mut project = None;

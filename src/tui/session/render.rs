@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, 
 use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
 use crate::tui::common::{
-    SessionDetailTheme, UI, app_header, badge, centered_rect, header_inner, key_hints, panel_block,
+    SessionDetailTheme, UI, app_header, badge, centered_rect, header_inner, panel_block,
     panel_title, render_canvas, render_header_frame, responsive_key_hints, scroll_meter,
     selection_style, table_header_style, themed_key_hints, thinking_orb_spans,
 };
@@ -78,6 +78,22 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
                     format!("  {}/{} visible", app.filtered.len(), app.sessions.len()),
                     Style::default().fg(UI.muted),
                 ),
+                // In batch mode the amber mark count is the headline state:
+                // every other action is locked until marks are cleared.
+                Span::styled(
+                    format!("  ◆ {} marked for deletion", app.marked_count()),
+                    Style::default()
+                        .fg(if app.marked_count() > 0 {
+                            UI.amber
+                        } else {
+                            UI.grid
+                        })
+                        .add_modifier(if app.marked_count() > 0 {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
             ],
         )),
         header_inner(area),
@@ -135,7 +151,10 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
             } => {
                 let mut cells: Vec<Cell<'_>> = Vec::with_capacity(columns.len());
                 for (i, _column) in columns.iter().enumerate() {
-                    if i == 0 {
+                    // Column 0 is the narrow mark column; the project line
+                    // starts at the TARGET column so group headers stay
+                    // readable.
+                    if i == 1 {
                         let icon = if *collapsed { "▸" } else { "▾" };
                         let path_display = format_project_display_path(project, 52);
                         let count_label = if *count == 1 {
@@ -677,7 +696,7 @@ fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
 
 fn footer_for_status(app: &SessionsApp, width: u16) -> Line<'static> {
     app.status.as_ref().map_or_else(
-        || session_key_hints(width),
+        || session_key_hints(app, width),
         |status| Line::from(Span::styled(status.text.clone(), status.style)),
     )
 }
@@ -697,11 +716,27 @@ pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) ->
     )
 }
 
-fn session_key_hints(width: u16) -> Line<'static> {
+/// Footer hints for the session browser. With marks present the browser is in
+/// batch mode: only marking and deleting are offered, and every other action
+/// is locked until the marks are cleared with Esc.
+fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
+    if app.marked_count() > 0 {
+        return responsive_key_hints(
+            width,
+            &[
+                ("d", "delete marked"),
+                ("Space", "mark"),
+                ("a", "all"),
+                ("Esc", "clear"),
+                ("q", "quit"),
+            ],
+            &[("d", "delete"), ("Space", "mark"), ("Esc", "clear")],
+        );
+    }
     responsive_key_hints(
         width,
         &[
-            ("↑/↓", "move"),
+            ("Space/a", "mark"),
             ("/", "filter"),
             ("Enter", "details"),
             ("r", "resume"),
@@ -710,6 +745,7 @@ fn session_key_hints(width: u16) -> Line<'static> {
             ("q", "quit"),
         ],
         &[
+            ("Space", "mark"),
             ("/", "filter"),
             ("Enter", "details"),
             ("r", "resume"),
@@ -723,36 +759,103 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
     if app.mode != BrowserMode::ConfirmDelete {
         return;
     }
-    let Some(session) = app.selected_session() else {
+    let targets = &app.confirm_delete_targets;
+    if targets.is_empty() {
         return;
-    };
-    let popup = centered_rect(frame.area(), 72, 9);
-    frame.render_widget(Clear, popup);
-    let content = Text::from(vec![
+    }
+    let count = targets.len();
+    let batch = count > 1;
+
+    // Spell out exactly what will be removed: up to five targets plus a
+    // remainder count, so the user confirms a list — not just a number.
+    let shown: Vec<&AgentSession> = targets.iter().take(5).collect();
+    let remaining = count - shown.len();
+
+    let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
-            "Permanently delete this session?",
+            if batch {
+                format!("DELETE {count} SESSIONS")
+            } else {
+                "DELETE THIS SESSION".to_owned()
+            },
             Style::default().fg(UI.danger).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(session.target()),
-        Line::from(session.title.as_deref().unwrap_or("(untitled)")),
-        Line::from(""),
-        Line::from(Span::styled(
-            "This removes native session files and known provider indexes. It cannot be undone.",
-            Style::default().fg(UI.amber),
-        )),
-        Line::from(""),
-        key_hints(&[("y", "delete permanently"), ("n/Esc", "cancel")]),
-    ]);
+    ];
+    for target in &shown {
+        lines.push(Line::from(Span::styled(
+            target.target(),
+            Style::default().fg(UI.text),
+        )));
+    }
+    if remaining > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("… and {remaining} more"),
+            Style::default().fg(UI.muted),
+        )));
+    }
+    if !batch && let Some(title) = targets[0].title.clone() {
+        lines.push(Line::from(Span::styled(
+            title,
+            Style::default().fg(UI.muted),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Native session files and provider indexes are removed. This cannot be undone.",
+        Style::default().fg(UI.amber),
+    )));
+    lines.push(Line::from(""));
+    // Imperative key guidance: name the key, the action, and the outcome.
+    lines.push(Line::from(vec![
+        Span::styled("Press ", Style::default().fg(UI.muted)),
+        Span::styled(
+            "y",
+            Style::default().fg(UI.danger).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "  delete {} permanently",
+                if batch {
+                    format!("all {count} sessions")
+                } else {
+                    "this session".to_owned()
+                }
+            ),
+            Style::default().fg(UI.text),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Press ", Style::default().fg(UI.muted)),
+        Span::styled(
+            "n",
+            Style::default().fg(UI.success).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" or ", Style::default().fg(UI.muted)),
+        Span::styled(
+            "Esc",
+            Style::default().fg(UI.success).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  keep everything, nothing is deleted",
+            Style::default().fg(UI.text),
+        ),
+    ]));
+
+    // +4 covers the two border rows plus wrap headroom for the warning line
+    // on terminals narrower than the popup's preferred width.
+    let height = u16::try_from(lines.len() + 4).unwrap_or(u16::MAX);
+    let popup = centered_rect(frame.area(), 72, height);
+    frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(content)
+        Paragraph::new(Text::from(lines))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true })
             .block(
                 panel_block(
                     panel_title(
-                        "Delete session",
-                        Some("This cannot be undone".to_owned()),
+                        "Confirm deletion",
+                        Some("cannot be undone".to_owned()),
                         true,
                     ),
                     true,
@@ -766,6 +869,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
 pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     if width >= 120 {
         vec![
+            column(SessionColumn::Marked, "", Constraint::Length(1)),
             column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Agent, "Agent", Constraint::Length(12)),
@@ -775,12 +879,14 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
         ]
     } else if width >= 80 {
         vec![
+            column(SessionColumn::Marked, "", Constraint::Length(1)),
             column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
         ]
     } else {
         vec![
+            column(SessionColumn::Marked, "", Constraint::Length(1)),
             column(SessionColumn::Target, "TARGET", Constraint::Length(44)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(12)),
@@ -794,6 +900,16 @@ pub(crate) fn session_cell(
     app: &SessionsApp,
 ) -> Cell<'static> {
     match column {
+        SessionColumn::Marked => {
+            if app.marked_targets.contains(&session.target()) {
+                Cell::from(Span::styled(
+                    "◆",
+                    Style::default().fg(UI.amber).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Cell::from(Span::styled("·", Style::default().fg(UI.grid)))
+            }
+        }
         SessionColumn::Active => {
             if app.active_targets.contains(&session.target()) {
                 Cell::from(Span::styled("●", Style::default().fg(UI.success)))
@@ -838,6 +954,13 @@ pub(crate) fn session_cell(
 }
 fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsApp) -> String {
     match column {
+        SessionColumn::Marked => {
+            if app.marked_targets.contains(&session.target()) {
+                "◆".to_owned()
+            } else {
+                "·".to_owned()
+            }
+        }
         SessionColumn::Target => session.target(),
         SessionColumn::Active => {
             if app.active_targets.contains(&session.target()) {

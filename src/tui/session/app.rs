@@ -135,6 +135,12 @@ pub(crate) struct SessionsApp {
     /// Which messages the detail preview shows. Defaults to `Conversation`
     /// (user/assistant only); toggled with `p`/`Shift+P` in detail mode.
     pub(crate) preview_scope: DetailScope,
+    /// Targets carrying a delete mark. Keyed by target (not index) so marks
+    /// survive filtering, searching, regrouping, and deletions.
+    pub(crate) marked_targets: BTreeSet<String>,
+    /// Sessions awaiting the lowercase-`y` confirmation. Empty outside
+    /// `ConfirmDelete` mode; holds either one session or every marked one.
+    pub(crate) confirm_delete_targets: Vec<AgentSession>,
 }
 
 impl SessionsApp {
@@ -175,6 +181,8 @@ impl SessionsApp {
             grouping: Grouping::Flat,
             collapsed_projects: BTreeSet::default(),
             preview_scope: DetailScope::Conversation,
+            marked_targets: BTreeSet::default(),
+            confirm_delete_targets: Vec::new(),
         };
         app.recompute_filter();
         app
@@ -412,28 +420,94 @@ impl SessionsApp {
         }
     }
 
-    pub(crate) fn request_delete(&mut self) {
+    /// Toggle the delete mark on the selected session row. Group headers and
+    /// empty selections are ignored; marks survive later filtering.
+    pub(crate) fn toggle_mark(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
         };
-        if self.protected_targets.contains(&session.target()) {
-            self.status = Some(StatusMessage::error(
-                "Cannot delete a session that may be attached to a running agent".to_owned(),
-            ));
-        } else {
-            self.mode = BrowserMode::ConfirmDelete;
+        let target = session.target();
+        if !self.marked_targets.remove(&target) {
+            self.marked_targets.insert(target);
         }
     }
 
-    pub(crate) fn deleted(&mut self, deleted: &AgentSession, summary: DeletionSummary) {
-        let target = deleted.target();
+    /// Mark every visible session, or clear the visible marks when all of
+    /// them already carry one. Marks on hidden rows are untouched.
+    pub(crate) fn toggle_mark_visible(&mut self) {
+        let visible: BTreeSet<String> = self
+            .filtered
+            .iter()
+            .map(|&index| self.sessions[index].target())
+            .collect();
+        if visible.is_subset(&self.marked_targets) {
+            self.marked_targets
+                .retain(|target| !visible.contains(target));
+        } else {
+            self.marked_targets.extend(visible);
+        }
+    }
+
+    /// Sessions in catalog order whose targets carry a delete mark.
+    pub(crate) fn marked_sessions(&self) -> Vec<AgentSession> {
+        self.sessions
+            .iter()
+            .filter(|session| self.marked_targets.contains(&session.target()))
+            .cloned()
+            .collect()
+    }
+
+    /// Number of sessions carrying a delete mark.
+    pub(crate) fn marked_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|session| self.marked_targets.contains(&session.target()))
+            .count()
+    }
+
+    pub(crate) fn request_delete(&mut self) {
+        let mut targets = self.marked_sessions();
+        if targets.is_empty()
+            && let Some(session) = self.selected_session()
+        {
+            targets.push(session.clone());
+        }
+        if targets.is_empty() {
+            return;
+        }
+        // Protected sessions stay untouched: a running agent whose exact
+        // session cannot be pinned down protects its whole provider catalog,
+        // so those targets are skipped instead of blocking the batch.
+        let (deletable, skipped): (Vec<AgentSession>, Vec<AgentSession>) = targets
+            .into_iter()
+            .partition(|session| !self.protected_targets.contains(&session.target()));
+        if deletable.is_empty() {
+            self.status = Some(StatusMessage::error(format!(
+                "Cannot delete {}: a running agent may own it and its exact session cannot be confirmed, so the whole provider stays protected until that agent exits",
+                skipped[0].target()
+            )));
+            return;
+        }
+        if !skipped.is_empty() {
+            self.status = Some(StatusMessage::success(if skipped.len() == 1 {
+                "1 protected session skipped — still marked, not deletable while an agent may own it".to_owned()
+            } else {
+                format!(
+                    "{} protected sessions skipped — still marked, not deletable while an agent may own them",
+                    skipped.len()
+                )
+            }));
+        }
+        self.confirm_delete_targets = deletable;
+        self.mode = BrowserMode::ConfirmDelete;
+    }
+
+    /// Remove one deleted session (and every duplicate catalog row for it)
+    /// from the browsing state, clearing any mark it carried.
+    pub(crate) fn apply_deletion(&mut self, deleted: &AgentSession) {
+        self.marked_targets.remove(&deleted.target());
         self.sessions
             .retain(|session| session.kind != deleted.kind || session.id != deleted.id);
-        self.status = Some(StatusMessage::success(format!(
-            "Permanently deleted {target}: {} files, {} directories, {} index records",
-            summary.files, summary.directories, summary.index_records
-        )));
-        self.mode = BrowserMode::Browse;
         self.recompute_filter();
     }
 }
@@ -566,6 +640,7 @@ pub(crate) struct Column<T> {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionColumn {
+    Marked,
     Target,
     Active,
     Agent,

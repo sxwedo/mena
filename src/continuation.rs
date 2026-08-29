@@ -163,6 +163,7 @@ pub fn prepare_continuation(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
 
@@ -253,6 +254,7 @@ mod tests {
             updated_at: 1,
             tokens: None,
             cost_usd: None,
+            related_paths: BTreeSet::new(),
         };
         let target = ContinuationTarget {
             kind: AgentKind::Codex,
@@ -309,6 +311,7 @@ mod tests {
             updated_at: 1,
             tokens: None,
             cost_usd: None,
+            related_paths: BTreeSet::new(),
         };
         let target = ContinuationTarget {
             kind: AgentKind::OhMyPi,
