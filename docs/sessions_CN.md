@@ -31,8 +31,8 @@ mena ss --json
 | `/` | 搜索 Target、Provider、项目和标题 |
 | 搜索时按 `Enter` | 启动可取消的全文对话搜索 |
 | `g` | 切换平铺或按项目分组 |
-| `Space` | 切换当前行的删除标记 |
-| `a` | 标记或取消标记全部可见 Session |
+| `Space` | 切换当前行的删除标记（首个标记开启多选） |
+| `a` | 标记或取消标记全部可见 Session（仅在多选开启后可用） |
 | `Enter` / `i` | 打开选中的 Session |
 | `r` | 使用 Provider 原生 CLI 恢复 |
 | `R` | 交接（handoff）给另一个已安装的 Agent |
@@ -41,7 +41,7 @@ mena ss --json
 
 存在标记时浏览器进入批量模式：底部只显示删除相关按键，单会话按键（`r`、`R`、`Enter`、`g`、`/`）会被锁定并提示先按 `Esc` 清空标记；确认弹窗会列出最多 5 个 Target 并给出明确的按键指引（`y` 删除、`n`/`Esc` 全部保留）。受运行中 Agent 保护的 Session 会被跳过并提示，而不是阻断整批删除。
 
-列表使用紧凑 Target（`provider:ID 前 8 位`）以留出标题空间；详情视图、删除确认、导出、剪贴板内容与 `--json` 输出始终携带完整的 `provider:session-id`。
+列表使用紧凑 Target（`provider:ID 前 8 位`）以留出标题空间；详情视图、删除确认、导出、剪贴板内容与 `--json` 输出始终携带完整的 `provider:session-id`。按项目分组时，每个分组头会以整行宽度显示完整项目路径。
 
 详情视图按键：
 

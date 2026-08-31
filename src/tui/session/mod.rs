@@ -168,7 +168,9 @@ fn run_session_browser(
                     KeyCode::Home => app.first(),
                     KeyCode::End => app.last(),
                     KeyCode::Char(' ') => app.toggle_mark(),
-                    KeyCode::Char('a') => app.toggle_mark_visible(),
+                    // Select-all extends the batch Space opens; it does not
+                    // start one (see `toggle_mark_all`).
+                    KeyCode::Char('a') => app.toggle_mark_all(),
                     // Batch mode: marks define a delete set, so single-session
                     // actions lock until the marks are cleared with Esc.
                     KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/')

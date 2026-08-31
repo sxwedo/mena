@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::Frame;
@@ -125,39 +124,35 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
                 count,
                 collapsed,
             } => {
-                let mut cells: Vec<Cell<'_>> = Vec::with_capacity(columns.len());
-                for (i, _column) in columns.iter().enumerate() {
-                    // Column 0 is the narrow mark column; the project line
-                    // starts at the TARGET column so group headers stay
-                    // readable. The narrow TARGET column only fits the
-                    // project's directory name.
-                    if i == 1 {
-                        let icon = if *collapsed { "▸" } else { "▾" };
-                        let path_display = group_header_label(project);
-                        let count_label = if *count == 1 {
-                            "(1 session)".to_owned()
-                        } else {
-                            format!("({count} sessions)")
-                        };
-                        let line = Line::from(vec![
-                            Span::styled(
-                                icon,
-                                Style::default().fg(UI.signal).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(" "),
-                            Span::styled(
-                                path_display,
-                                Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw("  "),
-                            Span::styled(count_label, Style::default().fg(UI.muted)),
-                        ]);
-                        cells.push(Cell::from(line));
-                    } else {
-                        cells.push(Cell::from(""));
-                    }
-                }
-                rows.push(Row::new(cells));
+                // Column 0 is the narrow mark column; the project line starts
+                // at the TARGET column and spans every remaining column, so
+                // the full project path renders instead of being clipped to
+                // the narrow TARGET width.
+                let icon = if *collapsed { "▸" } else { "▾" };
+                let count_label = if *count == 1 {
+                    "(1 session)".to_owned()
+                } else {
+                    format!("({count} sessions)")
+                };
+                let line = Line::from(vec![
+                    Span::styled(
+                        icon,
+                        Style::default().fg(UI.signal).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        project.as_str(),
+                        Style::default().fg(UI.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(count_label, Style::default().fg(UI.muted)),
+                ]);
+                let remaining_columns =
+                    u16::try_from(columns.len().saturating_sub(1)).unwrap_or(u16::MAX);
+                rows.push(Row::new(vec![
+                    Cell::from(""),
+                    Cell::from(line).column_span(remaining_columns),
+                ]));
             }
             DisplayRow::Session { session_index } => {
                 rows.push(session_row(*session_index));
@@ -195,16 +190,9 @@ pub(crate) fn session_project_label(session: &AgentSession) -> String {
     )
 }
 
-/// Group rows share the narrow TARGET column with short IDs, so they show the
-/// project's directory name instead of the full path; the full path remains
-/// the grouping key and is visible in each session's detail view.
-pub(crate) fn group_header_label(project: &str) -> String {
-    Path::new(project).file_name().map_or_else(
-        || project.to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    )
-}
-
+/// Group rows span the columns after the mark column and show the full
+/// project path (the grouping key); the sessions below them keep compact
+/// short targets.
 fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     if !matches!(app.mode, BrowserMode::Detail | BrowserMode::DetailSearch) {
         return;
@@ -841,9 +829,11 @@ pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) ->
     )
 }
 
-/// Footer hints for the session browser. With marks present the browser is in
-/// batch mode: only marking and deleting are offered, and every other action
-/// is locked until the marks are cleared with Esc.
+/// Footer hints for the session browser. `Space` alone opens multi-select;
+/// `a` (select all) joins the hints only once a mark exists, because it
+/// extends a batch rather than starting one. With marks present the browser is
+/// in batch mode: only marking and deleting are offered, and every other
+/// action is locked until the marks are cleared with Esc.
 fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
     if app.marked_count() > 0 {
         return responsive_key_hints(
@@ -861,7 +851,7 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
     responsive_key_hints(
         width,
         &[
-            ("Space/a", "mark"),
+            ("Space", "mark"),
             ("/", "filter"),
             ("Enter", "details"),
             ("r", "resume"),

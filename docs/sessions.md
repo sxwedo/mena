@@ -33,8 +33,8 @@ transcript up front.
 | `/` | Search target, provider, project, and title |
 | `Enter` while searching | Run a cancellable full-transcript search |
 | `g` | Toggle flat or project-grouped rows |
-| `Space` | Toggle a delete mark on the selected row |
-| `a` | Mark or unmark every visible session |
+| `Space` | Toggle a delete mark on the selected row (the first mark opens multi-select) |
+| `a` | Mark or unmark every visible session (only while multi-select is open) |
 | `Enter` / `i` | Open the selected session |
 | `r` | Resume with the provider's native CLI |
 | `R` | Hand off to another installed agent |
@@ -50,7 +50,9 @@ with a notice instead of blocking the whole deletion.
 
 The list shows compact targets (`provider:first-8-id-characters`) to leave
 room for titles; the detail view, delete confirmations, exports, clipboard
-content, and `--json` output always carry the full `provider:session-id`.
+content, and `--json` output always carry the full `provider:session-id`. In
+project-grouped rows, each group header spans the row width and shows the full
+project path.
 
 Inside the detail view:
 

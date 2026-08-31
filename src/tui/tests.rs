@@ -1355,6 +1355,33 @@ fn a_toggles_marks_for_every_visible_session() {
 }
 
 #[test]
+fn a_only_selects_all_once_space_started_multi_select() {
+    let sessions = vec![
+        transcript_session("alpha", "First", "/tmp/alpha.jsonl"),
+        transcript_session("beta", "Second", "/tmp/beta.jsonl"),
+    ];
+    let mut app = SessionsApp::new(sessions, BTreeSet::default());
+
+    // Without marks, `a` explains how to start multi-select instead of
+    // marking everything in one keystroke.
+    app.toggle_mark_all();
+    assert_eq!(app.marked_count(), 0);
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.is_error && status.text.contains("Space"))
+    );
+
+    // After Space marks a row, `a` selects every visible session.
+    app.first();
+    app.toggle_mark();
+    app.status = None;
+    app.toggle_mark_all();
+    assert_eq!(app.marked_count(), 2);
+    assert!(app.status.is_none());
+}
+
+#[test]
 fn confirmed_batch_deletion_reports_aggregate_summary() {
     let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
     let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
@@ -1484,13 +1511,16 @@ fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
     let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
     let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
 
-    // No marks: the regular footer advertises resume and details.
+    // No marks: the regular footer advertises resume and details, and only
+    // Space — not `a` — offers marking until multi-select is open.
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
     terminal
         .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw unmarked sessions");
     let plain = buffer_text(terminal.backend().buffer(), 120, 24);
     assert!(plain.contains("[r] resume"));
+    assert!(plain.contains("[Space] mark"));
+    assert!(!plain.contains("[Space/a] mark"));
 
     // With a mark, the footer switches to delete-only guidance.
     app.first();
@@ -1784,9 +1814,10 @@ fn project_grouping_renders_header_rows_and_allows_selectable_group_headers() {
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
-    // Both project headers should appear with session count.
-    assert!(screen.contains("▾ p1"));
-    assert!(screen.contains("▾ p2"));
+    // Both project headers should appear with session count, showing the
+    // full project path across the spanned columns.
+    assert!(screen.contains("▾ /work/p1"));
+    assert!(screen.contains("▾ /work/p2"));
     assert!(screen.contains("(2 sessions)"));
     // Since header (index 0) is selected, selected_session() is None.
     assert_eq!(app.selected_session(), None);
@@ -1828,7 +1859,7 @@ fn project_grouping_allows_collapsing_and_expanding_groups() {
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 120, 20);
 
-    assert!(screen.contains("▸ p1"));
+    assert!(screen.contains("▸ /work/p1"));
     assert!(screen.contains("(2 sessions)"));
     assert!(!screen.contains("Alpha one"));
     // Toggle expand on /work/p1
@@ -1845,10 +1876,27 @@ fn session_project_label_buckets_missing_projects() {
     assert_eq!(session_project_label(&session), "/work/x");
 }
 #[test]
-fn group_headers_show_the_project_directory_name() {
-    assert_eq!(group_header_label("/Users/test/code/mena"), "mena");
-    assert_eq!(group_header_label("(no project)"), "(no project)");
-    assert_eq!(group_header_label("/"), "/");
+fn project_group_headers_span_columns_and_show_full_paths() {
+    // A path wider than the TARGET column must still render in full: the
+    // header cell spans every column after the mark column.
+    let long_project = PathBuf::from("/Users/test/development/very-long-workspace/project-name");
+    let mut sessions = vec![
+        transcript_session("a1", "Alpha one", "/tmp/a1.jsonl"),
+        transcript_session("a2", "Alpha two", "/tmp/a2.jsonl"),
+    ];
+    sessions[0].project = Some(long_project.clone());
+    sessions[1].project = Some(long_project);
+    let mut app = SessionsApp::new(sessions, BTreeSet::default());
+    app.grouping = Grouping::Project;
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw sessions");
+    let screen = buffer_text(terminal.backend().buffer(), 120, 20);
+
+    assert!(screen.contains("▾ /Users/test/development/very-long-workspace/project-name"));
+    assert!(screen.contains("(2 sessions)"));
 }
 #[test]
 fn active_session_renders_green_active_indicator() {
