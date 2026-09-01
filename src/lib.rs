@@ -108,7 +108,7 @@ pub enum ConfigCommand {
 }
 #[derive(Debug, Clone, Args)]
 pub struct AgentLaunchArgs {
-    /// Provider to launch (claude, codex, goose, gemini, opencode, pi, omp, cursor, or custom)
+    /// Provider to launch (claude, codex, goose, gemini, grok, opencode, pi, omp, cursor, or custom)
     pub provider: Option<String>,
     /// Force launching a fresh new session
     #[arg(long, short = 'n')]
@@ -133,7 +133,7 @@ pub struct PsArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionsArgs {
-    /// Filter by provider: claude, codex, cursor, gemini, goose, opencode, pi, or omp
+    /// Filter by provider: claude, codex, cursor, gemini, goose, grok, opencode, pi, or omp
     #[arg(long)]
     pub provider: Option<String>,
     /// Show only the most recently updated N sessions
@@ -276,6 +276,7 @@ mod tests {
             ("/opt/bin/pi", AgentKind::Pi),
             ("/opt/bin/omp", AgentKind::OhMyPi),
             ("/opt/bin/cursor-agent", AgentKind::Cursor),
+            ("/opt/bin/grok", AgentKind::Grok),
         ];
 
         for (executable, expected) in cases {
@@ -300,7 +301,6 @@ mod tests {
             )),
             None
         );
-
         // OMP worker daemons outlive their sessions and hold no transcript;
         // they must not look like interactive agents.
         for worker in ["__omp_worker_daemon_broker", "__omp_worker_lsp_mux"] {
@@ -310,6 +310,17 @@ mod tests {
                 "failed to exclude {worker}"
             );
         }
+        assert_eq!(
+            recognize_agent(&process("/usr/bin/grok-pager", &["grok-pager"])),
+            None
+        );
+        assert_eq!(
+            recognize_agent(&process(
+                "/Applications/Grok Bot.app/Contents/MacOS/Grok Bot",
+                &["Grok Bot"]
+            )),
+            None
+        );
     }
 
     #[test]

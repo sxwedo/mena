@@ -588,6 +588,31 @@ pub fn paths_equivalent(left: &Path, right: &Path) -> bool {
             .is_some_and(|(left, right)| left == right)
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_GROK_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_grok_home() -> Option<PathBuf> {
+    TEST_GROK_HOME.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+fn set_test_grok_home(path: Option<PathBuf>) {
+    TEST_GROK_HOME.with(|slot| *slot.borrow_mut() = path);
+}
+
+#[cfg(test)]
+struct TestGrokHomeGuard;
+
+#[cfg(test)]
+impl Drop for TestGrokHomeGuard {
+    fn drop(&mut self) {
+        set_test_grok_home(None);
+    }
+}
+
 pub fn native_resume_command(kind: &AgentKind, id: &str) -> Result<NativeResumeCommand> {
     let adapter = adapter::ProviderAdapter::from_kind(kind)
         .with_context(|| format!("custom agent {kind} does not define a resume command"))?;
@@ -1223,56 +1248,10 @@ mod tests {
             ),
         );
 
+        write_indexed_grok_fixture(home);
+
         let catalog = SessionCatalog::scan(home).expect("scan sessions");
-        assert_eq!(catalog.sessions().len(), 6);
-        assert_session(
-            &catalog,
-            &AgentKind::Codex,
-            "codex-id",
-            "Fix Codex rendering",
-            120,
-            None,
-        );
-        assert_session(
-            &catalog,
-            &AgentKind::ClaudeCode,
-            "claude-id",
-            "Fix Claude rendering",
-            100,
-            None,
-        );
-        assert_session(
-            &catalog,
-            &AgentKind::GeminiCli,
-            "gemini-id",
-            "Fix Gemini rendering",
-            55,
-            None,
-        );
-        assert_session(
-            &catalog,
-            &AgentKind::OpenCode,
-            "opencode-id",
-            "Fix OpenCode rendering",
-            65,
-            Some(0.25),
-        );
-        assert_session(
-            &catalog,
-            &AgentKind::Pi,
-            "pi-id",
-            "Fix Pi rendering",
-            77,
-            Some(0.5),
-        );
-        assert_session(
-            &catalog,
-            &AgentKind::OhMyPi,
-            "omp-id",
-            "Fix OMP rendering",
-            88,
-            Some(0.75),
-        );
+        assert_indexed_provider_sessions(&catalog);
     }
 
     #[test]
@@ -2412,6 +2391,540 @@ mod tests {
         );
     }
 
+    #[test]
+    fn grok_detail_skips_bad_lines_and_does_not_convert_cost_ticks() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let id = "01a05b12-60ae-7790-8716-9293782180a9";
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            id,
+            &format!(
+                r#"{{"info":{{"id":"{id}","cwd":"/work/project"}},"generated_title":"Ticks"}}"#
+            ),
+            concat!(
+                "not-json\n",
+                r#"{"timestamp":1767323045,"method":"session/update","params":{"sessionId":"01a05b12-60ae-7790-8716-9293782180a9","update":{"sessionUpdate":"hook_execution","event_name":"user_prompt_submit"}}}"#,
+                "\n",
+                r#"{"timestamp":1767323046,"method":"session/update","params":{"sessionId":"01a05b12-60ae-7790-8716-9293782180a9","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Hello "}}}}"#,
+                "\n",
+                r#"{"timestamp":1767323046,"method":"session/update","params":{"sessionId":"01a05b12-60ae-7790-8716-9293782180a9","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Grok"}}}}"#,
+                "\n",
+                r#"{"timestamp":1767323047,"method":"session/update","params":{"sessionId":"01a05b12-60ae-7790-8716-9293782180a9","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hi."},"_meta":{"modelId":"grok-4.6"}}}}"#,
+                "\n",
+                r#"{"timestamp":1767323048,"method":"session/update","params":{"sessionId":"01a05b12-60ae-7790-8716-9293782180a9","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn","elapsed_ms":40,"usage":{"inputTokens":11,"outputTokens":2,"totalTokens":13,"costUsdTicks":8800}}}}"#,
+                "\n",
+            ),
+        );
+        let catalog = SessionCatalog::scan(home).expect("scan grok session");
+        let session = catalog.resolve(Some("grok"), id).expect("grok session");
+        let detail = catalog.detail(session).expect("load grok detail");
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].kind, SessionMessageKind::User);
+        assert_eq!(detail.messages[0].content, "Hello Grok");
+        assert_eq!(detail.messages[1].kind, SessionMessageKind::Assistant);
+        assert_eq!(detail.messages[1].content, "Hi.");
+        assert_eq!(detail.session.tokens, Some(13));
+        assert_eq!(detail.session.cost_usd, None);
+        assert_eq!(
+            detail.messages[1]
+                .metrics
+                .response
+                .as_ref()
+                .and_then(|metrics| metrics.cost_usd),
+            None
+        );
+    }
+
+    #[test]
+    fn grok_catalog_decodes_project_paths_and_ignores_index_noise() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            "01a05b12-60ae-7790-8716-9293782180a9",
+            r#"{"info":{"id":"01a05b12-60ae-7790-8716-9293782180a9","cwd":"/work/project"},"generated_title":"First","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:05:05Z"}"#,
+            grok_user_turn("01a05b12-60ae-7790-8716-9293782180a9", "hello"),
+        );
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            "01a05b0f-7770-7cd1-896a-f144f338b84b",
+            r#"{"info":{"id":"01a05b0f-7770-7cd1-896a-f144f338b84b","cwd":"/work/project"},"generated_title":"Second","created_at":"2026-01-02T03:06:05Z","updated_at":"2026-01-02T03:07:05Z"}"#,
+            grok_user_turn("01a05b0f-7770-7cd1-896a-f144f338b84b", "again"),
+        );
+        write(
+            &home.join(".grok/sessions/%2Fwork%2Fproject/prompt_history.jsonl"),
+            "{\"prompt\":\"ignore me\"}\n",
+        );
+        write(
+            &home.join(".grok/sessions/session_search.sqlite"),
+            "not-a-session",
+        );
+        write(
+            &home.join(".grok/sessions/%2Fwork%2Fproject/empty-draft/summary.json"),
+            r#"{"info":{"id":"empty-draft","cwd":"/work/project"},"session_summary":"","num_messages":0}"#,
+        );
+        let nested = home.join(
+            ".grok/sessions/%2Fwork%2Fproject/01a05b12-60ae-7790-8716-9293782180a9/subagents/child",
+        );
+        write(&nested.join("meta.json"), r#"{"id":"child"}"#);
+
+        let catalog = SessionCatalog::scan(home).expect("scan grok sessions");
+        let grok: Vec<_> = catalog
+            .sessions()
+            .iter()
+            .filter(|session| session.kind == AgentKind::Grok)
+            .collect();
+        assert_eq!(grok.len(), 2);
+        assert!(grok.iter().all(
+            |session| session.project.as_deref() == Some(std::path::Path::new("/work/project"))
+        ));
+        assert!(grok.iter().all(|session| session.id != "empty-draft"));
+        assert!(grok.iter().all(|session| session.id != "child"));
+        assert!(
+            grok.iter()
+                .any(|session| session.id == "01a05b12-60ae-7790-8716-9293782180a9")
+        );
+        assert!(
+            grok.iter()
+                .any(|session| session.id == "01a05b0f-7770-7cd1-896a-f144f338b84b")
+        );
+
+        let expanded = SessionCatalog::scan_provider(home, Some(&AgentKind::Grok), true)
+            .expect("scan grok drafts");
+        assert!(
+            expanded
+                .sessions()
+                .iter()
+                .any(|session| session.id == "empty-draft")
+        );
+    }
+
+    #[test]
+    fn grok_long_group_directory_reads_cwd_marker() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let group = home.join(".grok/sessions/very-long-slug-without-percent-abcdef");
+        write(&group.join(".cwd"), "/work/very/long/project\n");
+        write_grok_session_at(
+            &group.join("01a05b62-b578-7412-8664-94f9ce05a3cd"),
+            r#"{"info":{"id":"01a05b62-b578-7412-8664-94f9ce05a3cd"},"generated_title":"Long path"}"#,
+            grok_user_turn("01a05b62-b578-7412-8664-94f9ce05a3cd", "long"),
+        );
+
+        let catalog = SessionCatalog::scan(home).expect("scan long grok group");
+        let session = catalog
+            .resolve(Some("grok"), "01a05b62-b578-7412-8664-94f9ce05a3cd")
+            .expect("long grok session");
+        assert_eq!(
+            session.project.as_deref(),
+            Some(std::path::Path::new("/work/very/long/project"))
+        );
+    }
+
+    #[test]
+    fn grok_home_env_overrides_os_home_only_for_grok() {
+        let temp = tempdir().expect("os home");
+        let grok_root = tempdir().expect("grok home");
+        let home = temp.path();
+        write(
+            &home.join(".claude/projects/project/claude-id.jsonl"),
+            "{\"sessionId\":\"claude-id\",\"cwd\":\"/work/claude\",\"message\":{\"role\":\"user\",\"content\":\"Claude stays\"}}\n",
+        );
+        write_grok_session_in(
+            grok_root.path(),
+            "%2Fwork%2Foverride",
+            "grok-override",
+            r#"{"info":{"id":"grok-override","cwd":"/work/override"},"generated_title":"Override"}"#,
+            grok_user_turn("grok-override", "override"),
+        );
+        write_grok_session(
+            home,
+            "%2Fwork%2Fdecoy",
+            "grok-decoy",
+            r#"{"info":{"id":"grok-decoy","cwd":"/work/decoy"},"generated_title":"Decoy"}"#,
+            grok_user_turn("grok-decoy", "decoy"),
+        );
+
+        super::set_test_grok_home(Some(grok_root.path().to_path_buf()));
+        let _guard = super::TestGrokHomeGuard;
+        let catalog =
+            SessionCatalog::scan_provider(home, None, false).expect("scan with GROK_HOME");
+
+        assert!(
+            catalog
+                .sessions()
+                .iter()
+                .any(|session| session.kind == AgentKind::ClaudeCode && session.id == "claude-id")
+        );
+        assert!(
+            catalog
+                .sessions()
+                .iter()
+                .any(|session| session.kind == AgentKind::Grok && session.id == "grok-override")
+        );
+        assert!(
+            catalog
+                .sessions()
+                .iter()
+                .all(|session| session.kind != AgentKind::Grok || session.id != "grok-decoy")
+        );
+    }
+
+    #[test]
+    fn grok_deletes_only_the_selected_session_directory() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let target_id = "01a05b12-60ae-7790-8716-9293782180a9";
+        let neighbor_id = "01a05b0f-7770-7cd1-896a-f144f338b84b";
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            target_id,
+            &format!(
+                r#"{{"info":{{"id":"{target_id}","cwd":"/work/project"}},"generated_title":"Delete me"}}"#
+            ),
+            grok_user_turn(target_id, "delete"),
+        );
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            neighbor_id,
+            &format!(
+                r#"{{"info":{{"id":"{neighbor_id}","cwd":"/work/project"}},"generated_title":"Keep me"}}"#
+            ),
+            grok_user_turn(neighbor_id, "keep"),
+        );
+        let worktree = home.join(".grok/worktrees/keep");
+        write(&worktree.join("file.txt"), "untouched");
+        write(&home.join(".grok/worktrees.db"), "sqlite");
+        write(
+            &home.join(".grok/sessions/session_search.sqlite"),
+            "search-index",
+        );
+        write(
+            &home.join(".grok/sessions/%2Fwork%2Fproject/prompt_history.jsonl"),
+            "{}\n",
+        );
+
+        let catalog = SessionCatalog::scan(home).expect("scan grok sessions");
+        let session = catalog
+            .resolve(Some("grok"), target_id)
+            .expect("target session")
+            .clone();
+        catalog
+            .delete_session(&session)
+            .expect("delete grok session");
+
+        assert!(!session.path.exists());
+        assert!(!session.path.parent().expect("session dir").exists());
+        assert!(
+            home.join(format!(
+                ".grok/sessions/%2Fwork%2Fproject/{neighbor_id}/updates.jsonl"
+            ))
+            .exists()
+        );
+        assert!(worktree.join("file.txt").exists());
+        assert!(home.join(".grok/worktrees.db").exists());
+        assert!(home.join(".grok/sessions/session_search.sqlite").exists());
+        assert!(
+            home.join(".grok/sessions/%2Fwork%2Fproject/prompt_history.jsonl")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn grok_runtime_metadata_marks_the_matching_session_active() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let session_id = "01a05b62-b578-7412-8664-94f9ce05a3cd";
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            session_id,
+            &format!(
+                r#"{{"info":{{"id":"{session_id}","cwd":"/work/project"}},"generated_title":"Active"}}"#
+            ),
+            grok_user_turn(session_id, "active"),
+        );
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            "01a05b0f-7770-7cd1-896a-f144f338b84b",
+            r#"{"info":{"id":"01a05b0f-7770-7cd1-896a-f144f338b84b","cwd":"/work/project"},"generated_title":"Other"}"#,
+            grok_user_turn("01a05b0f-7770-7cd1-896a-f144f338b84b", "other"),
+        );
+        write(
+            &home.join(".grok/active_sessions.json"),
+            &format!(
+                r#"[{{"session_id":"{session_id}","pid":42,"cwd":"/work/project","opened_at":"2026-01-02T03:04:05Z"}}]"#
+            ),
+        );
+
+        let catalog = SessionCatalog::scan(home).expect("scan grok sessions");
+        let agent = live_agent(AgentKind::Grok, 42, &["grok"], "/work/project", 100);
+        let AssociationDecision::Exact { session, evidence } = catalog
+            .association_for_process(&agent)
+            .expect("associate grok process")
+        else {
+            panic!("active_sessions.json must identify one exact session");
+        };
+        assert_eq!(session.id, session_id);
+        assert_eq!(evidence, AssociationEvidence::NativeRuntime);
+        let protected = catalog
+            .protection(std::slice::from_ref(&agent))
+            .expect("protect exact grok session");
+        assert_eq!(
+            protected.exact_active_targets,
+            std::collections::BTreeSet::from([format!("grok:{session_id}")])
+        );
+    }
+
+    #[test]
+    fn grok_does_not_mark_active_from_shared_project_alone() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            "01a05b12-60ae-7790-8716-9293782180a9",
+            r#"{"info":{"id":"01a05b12-60ae-7790-8716-9293782180a9","cwd":"/work/project"},"generated_title":"Project"}"#,
+            grok_user_turn("01a05b12-60ae-7790-8716-9293782180a9", "project"),
+        );
+        let catalog = SessionCatalog::scan(home).expect("scan grok sessions");
+        let agent = live_agent(AgentKind::Grok, 42, &["grok"], "/work/project", 100);
+        assert_eq!(
+            catalog
+                .association_for_process(&agent)
+                .expect("associate grok process"),
+            AssociationDecision::ProtectProvider
+        );
+        let protected = catalog
+            .protection(std::slice::from_ref(&agent))
+            .expect("protect grok catalog");
+        assert!(protected.exact_active_targets.is_empty());
+        assert_eq!(
+            protected.protected_targets,
+            std::collections::BTreeSet::from([
+                "grok:01a05b12-60ae-7790-8716-9293782180a9".to_owned()
+            ])
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn grok_open_session_directory_file_is_exact_active_evidence() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let session_id = "01a05b12-60ae-7790-8716-9293782180a9";
+        let updates = write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            session_id,
+            &format!(
+                r#"{{"info":{{"id":"{session_id}","cwd":"/work/project"}},"generated_title":"Open file"}}"#
+            ),
+            grok_user_turn(session_id, "open"),
+        );
+        let events = updates.parent().expect("session dir").join("events.jsonl");
+        write(&events, "{}\n");
+        let _open_events = fs::File::open(&events).expect("hold events open");
+        let catalog = SessionCatalog::scan(home).expect("scan grok sessions");
+        let agent = live_agent(
+            AgentKind::Grok,
+            std::process::id(),
+            &["grok"],
+            "/work/project",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("current time")
+                .as_secs(),
+        );
+
+        let AssociationDecision::Exact { session, evidence } = catalog
+            .association_for_process(&agent)
+            .expect("associate grok process")
+        else {
+            panic!("an open file in the session directory must identify one exact session");
+        };
+        assert_eq!(session.id, session_id);
+        assert_eq!(evidence, AssociationEvidence::OpenSessionFile);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_deletion_unlinks_internal_symlinks_without_following_them() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let session_id = "01a05b12-60ae-7790-8716-9293782180a9";
+        write_grok_session(
+            home,
+            "%2Fwork%2Fproject",
+            session_id,
+            &format!(
+                r#"{{"info":{{"id":"{session_id}","cwd":"/work/project"}},"generated_title":"Escape"}}"#
+            ),
+            grok_user_turn(session_id, "escape"),
+        );
+        let outside = home.join("outside-worktree");
+        write(&outside.join("keep.txt"), "must survive");
+        let session_dir = home.join(format!(".grok/sessions/%2Fwork%2Fproject/{session_id}"));
+        symlink(outside.join("keep.txt"), session_dir.join("escaped"))
+            .expect("create escaped symlink");
+        let catalog = SessionCatalog::scan(home).expect("scan grok sessions");
+        let session = catalog
+            .resolve(Some("grok"), session_id)
+            .expect("fixture session")
+            .clone();
+        catalog
+            .delete_session(&session)
+            .expect("unlink internal symlink");
+        assert!(!session.path.exists());
+        assert!(outside.join("keep.txt").exists());
+    }
+
+    fn write_indexed_grok_fixture(home: &std::path::Path) {
+        write_grok_session(
+            home,
+            "%2Fwork%2Fgrok",
+            "grok-id",
+            r#"{"info":{"id":"grok-id","cwd":"/work/grok"},"session_summary":"","generated_title":"Fix Grok rendering","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:05:05Z","num_messages":3,"current_model_id":"grok-4.6"}"#,
+            concat!(
+                r#"{"timestamp":1767323045,"method":"session/update","params":{"sessionId":"grok-id","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Fix Grok rendering"},"_meta":{"modelId":"grok-4.6"}}}}"#,
+                "\n",
+                r#"{"timestamp":1767323046,"method":"session/update","params":{"sessionId":"grok-id","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Working."},"_meta":{"modelId":"grok-4.6"}}}}"#,
+                "\n",
+                r#"{"timestamp":1767323047,"method":"session/update","params":{"sessionId":"grok-id","update":{"sessionUpdate":"turn_completed","stop_reason":"end_turn","elapsed_ms":12,"usage":{"inputTokens":10,"outputTokens":20,"totalTokens":30,"costUsdTicks":99}}}}"#,
+                "\n",
+            ),
+        );
+    }
+
+    fn assert_indexed_provider_sessions(catalog: &SessionCatalog) {
+        assert_eq!(catalog.sessions().len(), 7);
+        assert_session(
+            catalog,
+            &AgentKind::Codex,
+            "codex-id",
+            "Fix Codex rendering",
+            120,
+            None,
+        );
+        assert_session(
+            catalog,
+            &AgentKind::ClaudeCode,
+            "claude-id",
+            "Fix Claude rendering",
+            100,
+            None,
+        );
+        assert_session(
+            catalog,
+            &AgentKind::GeminiCli,
+            "gemini-id",
+            "Fix Gemini rendering",
+            55,
+            None,
+        );
+        assert_session(
+            catalog,
+            &AgentKind::OpenCode,
+            "opencode-id",
+            "Fix OpenCode rendering",
+            65,
+            Some(0.25),
+        );
+        assert_session(
+            catalog,
+            &AgentKind::Pi,
+            "pi-id",
+            "Fix Pi rendering",
+            77,
+            Some(0.5),
+        );
+        assert_session(
+            catalog,
+            &AgentKind::OhMyPi,
+            "omp-id",
+            "Fix OMP rendering",
+            88,
+            Some(0.75),
+        );
+        assert_indexed_grok_session(catalog);
+    }
+
+    fn assert_indexed_grok_session(catalog: &SessionCatalog) {
+        assert_session(
+            catalog,
+            &AgentKind::Grok,
+            "grok-id",
+            "Fix Grok rendering",
+            30,
+            None,
+        );
+        let grok = catalog
+            .sessions()
+            .iter()
+            .find(|session| session.kind == AgentKind::Grok)
+            .expect("grok session");
+        assert_eq!(
+            grok.project.as_deref(),
+            Some(std::path::Path::new("/work/grok"))
+        );
+        assert!(
+            !grok
+                .project
+                .as_ref()
+                .expect("decoded project")
+                .to_string_lossy()
+                .contains("%2F")
+        );
+    }
+
+    fn write_grok_session(
+        home: &std::path::Path,
+        group: &str,
+        id: &str,
+        summary: &str,
+        updates: impl AsRef<str>,
+    ) -> PathBuf {
+        write_grok_session_in(&home.join(".grok"), group, id, summary, updates)
+    }
+
+    fn write_grok_session_in(
+        grok_home: &std::path::Path,
+        group: &str,
+        id: &str,
+        summary: &str,
+        updates: impl AsRef<str>,
+    ) -> PathBuf {
+        write_grok_session_at(
+            &grok_home.join("sessions").join(group).join(id),
+            summary,
+            updates,
+        )
+    }
+
+    fn write_grok_session_at(
+        session_dir: &std::path::Path,
+        summary: &str,
+        updates: impl AsRef<str>,
+    ) -> PathBuf {
+        write(&session_dir.join("summary.json"), summary);
+        let updates_path = session_dir.join("updates.jsonl");
+        write(&updates_path, updates.as_ref());
+        updates_path
+    }
+
+    fn grok_user_turn(id: &str, text: &str) -> String {
+        format!(
+            "{{\"timestamp\":1767323045,\"method\":\"session/update\",\"params\":{{\"sessionId\":\"{id}\",\"update\":{{\"sessionUpdate\":\"user_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":{text:?}}},\"_meta\":{{\"modelId\":\"grok-4.6\"}}}}}}}}\n"
+        )
+    }
+
     fn assert_session(
         catalog: &SessionCatalog,
         kind: &AgentKind,
@@ -2539,7 +3052,7 @@ mod tests {
 
         drop(connection);
 
-        let catalog = SessionCatalog::scan_provider(home, None, false).expect("scan home");
+        let catalog = SessionCatalog::scan(home).expect("scan home");
         let cursor_sessions: Vec<_> = catalog
             .sessions()
             .iter()
@@ -2574,7 +3087,7 @@ mod tests {
         assert_eq!(summary.index_records, 2);
         assert!(db_path.exists());
 
-        let rescan = SessionCatalog::scan_provider(home, None, false).expect("rescan home");
+        let rescan = SessionCatalog::scan(home).expect("rescan home");
         assert!(
             rescan
                 .sessions()
@@ -2659,7 +3172,7 @@ mod tests {
 
         drop(connection);
 
-        let catalog = SessionCatalog::scan_provider(home, None, false).expect("scan home");
+        let catalog = SessionCatalog::scan(home).expect("scan home");
         let sessions = catalog.sessions();
 
         assert_eq!(sessions.len(), 1);

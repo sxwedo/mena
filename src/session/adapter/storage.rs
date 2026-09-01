@@ -17,6 +17,7 @@ use super::super::{
 use crate::{AgentKind, ProcessSnapshot};
 
 const PROCESS_START_TOLERANCE_SECONDS: u64 = 5;
+const MAX_GROK_SESSION_DIRS: usize = 50_000;
 
 pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
     let indexed_titles = load_codex_titles(home);
@@ -190,6 +191,248 @@ pub(super) fn scan_oh_my_pi(home: &Path, sessions: &mut Vec<AgentSession>) -> Re
         &AgentKind::OhMyPi,
         sessions,
     )
+}
+
+pub(super) fn grok_home(os_home: &Path) -> PathBuf {
+    #[cfg(test)]
+    {
+        super::super::test_grok_home().unwrap_or_else(|| os_home.join(".grok"))
+    }
+    #[cfg(not(test))]
+    match std::env::var_os("GROK_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => os_home.join(".grok"),
+    }
+}
+
+pub(super) fn grok_sessions_root(os_home: &Path) -> PathBuf {
+    grok_home(os_home).join("sessions")
+}
+
+pub(super) fn scan_grok(
+    home: &Path,
+    include_empty: bool,
+    sessions: &mut Vec<AgentSession>,
+) -> Result<()> {
+    let root = grok_sessions_root(home);
+    if !root.exists() {
+        return Ok(());
+    }
+
+    let mut discovered = 0_usize;
+    for group_entry in fs::read_dir(&root)
+        .with_context(|| format!("failed to read Grok sessions in {}", root.display()))?
+    {
+        let group_entry = group_entry.with_context(|| {
+            format!("failed to read a Grok session group in {}", root.display())
+        })?;
+        let group_type = group_entry.file_type().with_context(|| {
+            format!(
+                "failed to inspect Grok session path {}",
+                group_entry.path().display()
+            )
+        })?;
+        if !group_type.is_dir() {
+            continue;
+        }
+        let group_path = group_entry.path();
+        let group_project = grok_group_project(&group_path);
+
+        for session_entry in fs::read_dir(&group_path)
+            .with_context(|| format!("failed to read Grok sessions in {}", group_path.display()))?
+        {
+            let session_entry = session_entry.with_context(|| {
+                format!("failed to read a Grok session in {}", group_path.display())
+            })?;
+            let session_type = session_entry.file_type().with_context(|| {
+                format!(
+                    "failed to inspect Grok session path {}",
+                    session_entry.path().display()
+                )
+            })?;
+            if !session_type.is_dir() {
+                continue;
+            }
+            discovered += 1;
+            if discovered > MAX_GROK_SESSION_DIRS {
+                anyhow::bail!(
+                    "agent session scan exceeded {MAX_GROK_SESSION_DIRS} files under {}",
+                    root.display()
+                );
+            }
+            let session_dir = session_entry.path();
+            let Some(id) = session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let updates = session_dir.join("updates.jsonl");
+            let summary_path = session_dir.join("summary.json");
+            let path = if updates.is_file() {
+                updates.clone()
+            } else if include_empty && summary_path.is_file() {
+                summary_path.clone()
+            } else {
+                continue;
+            };
+            let summary = read_json_file(&summary_path)?.unwrap_or(Value::Null);
+            let project = string_at(&summary, "/info/cwd")
+                .map(PathBuf::from)
+                .or_else(|| group_project.clone());
+            let title = grok_summary_title(&summary).or_else(|| {
+                updates
+                    .is_file()
+                    .then(|| grok_first_user_preview(&updates))
+                    .flatten()
+            });
+            let started_at = string_at(&summary, "/created_at");
+            let mut recorded = session(
+                AgentKind::Grok,
+                id,
+                title,
+                project,
+                path,
+                started_at,
+                None,
+                None,
+            )?;
+            if let Some(updated) = string_at(&summary, "/updated_at")
+                .as_deref()
+                .and_then(unix_from_rfc3339)
+            {
+                recorded.updated_at = updated;
+            }
+            sessions.push(recorded);
+        }
+    }
+    Ok(())
+}
+
+fn grok_group_project(group: &Path) -> Option<PathBuf> {
+    if let Some(marker) = read_cwd_marker(group) {
+        return Some(marker);
+    }
+    let name = group.file_name()?.to_str()?;
+    if !name.contains('%') {
+        return None;
+    }
+    percent_decode_path(name)
+}
+
+fn read_cwd_marker(group: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(group.join(".cwd")).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+fn percent_decode_path(encoded: &str) -> Option<PathBuf> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let hi = *bytes.get(index + 1)?;
+                let lo = *bytes.get(index + 2)?;
+                decoded.push((hex_value(hi)? << 4) | hex_value(lo)?);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    let path = String::from_utf8(decoded).ok()?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn grok_summary_title(summary: &Value) -> Option<String> {
+    string_at(summary, "/generated_title")
+        .and_then(|title| normalize_preview(&title))
+        .or_else(|| {
+            string_at(summary, "/session_summary").and_then(|title| normalize_preview(&title))
+        })
+}
+
+fn grok_first_user_preview(updates: &Path) -> Option<String> {
+    let mut title = None;
+    let _ = visit_bounded_lines_limit(updates, Some(64), |line| {
+        if title.is_some() {
+            return;
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            return;
+        };
+        if record
+            .pointer("/params/update/sessionUpdate")
+            .and_then(Value::as_str)
+            != Some("user_message_chunk")
+        {
+            return;
+        }
+        title = record
+            .pointer("/params/update/content")
+            .and_then(content_preview);
+    });
+    title
+}
+
+fn unix_from_rfc3339(value: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+}
+
+pub(super) fn collect_grok_artifacts(selected: &AgentSession, directories: &mut BTreeSet<PathBuf>) {
+    if let Some(parent) = selected.path.parent() {
+        directories.insert(parent.to_path_buf());
+    }
+}
+
+pub(super) fn runtime_grok_session_ids(
+    home: &Path,
+    process: &ProcessSnapshot,
+) -> Result<Vec<String>> {
+    let path = grok_home(home).join("active_sessions.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let Some(record) = read_json_file(&path)? else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = record.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        if entry.get("pid").and_then(Value::as_u64) != Some(u64::from(process.pid)) {
+            continue;
+        }
+        if let Some(runtime_cwd) = string_at(entry, "/cwd").map(PathBuf::from)
+            && !process
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| paths_equivalent(cwd, &runtime_cwd))
+        {
+            continue;
+        }
+        if let Some(id) = string_at(entry, "/session_id") {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 pub(super) fn runtime_claude_session_ids(

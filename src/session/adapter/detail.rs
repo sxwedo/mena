@@ -1130,6 +1130,217 @@ fn number_as_milliseconds(value: &Value) -> Option<u64> {
     })
 }
 
+struct GrokDetailState {
+    messages: Vec<SessionMessage>,
+    pending_chunk: Option<(SessionMessageKind, usize)>,
+    tool_targets: BTreeMap<String, usize>,
+    last_assistant: Option<usize>,
+    tokens: u64,
+    has_tokens: bool,
+}
+
+pub(super) fn grok_detail(path: &Path) -> Result<LoadedSession> {
+    let mut state = GrokDetailState {
+        messages: Vec::new(),
+        pending_chunk: None,
+        tool_targets: BTreeMap::new(),
+        last_assistant: None,
+        tokens: 0,
+        has_tokens: false,
+    };
+    let skipped = visit_bounded_lines(path, |line| {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            return;
+        };
+        grok_apply_record(&mut state, &record);
+    })?;
+    ensure_complete(path, skipped)?;
+    Ok(LoadedSession {
+        tokens: state.has_tokens.then_some(state.tokens),
+        cost_usd: None,
+        messages: state.messages,
+    })
+}
+
+fn grok_apply_record(state: &mut GrokDetailState, record: &Value) {
+    let Some(update) = record.pointer("/params/update") else {
+        return;
+    };
+    let Some(kind) = update.get("sessionUpdate").and_then(Value::as_str) else {
+        return;
+    };
+    let timestamp = grok_event_timestamp(record);
+    let model = string_at(update, "/_meta/modelId");
+    match kind {
+        "user_message_chunk" => grok_append_chunk(
+            &mut state.messages,
+            &mut state.pending_chunk,
+            SessionMessageKind::User,
+            timestamp,
+            None,
+            grok_chunk_text(update),
+        ),
+        "agent_message_chunk" => {
+            grok_append_chunk(
+                &mut state.messages,
+                &mut state.pending_chunk,
+                SessionMessageKind::Assistant,
+                timestamp,
+                model,
+                grok_chunk_text(update),
+            );
+            if let Some((_, index)) = state.pending_chunk {
+                state.last_assistant = Some(index);
+            }
+        }
+        "agent_thought_chunk" => grok_append_chunk(
+            &mut state.messages,
+            &mut state.pending_chunk,
+            SessionMessageKind::System,
+            timestamp,
+            model,
+            grok_chunk_text(update),
+        ),
+        "tool_call" => grok_apply_tool_call(state, update, timestamp),
+        "tool_call_update" => grok_apply_tool_update(state, update, timestamp),
+        "turn_completed" => grok_apply_turn_completed(state, update),
+        _ => state.pending_chunk = None,
+    }
+}
+
+fn grok_apply_tool_call(state: &mut GrokDetailState, update: &Value, timestamp: Option<String>) {
+    state.pending_chunk = None;
+    let tool_id = string_at(update, "/toolCallId");
+    let title = string_at(update, "/title");
+    let mut object = serde_json::Map::new();
+    if let Some(title) = title.clone() {
+        object.insert("tool".to_owned(), Value::String(title));
+    }
+    if let Some(input) = update.get("rawInput") {
+        object.insert("input".to_owned(), input.clone());
+    }
+    let Some(content) = content_text_full(&Value::Object(object)).or_else(|| title.clone()) else {
+        return;
+    };
+    let index = state.messages.len();
+    state.messages.push(SessionMessage {
+        kind: tool_call_kind(update),
+        timestamp,
+        model: None,
+        metrics: SessionMessageMetrics::default(),
+        content,
+    });
+    if let Some(tool_id) = tool_id {
+        state.tool_targets.insert(tool_id, index);
+    }
+}
+
+fn grok_apply_tool_update(state: &mut GrokDetailState, update: &Value, timestamp: Option<String>) {
+    state.pending_chunk = None;
+    if let Some(tool_id) = string_at(update, "/toolCallId")
+        && let Some(index) = state.tool_targets.get(&tool_id).copied()
+    {
+        let tool = state.messages[index].metrics.tool_mut();
+        if let Some(status) = string_at(update, "/status") {
+            tool.status = Some(status);
+        }
+        if let Some(error) = metric_error(update) {
+            tool.error = Some(error);
+        }
+    }
+    if let Some(content) = update.get("content").and_then(content_text_full) {
+        state.messages.push(SessionMessage {
+            kind: SessionMessageKind::ToolResult,
+            timestamp,
+            model: None,
+            metrics: SessionMessageMetrics::default(),
+            content,
+        });
+    }
+}
+
+fn grok_apply_turn_completed(state: &mut GrokDetailState, update: &Value) {
+    state.pending_chunk = None;
+    let Some(usage) = update.get("usage") else {
+        return;
+    };
+    let parsed = grok_token_usage(usage);
+    if let Some(total) = parsed
+        .total
+        .or_else(|| optional_sum([parsed.input, parsed.output, parsed.reasoning]))
+    {
+        state.has_tokens = true;
+        state.tokens = state.tokens.saturating_add(total);
+    }
+    let Some(index) = state.last_assistant else {
+        return;
+    };
+    let response = state.messages[index].metrics.response_mut();
+    response.tokens = parsed;
+    response.duration_ms = update.get("elapsed_ms").and_then(number_as_milliseconds);
+    response.finish_reason = string_at(update, "/stop_reason");
+    if let Some(model) = usage
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .and_then(|models| models.keys().next().cloned())
+    {
+        state.messages[index].model.get_or_insert(model);
+    }
+}
+
+fn grok_append_chunk(
+    messages: &mut Vec<SessionMessage>,
+    pending: &mut Option<(SessionMessageKind, usize)>,
+    kind: SessionMessageKind,
+    timestamp: Option<String>,
+    model: Option<String>,
+    text: Option<String>,
+) {
+    let Some(text) = text.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if let Some((pending_kind, index)) = *pending
+        && pending_kind == kind
+    {
+        messages[index].content.push_str(&text);
+        return;
+    }
+    let index = messages.len();
+    messages.push(SessionMessage {
+        kind,
+        timestamp,
+        model,
+        metrics: SessionMessageMetrics::default(),
+        content: text,
+    });
+    *pending = Some((kind, index));
+}
+
+fn grok_chunk_text(update: &Value) -> Option<String> {
+    update.get("content").and_then(content_text_full)
+}
+
+fn grok_event_timestamp(record: &Value) -> Option<String> {
+    record
+        .get("timestamp")
+        .and_then(Value::as_i64)
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|timestamp| timestamp.to_rfc3339())
+        .or_else(|| string_at(record, "/timestamp"))
+}
+
+fn grok_token_usage(usage: &Value) -> TokenUsage {
+    TokenUsage {
+        total: usage.get("totalTokens").and_then(Value::as_u64),
+        input: usage.get("inputTokens").and_then(Value::as_u64),
+        output: usage.get("outputTokens").and_then(Value::as_u64),
+        cache_read: usage.get("cachedReadTokens").and_then(Value::as_u64),
+        cache_write: usage.get("cacheCreationTokens").and_then(Value::as_u64),
+        reasoning: usage.get("reasoningTokens").and_then(Value::as_u64),
+        ..TokenUsage::default()
+    }
+}
+
 fn ensure_complete(path: &Path, skipped: bool) -> Result<()> {
     if skipped {
         bail!(

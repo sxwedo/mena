@@ -13,9 +13,10 @@ mena ss --include-empty
 mena ss --json
 ```
 
-`--provider` 支持 `claude`、`codex`、`cursor`、`gemini`、`goose`、`opencode`、
-`pi` 和 `omp`；`goose` 没有本地 Session 目录，始终列出为空。`--limit` 必须大于
-等于 1。Cursor 中没有消息的草稿默认隐藏，传入 `--include-empty` 后才会显示。
+`--provider` 支持 `claude`、`codex`、`cursor`、`gemini`、`goose`、`grok`、
+`opencode`、`pi` 和 `omp`；`goose` 没有本地 Session 目录，始终列出为空。
+`--limit` 必须大于等于 1。Cursor 和 Grok 中没有消息的草稿默认隐藏，传入
+`--include-empty` 后才会显示。
 
 已保存 Session 的 Target 格式是 `provider:session-id`。只有在结果唯一时，才允许
 省略 Provider 或使用 ID 前缀。
@@ -118,6 +119,10 @@ Provider 的 Session 存储。
 绿色 active 标记只接受精确的 Provider 原生证据：
 
 - Claude Code 的运行时元数据必须同时匹配 PID、进程启动时间、项目和 Session。
+- Grok 读取 `$GROK_HOME/active_sessions.json`（默认 `~/.grok`），要求 PID 匹配；
+  该文件若记录了 cwd，还须与活进程一致。文件缺失或过期时，退回“进程只打开一个
+  已收录 Session 目录内的文件”（Linux 用 `/proc`，macOS 用 `lsof`）。权威对话
+  `updates.jsonl` 常常并不在打开文件之列。
 - Pi 与 Oh My Pi 要求运行进程只打开一个已收录的原生对话文件（Linux 使用
   `/proc`，macOS 使用 `lsof`）。
 - 恢复参数只能证明进程启动时的 Session，因为 Agent 可能不重启就切换 Session。
@@ -134,3 +139,30 @@ Provider 的 Session 存储。
   而不是中止整批操作；受保护的 Session 永远不会被删除。
 
 导出使用原子创建、不覆盖已有文件，并在 Unix 下使用 `0600` 权限。
+
+## Grok Session
+
+Grok 把每个 Session 存在 `$GROK_HOME/sessions` 下，按百分号编码的工作目录分组
+（未设置 `GROK_HOME` 时根目录是 `~/.grok`）。编码名超过 255 字节时改用
+slug+hash，并在组目录里写 `.cwd` 记录原路径。
+
+```text
+$GROK_HOME/sessions/<percent-encoded-cwd>/<session-id>/
+  summary.json
+  updates.jsonl
+```
+
+有 `updates.jsonl` 的目录会进入目录；只有 `summary.json` 的草稿默认隐藏，传入
+`--include-empty` 后才会显示。项目路径优先 `summary.json` 的
+`info.cwd`，其次组目录 `.cwd`，再其次解码组目录名，绝不会把百分号编码名当作
+项目。组级 `prompt_history.jsonl`、根级 `session_search.sqlite`，以及 Session
+目录内的 `subagents/` 元数据都不会单独成行。Grok 把子 Session 放在正常的 UUID
+目录树里，那些目录会作为独立行出现。
+
+恢复命令是 `grok --resume <session-id>`，只用目录里的 UUID，不用标题，也不用
+`-c` / `-s`。删除只拆该 Session 目录整棵树，不改 `session_search.sqlite`，也不
+碰 `$GROK_HOME/worktrees` 或 `worktrees.db`。Grok 自己的 `grok sessions search`
+在它重建索引之前可能暂时是脏的。
+
+Token 只取文件里已经写死的 `turn_completed.usage` 字段。`costUsdTicks` 不会被
+换算成美元。

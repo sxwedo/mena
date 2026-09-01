@@ -20,6 +20,7 @@ const COLOR_OPENAI: Color = UI.success;
 const COLOR_GEMINI: Color = UI.signal;
 const COLOR_PI: Color = UI.violet;
 const COLOR_CURSOR: Color = Color::Rgb(139, 165, 196);
+const COLOR_GROK: Color = Color::Rgb(168, 176, 196);
 const COLOR_GOOSE: Color = UI.amber;
 const COLOR_CUSTOM: Color = UI.text_soft;
 
@@ -41,6 +42,8 @@ const fn agent_icon(kind: &AgentKind) -> (&'static str, Color) {
         AgentKind::OhMyPi => ("ϟ", UI.amber),
         // ❯ prompt cursor — matches Cursor editor's brand
         AgentKind::Cursor => ("❯", COLOR_CURSOR),
+        // ✶ six-point star — Grok / xAI identity without emoji
+        AgentKind::Grok => ("✶", COLOR_GROK),
         // ◈ diamond — Goose's geometric identity
         AgentKind::Goose => ("◈", COLOR_GOOSE),
         // ◇ neutral operator-defined target.

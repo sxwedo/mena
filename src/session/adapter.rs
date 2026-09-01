@@ -15,9 +15,10 @@ mod storage;
 use crate::process::open_file_paths;
 use storage::{
     collect_claude_artifacts, collect_codex_artifacts, collect_cursor_artifacts,
-    collect_opencode_artifacts, cursor_global_storage_dirs, delete_claude_index_records,
-    delete_codex_index_records, delete_cursor_index_records, runtime_claude_session_ids,
-    scan_claude, scan_codex, scan_cursor, scan_gemini, scan_oh_my_pi, scan_opencode, scan_pi,
+    collect_grok_artifacts, collect_opencode_artifacts, cursor_global_storage_dirs,
+    delete_claude_index_records, delete_codex_index_records, delete_cursor_index_records,
+    grok_sessions_root, runtime_claude_session_ids, runtime_grok_session_ids, scan_claude,
+    scan_codex, scan_cursor, scan_gemini, scan_grok, scan_oh_my_pi, scan_opencode, scan_pi,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,11 +63,12 @@ pub(super) enum ProviderAdapter {
     Pi,
     OhMyPi,
     Cursor,
+    Grok,
 }
 
 impl ProviderAdapter {
     /// Providers with a native local session catalog, in stable display order.
-    pub(super) const SESSION_CATALOG: [Self; 8] = [
+    pub(super) const SESSION_CATALOG: [Self; 9] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::Goose,
@@ -75,6 +77,7 @@ impl ProviderAdapter {
         Self::Pi,
         Self::OhMyPi,
         Self::Cursor,
+        Self::Grok,
     ];
 
     pub(super) const fn from_kind(kind: &AgentKind) -> Option<Self> {
@@ -87,6 +90,7 @@ impl ProviderAdapter {
             AgentKind::Pi => Some(Self::Pi),
             AgentKind::OhMyPi => Some(Self::OhMyPi),
             AgentKind::Cursor => Some(Self::Cursor),
+            AgentKind::Grok => Some(Self::Grok),
             AgentKind::Custom(_) => None,
         }
     }
@@ -101,6 +105,7 @@ impl ProviderAdapter {
             Self::Pi => AgentKind::Pi,
             Self::OhMyPi => AgentKind::OhMyPi,
             Self::Cursor => AgentKind::Cursor,
+            Self::Grok => AgentKind::Grok,
         }
     }
 
@@ -113,7 +118,11 @@ impl ProviderAdapter {
         home: &Path,
         process: &ProcessSnapshot,
     ) -> Result<Vec<ProcessEvidence>> {
+        if self == Self::Grok {
+            return grok_process_evidence(home, process, self);
+        }
         let (runtime_selectors, runtime_source) = match self {
+            Self::Grok => unreachable!("Grok process evidence is handled above"),
             Self::ClaudeCode => (
                 runtime_claude_session_ids(home, process)?
                     .into_iter()
@@ -176,6 +185,7 @@ impl ProviderAdapter {
             Self::Pi => scan_pi(home, sessions),
             Self::OhMyPi => scan_oh_my_pi(home, sessions),
             Self::Cursor => scan_cursor(home, include_empty, sessions),
+            Self::Grok => scan_grok(home, include_empty, sessions),
         }
     }
 
@@ -188,6 +198,7 @@ impl ProviderAdapter {
             Self::GeminiCli => detail::gemini_detail(&selected.path)?,
             Self::OpenCode => detail::opencode_detail(home, &selected.id)?,
             Self::Cursor => detail::cursor_detail(&selected.path, &selected.id)?,
+            Self::Grok => detail::grok_detail(&selected.path)?,
             Self::Goose => bail!("Goose session detail loading is not implemented"),
         };
         let mut session = selected.clone();
@@ -219,6 +230,7 @@ impl ProviderAdapter {
                 collect_cursor_artifacts(home, selected, &mut files)?;
                 files.remove(&selected.path);
             }
+            Self::Grok => collect_grok_artifacts(selected, &mut directories),
             Self::GeminiCli | Self::Pi | Self::OhMyPi | Self::Goose => {}
         }
 
@@ -228,7 +240,12 @@ impl ProviderAdapter {
             Self::Codex => delete_codex_index_records(home, &selected.id)?,
             Self::ClaudeCode => delete_claude_index_records(home, &selected.id)?,
             Self::Cursor => delete_cursor_index_records(home, &selected.id)?,
-            Self::GeminiCli | Self::OpenCode | Self::Pi | Self::OhMyPi | Self::Goose => 0,
+            Self::GeminiCli
+            | Self::OpenCode
+            | Self::Pi
+            | Self::OhMyPi
+            | Self::Goose
+            | Self::Grok => 0,
         };
 
         let mut summary = DeletionSummary {
@@ -259,6 +276,7 @@ impl ProviderAdapter {
             Self::Pi => vec![home.join(".pi/agent/sessions")],
             Self::OhMyPi => vec![home.join(".omp/agent/sessions")],
             Self::Cursor => cursor_global_storage_dirs(home),
+            Self::Grok => vec![grok_sessions_root(home)],
         }
     }
 
@@ -275,6 +293,7 @@ impl ProviderAdapter {
             Self::Pi => ("pi", vec!["--session".to_owned(), id.to_owned()]),
             Self::OhMyPi => ("omp", vec!["--resume".to_owned(), id.to_owned()]),
             Self::Cursor => ("cursor-agent", vec!["--resume".to_owned(), id.to_owned()]),
+            Self::Grok => ("grok", vec!["--resume".to_owned(), id.to_owned()]),
         };
         NativeResumeCommand {
             program: program.to_owned(),
@@ -295,12 +314,87 @@ impl ProviderAdapter {
             Self::ClaudeCode | Self::GeminiCli | Self::OhMyPi | Self::Cursor | Self::Goose => {
                 flag_values(arguments, "--resume")
             }
+            Self::Grok => {
+                let mut values = flag_values(arguments, "--resume");
+                values.extend(flag_values(arguments, "-r"));
+                values
+            }
             Self::OpenCode | Self::Pi => flag_values(arguments, "--session"),
         };
         selectors.sort();
         selectors.dedup();
         selectors
     }
+}
+
+fn grok_process_evidence(
+    home: &Path,
+    process: &ProcessSnapshot,
+    adapter: ProviderAdapter,
+) -> Result<Vec<ProcessEvidence>> {
+    let runtime_ids = runtime_grok_session_ids(home, process)?;
+    if !runtime_ids.is_empty() {
+        return Ok(runtime_ids
+            .into_iter()
+            .map(|id| ProcessEvidence {
+                selector: ProcessSelector::Id(id),
+                source: AssociationEvidence::NativeRuntime,
+            })
+            .collect());
+    }
+
+    let open_ids = grok_open_session_ids(home, process);
+    if !open_ids.is_empty() {
+        return Ok(open_ids
+            .into_iter()
+            .map(|id| ProcessEvidence {
+                selector: ProcessSelector::Id(id),
+                source: AssociationEvidence::OpenSessionFile,
+            })
+            .collect());
+    }
+
+    Ok(adapter
+        .resume_selectors(process)
+        .into_iter()
+        .map(|id| ProcessEvidence {
+            selector: ProcessSelector::Id(id),
+            source: AssociationEvidence::ResumeArgument,
+        })
+        .collect())
+}
+
+fn grok_open_session_ids(home: &Path, process: &ProcessSnapshot) -> Vec<String> {
+    let root = grok_sessions_root(home);
+    let resolved_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    let mut ids = Vec::new();
+    for path in open_file_paths(process.pid) {
+        if let Some(id) = grok_session_id_for_open_path(&root, &resolved_root, &path) {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn grok_session_id_for_open_path(root: &Path, resolved_root: &Path, path: &Path) -> Option<String> {
+    let relative = path
+        .strip_prefix(root)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::fs::canonicalize(path).ok().and_then(|canonical| {
+                canonical
+                    .strip_prefix(resolved_root)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+        })?;
+    let mut components = relative.components();
+    let _group = components.next()?;
+    let id = components.next()?;
+    id.as_os_str().to_str().map(str::to_owned)
 }
 
 fn native_arguments(process: &ProcessSnapshot) -> &[String] {
@@ -376,6 +470,7 @@ mod tests {
             AgentKind::Pi,
             AgentKind::OhMyPi,
             AgentKind::Cursor,
+            AgentKind::Grok,
         ];
         assert_eq!(ProviderAdapter::SESSION_CATALOG.len(), kinds.len());
         for (adapter, kind) in ProviderAdapter::SESSION_CATALOG.into_iter().zip(kinds) {
@@ -416,6 +511,7 @@ mod tests {
                 "cursor-agent",
                 vec!["--resume", "session-id"],
             ),
+            (AgentKind::Grok, "grok", vec!["--resume", "session-id"]),
         ];
 
         for (kind, program, args) in cases {
@@ -458,6 +554,26 @@ mod tests {
                 ProviderAdapter::OhMyPi,
                 process("omp", &["omp", "--resume", "omp-id"]),
                 vec!["omp-id"],
+            ),
+            (
+                ProviderAdapter::Grok,
+                process("grok", &["grok", "--resume", "grok-id"]),
+                vec!["grok-id"],
+            ),
+            (
+                ProviderAdapter::Grok,
+                process("grok", &["grok", "-r", "grok-short"]),
+                vec!["grok-short"],
+            ),
+            (
+                ProviderAdapter::Grok,
+                process("grok", &["grok", "--resume=grok-eq"]),
+                vec!["grok-eq"],
+            ),
+            (
+                ProviderAdapter::Grok,
+                process("grok", &["grok", "--resume"]),
+                Vec::new(),
             ),
         ];
 

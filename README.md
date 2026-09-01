@@ -74,6 +74,7 @@ mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 | Pi | ✓ | ✓ | Claude/Codex/OMP handoff | adapter¹ |
 | Oh My Pi | ✓ | ✓ | Claude/Codex handoff | ✓ |
 | Cursor Agent | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
+| Grok | ✓ | ✓ | Claude/Codex/OMP handoff | — |
 | Goose | ✓ | — | — | ✓ |
 | Custom configuration | ✓ | — | — | — |
 

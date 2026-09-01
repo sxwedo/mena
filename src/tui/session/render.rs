@@ -1040,6 +1040,7 @@ pub(crate) fn session_cell(
                 | crate::process::AgentKind::OpenCode => UI.cyan,
                 crate::process::AgentKind::Pi => UI.violet,
                 crate::process::AgentKind::Codex => UI.success,
+                crate::process::AgentKind::Grok => UI.text_soft,
                 _ => UI.text,
             };
             Cell::from(Span::styled(

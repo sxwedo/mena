@@ -73,6 +73,7 @@ mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 | Pi | ✓ | ✓ | handoff 到 Claude/Codex/OMP | adapter¹ |
 | Oh My Pi | ✓ | ✓ | handoff 到 Claude/Codex | ✓ |
 | Cursor Agent | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
+| Grok | ✓ | ✓ | handoff 到 Claude/Codex/OMP | — |
 | Goose | ✓ | — | — | ✓ |
 | 自定义配置 | ✓ | — | — | — |
 

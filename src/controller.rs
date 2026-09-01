@@ -269,7 +269,7 @@ fn resolve_agent_kind(
         Ok(AgentKind::Custom(slug.to_owned()))
     } else {
         bail!(
-            "unsupported agent provider `{slug}`; available providers: claude, codex, goose, omp, opencode, pi, cursor, gemini{}",
+            "unsupported agent provider `{slug}`; available providers: claude, codex, goose, grok, omp, opencode, pi, cursor, gemini{}",
             if custom.is_empty() {
                 String::new()
             } else {
@@ -317,6 +317,10 @@ pub fn fresh_launch_spec(
         }),
         AgentKind::Cursor => Ok(NativeResumeCommand {
             program: "cursor-agent".to_owned(),
+            args: Vec::new(),
+        }),
+        AgentKind::Grok => Ok(NativeResumeCommand {
+            program: "grok".to_owned(),
             args: Vec::new(),
         }),
         AgentKind::Custom(name) => {
@@ -733,10 +737,7 @@ fn is_provider(
     name: &str,
     custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
 ) -> bool {
-    matches!(
-        name,
-        "claude" | "codex" | "gemini" | "opencode" | "pi" | "omp" | "cursor"
-    ) || custom.contains_key(name)
+    AgentKind::from_slug(name).is_some() || custom.contains_key(name)
 }
 
 fn session_list_json(session: &AgentSession) -> Value {
@@ -764,4 +765,19 @@ fn process_list_json(agent: &LiveAgent, verbose: bool) -> Value {
         value["command"] = Value::String(agent.process.command.join(" "));
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_session_selector;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn grok_resume_targets_split_as_a_known_provider() {
+        let custom = BTreeMap::new();
+        let (provider, id) =
+            split_session_selector("grok:01a05b12-60ae-7790-8716-9293782180a9", &custom);
+        assert_eq!(provider, Some("grok"));
+        assert_eq!(id, "01a05b12-60ae-7790-8716-9293782180a9");
+    }
 }

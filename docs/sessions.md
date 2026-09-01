@@ -13,10 +13,10 @@ mena ss --include-empty
 mena ss --json
 ```
 
-`--provider` accepts `claude`, `codex`, `cursor`, `gemini`, `goose`, `opencode`,
-`pi`, or `omp`; `goose` has no native local session catalog and always lists
-nothing. `--limit` must be at least 1. Cursor draft sessions without messages
-are hidden unless `--include-empty` is present.
+`--provider` accepts `claude`, `codex`, `cursor`, `gemini`, `goose`, `grok`,
+`opencode`, `pi`, or `omp`; `goose` has no native local session catalog and
+always lists nothing. `--limit` must be at least 1. Cursor and Grok draft
+sessions without messages are hidden unless `--include-empty` is present.
 
 A saved-session target is `provider:session-id`. An unqualified ID or prefix is
 accepted only when it resolves to one logical session.
@@ -135,6 +135,11 @@ An active indicator requires exact provider-native evidence:
 
 - Claude Code runtime metadata must agree on PID, process start, project, and
   session identity.
+- Grok reads `$GROK_HOME/active_sessions.json` (default `~/.grok`) and requires
+  a matching PID; when that file records a cwd, it must match the live process.
+  If that file is missing or stale, Grok falls back to the process holding
+  exactly one cataloged session directory open (`/proc` on Linux or `lsof` on
+  macOS). The transcript `updates.jsonl` is often not among the open files.
 - Pi and Oh My Pi require the live process to hold exactly one cataloged native
   transcript open (`/proc` on Linux or `lsof` on macOS).
 - A resume argument is launch evidence only because an agent may switch
@@ -155,3 +160,34 @@ Deletion also rejects:
 
 Exports are created atomically, never overwrite an existing file, and use mode
 `0600` on Unix.
+
+## Grok sessions
+
+Grok stores one directory per session under `$GROK_HOME/sessions`, grouped by a
+percent-encoded working directory (default `$GROK_HOME` is `~/.grok`). When the
+encoded name exceeds 255 bytes, Grok uses a slug plus hash and writes the
+original path to `.cwd` inside the group.
+
+```text
+$GROK_HOME/sessions/<percent-encoded-cwd>/<session-id>/
+  summary.json
+  updates.jsonl
+```
+
+`mena` catalogs a session when `updates.jsonl` exists. Draft directories that
+only have `summary.json` stay hidden unless `--include-empty` is present. The
+project path
+comes from `summary.json` `info.cwd`, then `.cwd`, then a percent-decoded group
+name — never the encoded directory name itself. Group-level
+`prompt_history.jsonl`, the root `session_search.sqlite` index, and nested
+`subagents/` metadata directories are not catalog rows. Child sessions that
+Grok stores as ordinary UUID directories appear as their own rows.
+
+Resume uses `grok --resume <session-id>` with the catalog UUID, never a title
+and never `-c` / `-s`. Deletion removes that session directory tree only. It
+does not rewrite `session_search.sqlite` and does not touch `$GROK_HOME/worktrees`
+or `worktrees.db`. Grok's own `grok sessions search` may stay stale until Grok
+rebuilds that index.
+
+Token counts are taken from persisted `turn_completed.usage` fields when
+present. `costUsdTicks` is not converted into dollars.

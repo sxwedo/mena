@@ -221,6 +221,23 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(
+            continuation_targets(&AgentKind::Grok),
+            vec![
+                ContinuationTarget {
+                    kind: AgentKind::OhMyPi,
+                    method: ContinuationMethod::Handoff,
+                },
+                ContinuationTarget {
+                    kind: AgentKind::ClaudeCode,
+                    method: ContinuationMethod::Handoff,
+                },
+                ContinuationTarget {
+                    kind: AgentKind::Codex,
+                    method: ContinuationMethod::Handoff,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -229,8 +246,9 @@ mod tests {
         for (target, program) in [
             (AgentKind::ClaudeCode, "claude"),
             (AgentKind::Codex, "codex"),
+            (AgentKind::OhMyPi, "omp"),
         ] {
-            let spec = continuation_launch_spec(&AgentKind::OpenCode, &target, Some(handoff))
+            let spec = continuation_launch_spec(&AgentKind::Grok, &target, Some(handoff))
                 .expect("handoff launch spec");
 
             assert_eq!(spec.program, program);

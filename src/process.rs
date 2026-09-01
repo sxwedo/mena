@@ -21,6 +21,7 @@ pub enum AgentKind {
     Pi,
     OhMyPi,
     Cursor,
+    Grok,
     Custom(String),
 }
 
@@ -36,6 +37,7 @@ impl AgentKind {
             Self::Pi => "pi",
             Self::OhMyPi => "omp",
             Self::Cursor => "cursor",
+            Self::Grok => "grok",
             Self::Custom(name) => name.as_str(),
         }
     }
@@ -51,6 +53,7 @@ impl AgentKind {
             "pi" => Some(Self::Pi),
             "omp" => Some(Self::OhMyPi),
             "cursor" => Some(Self::Cursor),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -66,6 +69,7 @@ impl AgentKind {
             Self::Pi => "https://github.com/pi-agent",
             Self::OhMyPi => "https://github.com/sxwedo/oh-my-pi",
             Self::Cursor => "https://cursor.com",
+            Self::Grok => "https://docs.x.ai/build/cli/reference",
             Self::Custom(_) => "",
         }
     }
@@ -83,6 +87,7 @@ impl AgentKind {
             Self::Pi => Some("pi"),
             Self::OhMyPi => Some("omp"),
             Self::Cursor => Some("cursor-agent"),
+            Self::Grok => Some("grok"),
             Self::Custom(name) => custom
                 .get(name)
                 .and_then(|c| c.executables.first().map(String::as_str)),
@@ -102,6 +107,7 @@ impl AgentKind {
             Self::Cursor => {
                 is_executable_in_path("cursor-agent") || is_executable_in_path("cursor")
             }
+            Self::Grok => is_executable_in_path("grok") || grok_managed_binary().is_some(),
             Self::Custom(name) => custom
                 .get(name)
                 .is_some_and(|c| c.executables.iter().any(|exe| is_executable_in_path(exe))),
@@ -116,6 +122,7 @@ impl AgentKind {
             Self::OpenCode,
             Self::Pi,
             Self::Cursor,
+            Self::Grok,
             Self::Goose,
             Self::GeminiCli,
         ];
@@ -137,6 +144,7 @@ impl fmt::Display for AgentKind {
             Self::Pi => "Pi",
             Self::OhMyPi => "Oh My Pi",
             Self::Cursor => "Cursor",
+            Self::Grok => "Grok",
             Self::Custom(name) => name,
         };
         formatter.write_str(label)
@@ -242,6 +250,7 @@ pub fn recognize_agent(process: &ProcessSnapshot) -> Option<AgentKind> {
         "pi" => return Some(AgentKind::Pi),
         "omp" => return Some(AgentKind::OhMyPi),
         "cursor-agent" => return Some(AgentKind::Cursor),
+        "grok" => return Some(AgentKind::Grok),
         _ => {}
     }
 
@@ -433,8 +442,16 @@ const fn status_label(status: ProcessStatus) -> &'static str {
         ProcessStatus::Unknown(_) => "unknown",
     }
 }
-#[must_use]
-pub fn is_executable_in_path(program: &str) -> bool {
+fn grok_managed_binary() -> Option<PathBuf> {
+    let home = match std::env::var_os("GROK_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => dirs::home_dir()?.join(".grok"),
+    };
+    let candidate = home.join("bin/grok");
+    candidate.is_file().then_some(candidate)
+}
+
+fn is_executable_in_path(program: &str) -> bool {
     if program.contains('/') || program.contains('\\') {
         return Path::new(program).is_file();
     }
@@ -552,6 +569,20 @@ mod tests {
             },
         )]);
         let error = validate_custom_agents(&custom).expect_err("built-in name collision");
+        assert!(error.to_string().contains("collides with a built-in"));
+    }
+
+    #[test]
+    fn grok_slug_collides_with_custom_agent_names() {
+        let custom = BTreeMap::from([(
+            "grok".to_owned(),
+            CustomAgentSettings {
+                executables: vec!["other".to_owned()],
+                command_contains: Vec::new(),
+                resume: Vec::new(),
+            },
+        )]);
+        let error = validate_custom_agents(&custom).expect_err("grok name collision");
         assert!(error.to_string().contains("collides with a built-in"));
     }
 }
