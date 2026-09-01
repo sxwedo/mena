@@ -11,6 +11,7 @@ mena ss --provider codex
 mena ss --provider cursor --limit 20
 mena ss --include-empty
 mena ss --json
+mena ss rename codex:019f... "Refactor session catalog"
 ```
 
 `--provider` accepts `claude`, `codex`, `cursor`, `gemini`, `goose`, `grok`,
@@ -20,6 +21,12 @@ sessions without messages are hidden unless `--include-empty` is present.
 
 A saved-session target is `provider:session-id`. An unqualified ID or prefix is
 accepted only when it resolves to one logical session.
+
+`mena ss rename` sets a mena-owned display title. Native session files are not
+modified. A whitespace-only title removes the overlay and restores the
+provider-native title. Overlay entries live in
+`~/.config/mena/session-titles.toml` (or `$XDG_CONFIG_HOME/mena/session-titles.toml`
+when that variable is set). Deleting a session also removes its overlay entry.
 
 ## Interactive browser
 
@@ -36,13 +43,14 @@ transcript up front.
 | `Space` | Toggle a delete mark on the selected row (the first mark opens multi-select) |
 | `a` | Mark or unmark every visible session (only while multi-select is open) |
 | `Enter` / `i` | Open the selected session |
+| `t` | Rename the selected session (Enter saves, Esc cancels) |
 | `r` | Resume with the provider's native CLI |
 | `R` | Hand off to another installed agent |
 | `d`, then lowercase `y` | Permanently delete the selected session, or every marked session |
 | `q` / `Esc` | Quit (`Esc` first clears marks when any exist) |
 
 With marks present the browser enters batch mode: the footer shows only the
-delete actions, single-session keys (`r`, `R`, `Enter`, `g`, `/`) explain that
+delete actions, single-session keys (`r`, `R`, `Enter`, `g`, `/`, `t`) explain that
 they are locked until `Esc` clears the marks, and the confirmation dialog lists
 up to five targets with imperative key guidance (`y` deletes, `n`/`Esc` keeps
 everything). Sessions protected by a running agent are skipped from the batch
@@ -65,6 +73,7 @@ Inside the detail view:
 | `/` | Search the transcript; `Enter` keeps, `Esc` cancels |
 | `n` / `N` | Jump to the next / previous match after a search |
 | `c` / `e` | Copy / export Markdown using the active preview scope |
+| `t` | Rename this session and return to the list |
 | `r` | Resume this session |
 | `R` | Hand off to another installed agent |
 | `Esc` / `q` | Return to the list |
@@ -122,7 +131,9 @@ provider did not persist one.
 }
 ```
 
-The command does not claim fields that are absent from the catalog record.
+`title` is the displayed title: a mena overlay when one exists, otherwise the
+provider-native title or first-message preview. The command does not claim
+fields that are absent from the catalog record.
 
 ## Safety and live-session association
 

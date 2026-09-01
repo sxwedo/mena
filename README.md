@@ -57,7 +57,7 @@ mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 |---|---|
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena ps` | List running coding-agent processes |
-| `mena sessions` / `mena ss` | Search, inspect, resume, continue with another agent, export, and delete sessions |
+| `mena sessions` / `mena ss` | Search, inspect, rename, resume, continue with another agent, export, and delete sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse grouped registrations; open/edit/delete config; explicitly probe metadata |
 | `mena memories` / `mena ms` | List, read, edit, and delete agent memory files |

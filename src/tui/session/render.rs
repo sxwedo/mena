@@ -36,6 +36,10 @@ pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, _tick:
 }
 
 fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
+    if app.mode == BrowserMode::Rename {
+        render_rename_header(frame, area, app);
+        return;
+    }
     let (state_color, state) = if app.mode == BrowserMode::Search {
         (UI.amber, "Filter")
     } else {
@@ -93,6 +97,24 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
                         } else {
                             Modifier::empty()
                         }),
+                ),
+            ],
+        )),
+        header_inner(area),
+    );
+}
+
+fn render_rename_header(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
+    render_header_frame(frame, area, " Sessions ");
+    frame.render_widget(
+        Paragraph::new(app_header(
+            "Sessions",
+            vec![
+                badge("Rename", UI.amber),
+                Span::styled("  Title: ", Style::default().fg(UI.muted)),
+                Span::styled(
+                    format!("{}▌", app.rename_draft),
+                    Style::default().fg(UI.amber).add_modifier(Modifier::BOLD),
                 ),
             ],
         )),
@@ -835,6 +857,13 @@ pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) ->
 /// in batch mode: only marking and deleting are offered, and every other
 /// action is locked until the marks are cleared with Esc.
 fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
+    if app.mode == BrowserMode::Rename {
+        return responsive_key_hints(
+            width,
+            &[("Enter", "save"), ("Esc", "cancel")],
+            &[("Enter", "save"), ("Esc", "cancel")],
+        );
+    }
     if app.marked_count() > 0 {
         return responsive_key_hints(
             width,
@@ -854,6 +883,7 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
             ("Space", "mark"),
             ("/", "filter"),
             ("Enter", "details"),
+            ("t", "rename"),
             ("r", "resume"),
             ("R", "handoff"),
             ("d", "delete"),

@@ -22,8 +22,8 @@ use crate::view::{
     render_process_table, render_session_table, render_skill_detail, render_skill_table,
 };
 use crate::{
-    AgentLaunchArgs, McpArgs, McpSubcommand, MemoriesArgs, MemorySubcommand, PsArgs, SessionsArgs,
-    SkillSubcommand, SkillsArgs,
+    AgentLaunchArgs, McpArgs, McpSubcommand, MemoriesArgs, MemorySubcommand, PsArgs,
+    SessionSubcommand, SessionsArgs, SkillSubcommand, SkillsArgs,
 };
 
 /// Execute `mena mcp` without contacting any configured server unless an
@@ -471,6 +471,12 @@ fn print_agent_launch_help(
 }
 
 pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
+    match &args.command {
+        Some(SessionSubcommand::Rename { target, title }) => {
+            return rename_session(args, settings, target, title);
+        }
+        None => {}
+    }
     let provider = args
         .provider
         .as_deref()
@@ -514,6 +520,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
                 }
                 catalog.delete_session(session)
             },
+            |session, title| catalog.set_title(session, title),
         )?;
         if let Some(action) = selected {
             match action {
@@ -527,6 +534,45 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         }
     } else {
         print!("{}", render_session_table(sessions));
+    }
+    Ok(())
+}
+
+fn rename_session(
+    args: &SessionsArgs,
+    settings: &Settings,
+    target: &str,
+    title: &str,
+) -> Result<()> {
+    if args.json {
+        bail!("--json cannot be used with `mena ss rename`");
+    }
+    let provider = args
+        .provider
+        .as_deref()
+        .map(|provider| {
+            AgentKind::from_slug(provider).with_context(|| {
+                format!(
+                    "unsupported session provider `{provider}`; use {}",
+                    session_provider_slugs().join(", ")
+                )
+            })
+        })
+        .transpose()?;
+    let catalog = scan_sessions(provider.as_ref(), args.include_empty)?;
+    let (selector_provider, id) = split_session_selector(target, &settings.agent.custom);
+    let session = catalog
+        .resolve(
+            provider.as_ref().map(AgentKind::slug).or(selector_provider),
+            id,
+        )?
+        .clone();
+    match catalog.set_title(&session, title)? {
+        Some(title) => ui::success(format!("renamed {} to {title}", session.target())),
+        None => ui::success(format!(
+            "restored the native title for {}",
+            session.target()
+        )),
     }
     Ok(())
 }

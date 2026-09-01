@@ -56,7 +56,7 @@ pub(crate) fn is_batch_locked_key(app: &SessionsApp, key: &KeyEvent) -> bool {
     app.marked_count() > 0
         && matches!(
             key.code,
-            KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/')
+            KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/' | 't')
         )
         && !key
             .modifiers
@@ -254,6 +254,37 @@ pub(crate) fn abort_message_search(app: &mut SessionsApp) {
     }
 }
 
+pub(crate) fn handle_rename_key(
+    app: &mut SessionsApp,
+    key: KeyEvent,
+    rename: &mut Option<RenameCallback<'_>>,
+) {
+    match key.code {
+        KeyCode::Esc => app.cancel_rename(),
+        KeyCode::Enter => {
+            let Some(rename) = rename.as_deref_mut() else {
+                app.status = Some(StatusMessage::error("Rename is unavailable".to_owned()));
+                app.cancel_rename();
+                return;
+            };
+            app.commit_rename(rename);
+        }
+        KeyCode::Backspace => {
+            app.status = None;
+            app.rename_draft.pop();
+        }
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.status = None;
+            app.rename_draft.push(character);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn handle_detail_key(
     app: &mut SessionsApp,
     key: KeyEvent,
@@ -265,6 +296,9 @@ pub(crate) fn handle_detail_key(
     }
     if key.code == KeyCode::Char('R') {
         return DetailAction::ContinueWith;
+    }
+    if key.code == KeyCode::Char('t') {
+        return DetailAction::Rename;
     }
     let scope = app.preview_scope;
     match key.code {

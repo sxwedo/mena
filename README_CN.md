@@ -56,7 +56,7 @@ mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 |---|---|
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
 | `mena ps` | 列出运行中的编码 Agent 进程 |
-| `mena sessions` / `mena ss` | 搜索、检查、恢复、换 Agent 继续、导出和删除 Session |
+| `mena sessions` / `mena ss` | 搜索、检查、重命名、恢复、换 Agent 继续、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
 | `mena mcp` | 分组浏览注册，打开/编辑/删除配置，并显式探测元数据 |
 | `mena memories` / `mena ms` | 列出、读取、编辑和删除 Agent 记忆文件 |

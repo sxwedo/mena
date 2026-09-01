@@ -194,7 +194,7 @@ fn session_layout_displays_titles_and_filters_by_them() {
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 100, 18);
     assert!(screen.contains("Fix terminal rendering"));
-    assert!(screen.contains("[d] delete"));
+    assert!(screen.contains("[t] rename"));
     assert!(screen.contains("[R] handoff"));
     assert!(screen.lines().all(|line| line.chars().count() == 100));
 }
@@ -1519,6 +1519,7 @@ fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
         .expect("draw unmarked sessions");
     let plain = buffer_text(terminal.backend().buffer(), 120, 24);
     assert!(plain.contains("[r] resume"));
+    assert!(plain.contains("[t] rename"));
     assert!(plain.contains("[Space] mark"));
     assert!(!plain.contains("[Space/a] mark"));
 
@@ -1537,6 +1538,10 @@ fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
     // Single-session keys lock with an explanation; marking keys stay free.
     let locked = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
     assert!(is_batch_locked_key(&app, &locked));
+    assert!(is_batch_locked_key(
+        &app,
+        &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)
+    ));
     assert!(!is_batch_locked_key(
         &app,
         &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)
@@ -1591,6 +1596,117 @@ fn confirmed_deletion_removes_all_duplicate_catalog_rows() {
     assert!(app.sessions.is_empty());
     assert!(app.filtered.is_empty());
     assert!(app.marked_targets.is_empty());
+}
+
+#[test]
+fn t_opens_rename_mode_with_the_current_title() {
+    let session = fixture_session();
+    let mut app = SessionsApp::new(vec![session], BTreeSet::default());
+    app.begin_rename();
+
+    assert_eq!(app.mode, BrowserMode::Rename);
+    assert_eq!(app.rename_draft, "Fix terminal rendering");
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw rename");
+    let screen = buffer_text(terminal.backend().buffer(), 100, 16);
+    assert!(screen.contains("Rename"));
+    assert!(screen.contains("Title:"));
+    assert!(screen.contains("Fix terminal rendering"));
+    assert!(screen.contains("[Enter] save"));
+    assert!(screen.contains("[Esc] cancel"));
+}
+
+#[test]
+fn rename_enter_saves_and_esc_cancels() {
+    let session = fixture_session();
+    let mut app = SessionsApp::new(vec![session], BTreeSet::default());
+    app.begin_rename();
+    app.rename_draft = "Custom name".to_owned();
+
+    let mut rename = |session: &AgentSession, title: &str| -> Result<Option<String>> {
+        assert_eq!(session.id, "session-id");
+        assert_eq!(title, "Custom name");
+        Ok(Some("Custom name".to_owned()))
+    };
+    let mut callback: Option<RenameCallback<'_>> = Some(&mut rename);
+    handle_rename_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut callback,
+    );
+
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert_eq!(app.sessions[0].title.as_deref(), Some("Custom name"));
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Renamed"))
+    );
+
+    app.begin_rename();
+    app.rename_draft = "discarded".to_owned();
+    handle_rename_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &mut callback,
+    );
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert_eq!(
+        app.sessions[0].title.as_deref(),
+        Some("Custom name"),
+        "cancel must keep the saved title"
+    );
+}
+
+#[test]
+fn empty_rename_restores_the_native_title() {
+    let session = fixture_session();
+    let mut app = SessionsApp::new(vec![session], BTreeSet::default());
+    app.begin_rename();
+    app.rename_draft.clear();
+
+    let mut rename = |_session: &AgentSession, title: &str| -> Result<Option<String>> {
+        assert!(title.is_empty());
+        Ok(Some("Fix terminal rendering".to_owned()))
+    };
+    let mut callback: Option<RenameCallback<'_>> = Some(&mut rename);
+    handle_rename_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut callback,
+    );
+
+    assert_eq!(app.mode, BrowserMode::Browse);
+    assert_eq!(
+        app.sessions[0].title.as_deref(),
+        Some("Fix terminal rendering")
+    );
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Restored native title"))
+    );
+}
+
+#[test]
+fn detail_t_requests_rename_for_the_selected_session() {
+    let session = fixture_session();
+    let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
+    app.open_detail(SessionDetail {
+        session,
+        messages: Vec::new(),
+    });
+
+    let action = handle_detail_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        None,
+        None,
+    );
+    assert_eq!(action, DetailAction::Rename);
 }
 
 fn fixture_session() -> AgentSession {

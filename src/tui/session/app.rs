@@ -18,6 +18,8 @@ pub(crate) type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<
 pub(crate) type ExportCallback<'a> =
     &'a mut dyn FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>;
 pub(crate) type CopyCallback<'a> = &'a mut dyn FnMut(&SessionDetail, DetailScope) -> Result<()>;
+pub(crate) type RenameCallback<'a> =
+    &'a mut dyn FnMut(&AgentSession, &str) -> Result<Option<String>>;
 
 #[derive(Default)]
 pub(crate) struct SessionBrowserCallbacks<'a> {
@@ -25,12 +27,15 @@ pub(crate) struct SessionBrowserCallbacks<'a> {
     pub(crate) export: Option<ExportCallback<'a>>,
     pub(crate) copy: Option<CopyCallback<'a>>,
     pub(crate) delete: Option<DeleteCallback<'a>>,
+    pub(crate) rename: Option<RenameCallback<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrowserMode {
     Browse,
     Search,
+    /// Edit the mena-owned display title for the selected session.
+    Rename,
     Detail,
     /// Incremental text search inside the detail popup (`/`), vim-style:
     /// `n`/`N` step through matches after Enter commits.
@@ -91,6 +96,7 @@ pub(crate) enum DetailAction {
     Continue,
     Resume,
     ContinueWith,
+    Rename,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +162,8 @@ pub(crate) struct SessionsApp {
     /// Active text search inside the detail popup, if any. Line numbers are
     /// invalidated (and the search dropped) whenever the layout rebuilds.
     pub(crate) detail_search: Option<DetailSearchState>,
+    /// Draft display title while `BrowserMode::Rename` is active.
+    pub(crate) rename_draft: String,
 }
 
 impl SessionsApp {
@@ -199,6 +207,7 @@ impl SessionsApp {
             marked_targets: BTreeSet::default(),
             confirm_delete_targets: Vec::new(),
             detail_search: None,
+            rename_draft: String::new(),
         };
         app.recompute_filter();
         app
@@ -654,6 +663,72 @@ impl SessionsApp {
         self.marked_targets.remove(&deleted.target());
         self.sessions
             .retain(|session| session.kind != deleted.kind || session.id != deleted.id);
+        self.recompute_filter();
+    }
+
+    /// Open rename mode for the selected session, prefilling the current title.
+    pub(crate) fn begin_rename(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        self.rename_draft = session.title.clone().unwrap_or_default();
+        self.status = None;
+        self.mode = BrowserMode::Rename;
+    }
+
+    pub(crate) fn cancel_rename(&mut self) {
+        self.rename_draft.clear();
+        self.mode = BrowserMode::Browse;
+    }
+
+    pub(crate) fn append_rename(&mut self, value: &str) {
+        self.rename_draft.push_str(value);
+    }
+
+    pub(crate) fn commit_rename(&mut self, rename: RenameCallback<'_>) {
+        let Some(session) = self.selected_session().cloned() else {
+            self.cancel_rename();
+            return;
+        };
+        match rename(&session, &self.rename_draft) {
+            Ok(title) => {
+                let restored = self.rename_draft.split_whitespace().next().is_none();
+                self.apply_title(&session.target(), title.clone());
+                self.rename_draft.clear();
+                self.mode = BrowserMode::Browse;
+                self.status = Some(StatusMessage::success(if restored {
+                    title.as_ref().map_or_else(
+                        || format!("Restored native title for {}", session.target()),
+                        |title| format!("Restored native title for {}: {title}", session.target()),
+                    )
+                } else {
+                    format!(
+                        "Renamed {} to {}",
+                        session.target(),
+                        title.as_deref().unwrap_or("(untitled)")
+                    )
+                }));
+            }
+            Err(error) => {
+                self.status = Some(StatusMessage::error(format!("Rename failed: {error:#}")));
+            }
+        }
+    }
+
+    pub(crate) fn apply_title(&mut self, target: &str, title: Option<String>) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.target() == target)
+        {
+            session.title.clone_from(&title);
+        }
+        if let Some(detail) = &mut self.detail
+            && detail.session.target() == target
+        {
+            detail.session.title = title;
+            self.detail_layout = None;
+        }
         self.recompute_filter();
     }
 }

@@ -133,6 +133,8 @@ pub struct PsArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionsArgs {
+    #[command(subcommand)]
+    pub command: Option<SessionSubcommand>,
     /// Filter by provider: claude, codex, cursor, gemini, goose, grok, opencode, pi, or omp
     #[arg(long)]
     pub provider: Option<String>,
@@ -145,6 +147,17 @@ pub struct SessionsArgs {
     /// Include messageless empty draft sessions
     #[arg(long)]
     pub include_empty: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum SessionSubcommand {
+    /// Set a mena-owned display title for one saved session
+    Rename {
+        /// Saved-session target (`provider:session-id`)
+        target: String,
+        /// New title; whitespace-only restores the provider-native title
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, Args)]

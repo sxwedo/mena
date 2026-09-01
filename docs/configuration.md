@@ -11,6 +11,11 @@ mena config init
 
 On Unix, the file is created with mode `0600` and is never overwritten.
 
+Session display titles set with `t` or `mena ss rename` are stored separately
+in `session-titles.toml` in the same directory. That file is mena-owned
+metadata; native provider session files are not rewritten. An empty overlay is
+removed. On Unix, a newly created overlay has mode `0600`.
+
 ## Custom agents
 
 ```toml

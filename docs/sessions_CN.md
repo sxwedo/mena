@@ -11,6 +11,7 @@ mena ss --provider codex
 mena ss --provider cursor --limit 20
 mena ss --include-empty
 mena ss --json
+mena ss rename codex:019f... "重构 Session catalog"
 ```
 
 `--provider` 支持 `claude`、`codex`、`cursor`、`gemini`、`goose`、`grok`、
@@ -20,6 +21,12 @@ mena ss --json
 
 已保存 Session 的 Target 格式是 `provider:session-id`。只有在结果唯一时，才允许
 省略 Provider 或使用 ID 前缀。
+
+`mena ss rename` 设置 mena 自己保存的显示标题，不会改写 Provider 的 Session 文件。
+只含空白的标题会去掉 overlay，恢复 Provider 原生标题。overlay 写在
+`~/.config/mena/session-titles.toml`（若设置了 `XDG_CONFIG_HOME`，则为
+`$XDG_CONFIG_HOME/mena/session-titles.toml`）。删除 Session 时会一并清掉对应
+overlay 条目。
 
 ## 交互式浏览器
 
@@ -35,12 +42,13 @@ mena ss --json
 | `Space` | 切换当前行的删除标记（首个标记开启多选） |
 | `a` | 标记或取消标记全部可见 Session（仅在多选开启后可用） |
 | `Enter` / `i` | 打开选中的 Session |
+| `t` | 重命名选中的 Session（Enter 保存，Esc 取消） |
 | `r` | 使用 Provider 原生 CLI 恢复 |
 | `R` | 交接（handoff）给另一个已安装的 Agent |
 | `d`，再输入小写 `y` | 永久删除选中的 Session，或所有已标记的 Session |
 | `q` / `Esc` | 退出（存在标记时 `Esc` 先清空标记） |
 
-存在标记时浏览器进入批量模式：底部只显示删除相关按键，单会话按键（`r`、`R`、`Enter`、`g`、`/`）会被锁定并提示先按 `Esc` 清空标记；确认弹窗会列出最多 5 个 Target 并给出明确的按键指引（`y` 删除、`n`/`Esc` 全部保留）。受运行中 Agent 保护的 Session 会被跳过并提示，而不是阻断整批删除。
+存在标记时浏览器进入批量模式：底部只显示删除相关按键，单会话按键（`r`、`R`、`Enter`、`g`、`/`、`t`）会被锁定并提示先按 `Esc` 清空标记；确认弹窗会列出最多 5 个 Target 并给出明确的按键指引（`y` 删除、`n`/`Esc` 全部保留）。受运行中 Agent 保护的 Session 会被跳过并提示，而不是阻断整批删除。
 
 列表使用紧凑 Target（`provider:ID 前 8 位`）以留出标题空间；详情视图、删除确认、导出、剪贴板内容与 `--json` 输出始终携带完整的 `provider:session-id`。按项目分组时，每个分组头会以整行宽度显示完整项目路径。
 
@@ -55,6 +63,7 @@ mena ss --json
 | `/` | 在对话中搜索；`Enter` 保留、`Esc` 取消 |
 | `n` / `N` | 搜索后跳转到下一个 / 上一个匹配 |
 | `c` / `e` | 按当前预览范围复制 / 导出 Markdown |
+| `t` | 重命名当前 Session 并返回列表 |
 | `r` | 恢复当前 Session |
 | `R` | 交接（handoff）给另一个已安装的 Agent |
 | `Esc` / `q` | 返回列表 |
@@ -107,7 +116,8 @@ Tool 结果、进程、权限、hook 和未提交工作区状态都必须重新�
 }
 ```
 
-目录记录中不存在的字段不会被虚构出来。
+`title` 是展示用标题：若有 mena overlay 则用 overlay，否则用 Provider 原生标题
+或首条消息预览。目录记录中不存在的字段不会被虚构出来。
 
 ## 安全与运行中 Session 关联
 

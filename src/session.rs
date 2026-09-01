@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::process::{AgentKind, LiveAgent};
 
 mod adapter;
+mod titles;
 
 pub use adapter::NativeResumeCommand;
 
@@ -377,7 +378,9 @@ pub fn session_provider_slugs() -> Vec<String> {
 #[derive(Debug, Default)]
 pub struct SessionCatalog {
     home: PathBuf,
+    overlay_path: PathBuf,
     sessions: Vec<AgentSession>,
+    native_titles: BTreeMap<String, Option<String>>,
 }
 
 impl SessionCatalog {
@@ -388,11 +391,16 @@ impl SessionCatalog {
 
     /// Scan provider-owned session storage, optionally keeping messageless
     /// empty draft sessions that discovery hides by default.
+    ///
+    /// After discovery, mena-owned display-title overlays replace native
+    /// titles for matching `provider:session-id` keys. Overlay files live
+    /// under the mena config directory for the current user home.
     pub fn scan_provider(
         home: &Path,
         provider: Option<&AgentKind>,
         include_empty: bool,
     ) -> Result<Self> {
+        let overlay_path = titles::path_for(home);
         let mut sessions = Vec::new();
         for adapter in adapter::ProviderAdapter::SESSION_CATALOG {
             if provider.is_none_or(|kind| adapter.matches(kind)) {
@@ -406,10 +414,17 @@ impl SessionCatalog {
                 .then_with(|| left.kind.cmp(&right.kind))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let sessions = Self::dedupe_logical_sessions(sessions);
+        let mut sessions = Self::dedupe_logical_sessions(sessions);
+        let native_titles = sessions
+            .iter()
+            .map(|session| (session.target(), session.title.clone()))
+            .collect();
+        titles::apply(&mut sessions, &titles::load(&overlay_path)?);
         Ok(Self {
             home: home.to_path_buf(),
+            overlay_path,
             sessions,
+            native_titles,
         })
     }
 
@@ -551,7 +566,37 @@ impl SessionCatalog {
             .collect();
         let adapter = adapter::ProviderAdapter::from_kind(&selected.kind)
             .with_context(|| format!("{} sessions do not support local deletion", selected.kind))?;
-        adapter.delete(&self.home, selected, files)
+        let target = selected.target();
+        let summary = adapter.delete(&self.home, selected, files)?;
+        titles::put(&self.overlay_path, &target, None).with_context(|| {
+            format!(
+                "deleted native session files but failed to clear the title overlay for {target}"
+            )
+        })?;
+        Ok(summary)
+    }
+
+    /// Set a mena-owned display title for one cataloged session.
+    ///
+    /// Whitespace-only titles remove the overlay and restore the
+    /// provider-native title. Native session files are not modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is not in the current catalog, the
+    /// title exceeds the length limit, or the overlay file cannot be written.
+    pub fn set_title(&self, selected: &AgentSession, title: &str) -> Result<Option<String>> {
+        if !self.sessions.iter().any(|session| {
+            session.kind == selected.kind
+                && session.id == selected.id
+                && session.path == selected.path
+        }) {
+            bail!("refusing to rename a session that is not in the current catalog");
+        }
+        let normalized = titles::normalize(title)?;
+        let target = selected.target();
+        titles::put(&self.overlay_path, &target, normalized.clone())?;
+        Ok(normalized.or_else(|| self.native_titles.get(&target).cloned().flatten()))
     }
 }
 
@@ -3188,5 +3233,119 @@ mod tests {
                 .iter()
                 .any(|s| s.id == empty_id && s.title.is_none())
         );
+    }
+
+    #[test]
+    fn overlay_title_wins_over_native_and_clears_back() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        write(
+            &home.join(".local/share/opencode/storage/session/project/opencode.json"),
+            r#"{"id":"opencode-id","directory":"/work/opencode","title":"Fix OpenCode rendering","time":{"created":1760000000000,"updated":1760000001000}}"#,
+        );
+
+        let catalog = SessionCatalog::scan(home).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("opencode"), "opencode-id")
+            .expect("session")
+            .clone();
+        assert_eq!(session.title.as_deref(), Some("Fix OpenCode rendering"));
+
+        let renamed = catalog
+            .set_title(&session, "  Custom   name  ")
+            .expect("rename session");
+        assert_eq!(renamed.as_deref(), Some("Custom name"));
+
+        let catalog = SessionCatalog::scan(home).expect("rescan overlay");
+        let session = catalog
+            .resolve(Some("opencode"), "opencode-id")
+            .expect("session")
+            .clone();
+        assert_eq!(session.title.as_deref(), Some("Custom name"));
+
+        let restored = catalog.set_title(&session, "   ").expect("clear overlay");
+        assert_eq!(restored.as_deref(), Some("Fix OpenCode rendering"));
+
+        let catalog = SessionCatalog::scan(home).expect("rescan native");
+        let session = catalog
+            .resolve(Some("opencode"), "opencode-id")
+            .expect("session");
+        assert_eq!(session.title.as_deref(), Some("Fix OpenCode rendering"));
+        assert!(
+            !home.join(".config/mena/session-titles.toml").exists(),
+            "empty overlay file should be removed"
+        );
+    }
+
+    #[test]
+    fn overlay_is_removed_when_the_session_is_deleted() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        let session_path =
+            home.join(".local/share/opencode/storage/session/project/opencode-delete.json");
+        write(
+            &session_path,
+            r#"{"id":"opencode-delete","directory":"/work/opencode","title":"Delete me","time":{"created":1760000000000,"updated":1760000001000}}"#,
+        );
+        write(
+            &home.join(".local/share/opencode/storage/message/opencode-delete/message-delete.json"),
+            r#"{"id":"message-delete","role":"assistant"}"#,
+        );
+
+        let catalog = SessionCatalog::scan(home).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("opencode"), "opencode-delete")
+            .expect("session")
+            .clone();
+        catalog
+            .set_title(&session, "Keep this overlay")
+            .expect("rename before delete");
+        assert!(home.join(".config/mena/session-titles.toml").exists());
+
+        catalog.delete_session(&session).expect("delete session");
+        assert!(
+            !home.join(".config/mena/session-titles.toml").exists(),
+            "deleting a session must drop its overlay title"
+        );
+    }
+
+    #[test]
+    fn set_title_rejects_sessions_outside_the_catalog() {
+        let temp = tempdir().expect("temp home");
+        let catalog = SessionCatalog::scan(temp.path()).expect("empty catalog");
+        let stray = AgentSession {
+            kind: AgentKind::OpenCode,
+            id: "missing".to_owned(),
+            title: None,
+            project: None,
+            path: temp.path().join("missing.json"),
+            related_paths: BTreeSet::new(),
+            started_at: None,
+            updated_at: 0,
+            tokens: None,
+            cost_usd: None,
+        };
+        let error = catalog
+            .set_title(&stray, "Nope")
+            .expect_err("missing session");
+        assert!(format!("{error:#}").contains("not in the current catalog"));
+    }
+
+    #[test]
+    fn set_title_rejects_overlong_titles() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        write(
+            &home.join(".local/share/opencode/storage/session/project/opencode.json"),
+            r#"{"id":"opencode-id","directory":"/work/opencode","title":"Native","time":{"created":1,"updated":2}}"#,
+        );
+        let catalog = SessionCatalog::scan(home).expect("scan sessions");
+        let session = catalog
+            .resolve(Some("opencode"), "opencode-id")
+            .expect("session");
+        let error = catalog
+            .set_title(session, &"a".repeat(121))
+            .expect_err("overlong title");
+        assert!(format!("{error:#}").contains("at most 120 characters"));
     }
 }

@@ -11,6 +11,10 @@ mena config init
 
 Unix 下文件权限为 `0600`，已有文件绝不覆盖。
 
+用 `t` 或 `mena ss rename` 设置的 Session 显示标题另外写在同一目录下的
+`session-titles.toml`。这是 mena 自己的元数据，不会改写 Provider 的 Session
+文件。overlay 清空后文件会被删除。Unix 下新建 overlay 的权限为 `0600`。
+
 ## 自定义 Agent
 
 ```toml

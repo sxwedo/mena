@@ -14,6 +14,7 @@ mena agent [provider] [--fresh] [--resume] [--session <id>]
 mena ag [provider]
 mena ps [--json] [--verbose]
 mena sessions
+mena ss rename <target> <title>
 mena skills [--provider <name>] [--scope <scope>]
 mena skills inspect <name>
 mena mcp [--provider <client>] [--scope <scope>] [--source <path>] [--json]
@@ -51,9 +52,10 @@ main.rs
       ├── controller.rs
       ├── process.rs
       ├── session.rs
-      │   └── session/adapter.rs
-      │       ├── detail.rs
-      │       └── storage.rs
+      │   ├── session/adapter.rs
+      │   │   ├── detail.rs
+      │   │   └── storage.rs
+      │   └── session/titles.rs
       ├── skill.rs
       │   └── skill/adapter.rs
       │       ├── detail.rs
@@ -82,8 +84,8 @@ main.rs
 - `process.rs` recognizes built-in and configured custom processes and obtains
   provider-native evidence needed for safe session protection.
 - `session.rs` owns the provider-neutral session model, catalog, selectors,
-  evidence-based live association, bounded I/O, and provider-independent
-  deletion safeguards.
+  evidence-based live association, bounded I/O, provider-independent
+  deletion safeguards, and mena-owned display-title overlays.
 - `session/adapter.rs` is the single seam for built-in session providers. It
   uses closed-enum static dispatch so discovery, detail, resume, association,
   and deletion capabilities remain exhaustive without a vtable or runtime
@@ -124,6 +126,8 @@ main.rs
   catalog when association is unconfirmed or ambiguous.
 - Keep transcript and Skill reads bounded. Skill preview paths must remain
   within the selected canonical Skill root.
+- Session display titles are mena-owned overlays; never rewrite provider
+  transcripts to change a title.
 - Never delete a session attached to a running process.
 - Validate session IDs and canonical paths before deletion. Traversal and
   symlink escapes outside provider-owned roots must fail closed.

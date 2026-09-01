@@ -18,6 +18,7 @@ pub(crate) use self::app::*;
 pub(crate) use self::event::*;
 pub(crate) use self::render::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn manage_sessions(
     sessions: Vec<AgentSession>,
     protection: SessionProtection,
@@ -26,6 +27,7 @@ pub(crate) fn manage_sessions(
     mut export: impl FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>,
     mut copy: impl FnMut(&SessionDetail, DetailScope) -> Result<()>,
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
+    mut rename: impl FnMut(&AgentSession, &str) -> Result<Option<String>>,
 ) -> Result<Option<SessionBrowserResult>> {
     run_session_browser(
         sessions,
@@ -37,6 +39,7 @@ pub(crate) fn manage_sessions(
             export: Some(&mut export),
             copy: Some(&mut copy),
             delete: Some(&mut delete),
+            rename: Some(&mut rename),
         },
     )
 }
@@ -121,6 +124,11 @@ fn run_session_browser(
                         .cloned()
                         .map(SessionBrowserResult::ContinueWith));
                 }
+                if action == DetailAction::Rename {
+                    app.close_detail();
+                    app.begin_rename();
+                    break;
+                }
                 if app.mode != BrowserMode::Detail {
                     break;
                 }
@@ -144,6 +152,10 @@ fn run_session_browser(
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
                     handle_confirm_delete_key(&mut app, key, &mut callbacks.delete);
+                    continue;
+                }
+                if app.mode == BrowserMode::Rename {
+                    handle_rename_key(&mut app, key, &mut callbacks.rename);
                     continue;
                 }
                 app.status = None;
@@ -173,7 +185,7 @@ fn run_session_browser(
                     KeyCode::Char('a') => app.toggle_mark_all(),
                     // Batch mode: marks define a delete set, so single-session
                     // actions lock until the marks are cleared with Esc.
-                    KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/')
+                    KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/' | 't')
                         if is_batch_locked_key(&app, &key) =>
                     {
                         app.status = Some(StatusMessage::error(
@@ -205,10 +217,12 @@ fn run_session_browser(
                     KeyCode::Char('d') => {
                         app.request_delete();
                     }
+                    KeyCode::Char('t') => app.begin_rename(),
                     _ => {}
                 }
             }
             Event::Paste(value) if app.mode == BrowserMode::Search => app.append_search(&value),
+            Event::Paste(value) if app.mode == BrowserMode::Rename => app.append_rename(&value),
             Event::Mouse(mouse) if app.mode == BrowserMode::Browse => {
                 handle_session_mouse(&mut app, mouse.kind);
             }
