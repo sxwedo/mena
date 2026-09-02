@@ -41,7 +41,6 @@ transcript up front.
 | `Enter` while searching | Run a cancellable full-transcript search |
 | `g` | Toggle flat or project-grouped rows |
 | `Space` | Toggle a delete mark on the selected row (the first mark opens multi-select) |
-| `a` | Mark or unmark every visible session (only while multi-select is open) |
 | `Enter` / `i` | Open the selected session |
 | `t` | Rename the selected session (Enter saves, Esc cancels) |
 | `r` | Resume with the provider's native CLI |

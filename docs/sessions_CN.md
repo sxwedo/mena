@@ -40,7 +40,6 @@ overlay 条目。
 | 搜索时按 `Enter` | 启动可取消的全文对话搜索 |
 | `g` | 切换平铺或按项目分组 |
 | `Space` | 切换当前行的删除标记（首个标记开启多选） |
-| `a` | 标记或取消标记全部可见 Session（仅在多选开启后可用） |
 | `Enter` / `i` | 打开选中的 Session |
 | `t` | 重命名选中的 Session（Enter 保存，Esc 取消） |
 | `r` | 使用 Provider 原生 CLI 恢复 |

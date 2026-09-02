@@ -851,11 +851,10 @@ pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) ->
     )
 }
 
-/// Footer hints for the session browser. `Space` alone opens multi-select;
-/// `a` (select all) joins the hints only once a mark exists, because it
-/// extends a batch rather than starting one. With marks present the browser is
-/// in batch mode: only marking and deleting are offered, and every other
-/// action is locked until the marks are cleared with Esc.
+/// Footer hints for the session browser. `Space` toggles multi-select marks;
+/// with marks present the browser is in batch mode: only marking and deleting
+/// are offered, and every other action is locked until the marks are cleared
+/// with Esc.
 fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
     if app.mode == BrowserMode::Rename {
         return responsive_key_hints(
@@ -870,7 +869,6 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
             &[
                 ("d", "delete marked"),
                 ("Space", "mark"),
-                ("a", "all"),
                 ("Esc", "clear"),
                 ("q", "quit"),
             ],

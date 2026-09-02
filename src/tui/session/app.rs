@@ -574,35 +574,6 @@ impl SessionsApp {
         }
     }
 
-    /// Toggle the mark on every visible session (`a`). Select-all only extends
-    /// a batch Space has started: without any mark multi-select is not open
-    /// yet, so nothing is marked and a status explains how to begin.
-    pub(crate) fn toggle_mark_all(&mut self) {
-        if self.marked_count() == 0 {
-            self.status = Some(StatusMessage::error(
-                "Press Space on a session to start multi-select first".to_owned(),
-            ));
-            return;
-        }
-        self.toggle_mark_visible();
-    }
-
-    /// Mark every visible session, or clear the visible marks when all of
-    /// them already carry one. Marks on hidden rows are untouched.
-    pub(crate) fn toggle_mark_visible(&mut self) {
-        let visible: BTreeSet<String> = self
-            .filtered
-            .iter()
-            .map(|&index| self.sessions[index].target())
-            .collect();
-        if visible.is_subset(&self.marked_targets) {
-            self.marked_targets
-                .retain(|target| !visible.contains(target));
-        } else {
-            self.marked_targets.extend(visible);
-        }
-    }
-
     /// Sessions in catalog order whose targets carry a delete mark.
     pub(crate) fn marked_sessions(&self) -> Vec<AgentSession> {
         self.sessions

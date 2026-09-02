@@ -1327,61 +1327,6 @@ fn space_marks_survive_filtering_and_drive_batch_confirmation() {
 }
 
 #[test]
-fn a_toggles_marks_for_every_visible_session() {
-    let sessions = vec![
-        transcript_session("alpha", "First", "/tmp/alpha.jsonl"),
-        transcript_session("beta", "Second", "/tmp/beta.jsonl"),
-        transcript_session("gamma", "Third", "/tmp/gamma.jsonl"),
-    ];
-    let mut app = SessionsApp::new(sessions, BTreeSet::default());
-
-    app.toggle_mark_visible();
-    assert_eq!(app.marked_count(), 3);
-
-    // Marking again clears every visible mark.
-    app.toggle_mark_visible();
-    assert_eq!(app.marked_count(), 0);
-
-    // Marks hidden by a filter stay marked; `a` then only clears the visible.
-    app.first();
-    app.toggle_mark();
-    app.append_search("First");
-    app.toggle_mark_visible();
-    assert_eq!(app.marked_count(), 0);
-    app.query.clear();
-    app.recompute_filter();
-    app.toggle_mark_visible();
-    assert_eq!(app.marked_count(), 3);
-}
-
-#[test]
-fn a_only_selects_all_once_space_started_multi_select() {
-    let sessions = vec![
-        transcript_session("alpha", "First", "/tmp/alpha.jsonl"),
-        transcript_session("beta", "Second", "/tmp/beta.jsonl"),
-    ];
-    let mut app = SessionsApp::new(sessions, BTreeSet::default());
-
-    // Without marks, `a` explains how to start multi-select instead of
-    // marking everything in one keystroke.
-    app.toggle_mark_all();
-    assert_eq!(app.marked_count(), 0);
-    assert!(
-        app.status
-            .as_ref()
-            .is_some_and(|status| status.is_error && status.text.contains("Space"))
-    );
-
-    // After Space marks a row, `a` selects every visible session.
-    app.first();
-    app.toggle_mark();
-    app.status = None;
-    app.toggle_mark_all();
-    assert_eq!(app.marked_count(), 2);
-    assert!(app.status.is_none());
-}
-
-#[test]
 fn confirmed_batch_deletion_reports_aggregate_summary() {
     let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
     let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
@@ -1550,9 +1495,8 @@ fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
         &app,
         &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
     ));
-    // Without marks the same keys act normally (a clears every visible mark).
-    app.toggle_mark_visible();
-    app.toggle_mark_visible();
+    // Without marks the same keys act normally.
+    app.marked_targets.clear();
     assert_eq!(app.marked_count(), 0);
     assert!(!is_batch_locked_key(&app, &locked));
 }

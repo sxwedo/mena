@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::thread;
 
 use anyhow::{Result, bail};
@@ -193,96 +191,160 @@ fn open_file_paths_platform(pid: u32) -> Vec<PathBuf> {
         .collect()
 }
 
+/// libproc declarations used to read a process's fd table directly.
+///
+/// `lsof` was replaced by these calls because it can stall for half a minute
+/// (0% CPU, blocking kernel queries) on processes holding certain sockets,
+/// which froze session protection. `proc_pidinfo` and `proc_pidfdinfo` are
+/// plain syscalls with no network resolution — the same calls lsof itself
+/// uses — and return immediately.
+#[cfg(target_os = "macos")]
+mod fd_paths {
+    use std::mem::size_of;
+    use std::path::PathBuf;
+
+    /// `struct proc_fdlistfd` from `<sys/proc_info.h>`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ProcFdListFd {
+        fd: i32,
+        fd_type: u8,
+    }
+
+    const _: () = assert!(size_of::<ProcFdListFd>() == 8);
+
+    /// `struct vnode_fdinfowithpath`, the flavor
+    /// `PROC_PIDFDVNODEPATHINFO` writes. Only the trailing NUL-terminated
+    /// path is read; the leading `struct proc_fileinfo` (24 bytes) plus
+    /// `struct vnode_info` (152 bytes) are kept as opaque padding.
+    #[repr(C, align(8))]
+    struct VnodeFdInfoWithPath {
+        prefix: [u8; 176],
+        path: [u8; 1024],
+    }
+
+    const _: () = assert!(size_of::<VnodeFdInfoWithPath>() == 1200);
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        /// Public libproc call; the `PROC_PIDLISTFDS` flavor lists the fd
+        /// table. Returns the number of bytes written, or the number needed
+        /// when the buffer is too small; negative on error (e.g. no such
+        /// process).
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, buffersize: i32) -> i32;
+        /// Returns the number of bytes written for one descriptor.
+        fn proc_pidfdinfo(pid: i32, fd: i32, flavor: i32, buffer: *mut u8, buffersize: i32) -> i32;
+    }
+
+    const PROX_FDTYPE_VNODE: u8 = 1;
+    const PROC_PIDLISTFDS: i32 = 1;
+    const PROC_PIDFDVNODEPATHINFO: i32 = 2;
+    /// Initial fd-table capacity; the call reports the needed size beyond it.
+    const LISTING_ENTRIES: usize = 512;
+    /// Defensive ceiling; dropping entries past it only yields less
+    /// evidence, which callers treat fail-closed.
+    const MAX_LISTED_FDS: usize = 50_000;
+
+    pub(super) fn open_paths(pid: u32) -> Vec<PathBuf> {
+        let Ok(pid) = i32::try_from(pid) else {
+            return Vec::new();
+        };
+        let Ok(listing_len) = i32::try_from(LISTING_ENTRIES * size_of::<ProcFdListFd>()) else {
+            return Vec::new();
+        };
+        let mut listing = vec![ProcFdListFd { fd: 0, fd_type: 0 }; LISTING_ENTRIES];
+        // SAFETY: `listing` is valid for writes of `listing_len` bytes, the
+        // exact length passed to the call.
+        let bytes = unsafe {
+            proc_pidinfo(
+                pid,
+                PROC_PIDLISTFDS,
+                0,
+                listing.as_mut_ptr().cast(),
+                listing_len,
+            )
+        };
+        if bytes <= 0 {
+            return Vec::new();
+        }
+        let Ok(written) = usize::try_from(bytes) else {
+            return Vec::new();
+        };
+        let listed = if written > listing.len() {
+            // The call reports the required size when the buffer is short.
+            let needed = written / size_of::<ProcFdListFd>();
+            listing.resize(needed, ProcFdListFd { fd: 0, fd_type: 0 });
+            let Ok(grown_len) = i32::try_from(listing.len() * size_of::<ProcFdListFd>()) else {
+                return Vec::new();
+            };
+            // SAFETY: `listing` was just resized to cover `grown_len` bytes.
+            unsafe {
+                proc_pidinfo(
+                    pid,
+                    PROC_PIDLISTFDS,
+                    0,
+                    listing.as_mut_ptr().cast(),
+                    grown_len,
+                )
+            }
+        } else {
+            bytes
+        };
+        if listed <= 0 {
+            return Vec::new();
+        }
+        let Ok(available) = usize::try_from(listed) else {
+            return Vec::new();
+        };
+        let count = (available / size_of::<ProcFdListFd>()).min(MAX_LISTED_FDS);
+
+        let Ok(info_size) = i32::try_from(size_of::<VnodeFdInfoWithPath>()) else {
+            return Vec::new();
+        };
+        let mut info = VnodeFdInfoWithPath {
+            prefix: [0; 176],
+            path: [0; 1024],
+        };
+        let mut paths = Vec::new();
+        for entry in &listing[..count] {
+            if entry.fd_type != PROX_FDTYPE_VNODE {
+                continue;
+            }
+            // SAFETY: `info` is a `vnode_fdinfowithpath` buffer of exactly
+            // `info_size` bytes, the flavor's documented size.
+            let written = unsafe {
+                proc_pidfdinfo(
+                    pid,
+                    entry.fd,
+                    PROC_PIDFDVNODEPATHINFO,
+                    (&raw mut info).cast(),
+                    info_size,
+                )
+            };
+            if written != info_size {
+                // Descriptor closed or layout mismatch: no evidence for it.
+                continue;
+            }
+            let Some(end) = info.path.iter().position(|byte| *byte == 0) else {
+                continue;
+            };
+            if end == 0 {
+                continue;
+            }
+            if let Ok(text) = std::str::from_utf8(&info.path[..end])
+                && let path = PathBuf::from(text)
+                && path.is_absolute()
+            {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn open_file_paths_platform(pid: u32) -> Vec<PathBuf> {
-    use std::io::Read;
-    use std::process::Stdio;
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-
-    const MAX_LSOF_OUTPUT_BYTES: usize = 16 * 1_024 * 1_024;
-    // lsof can stall for half a minute on a process holding sockets that
-    // trigger blocking kernel queries (observed ~30s at 0% CPU). Evidence
-    // collection must stay bounded: past the deadline the process yields no
-    // evidence, and callers already treat missing evidence as "no exact
-    // association", which keeps deletion protection fail-closed. A healthy
-    // lsof finishes in tens of milliseconds, so half a second leaves ample
-    // headroom while keeping interactive startup under a second even when a
-    // stalled process burns the whole budget.
-    const LSOF_DEADLINE: Duration = Duration::from_millis(500);
-    const READER_GRACE: Duration = Duration::from_secs(1);
-
-    let Ok(mut child) = Command::new("/usr/sbin/lsof")
-        .args(["-Fn", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return Vec::new();
-    };
-    let stdout = child.stdout.take();
-    // Drain stdout on a side thread so a stalled lsof that never writes
-    // cannot deadlock the caller on a full pipe; the cap keeps runaway
-    // output bounded.
-    let collected: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let reader_slot = Arc::clone(&collected);
-    let reader = thread::spawn(move || {
-        let Some(mut stdout) = stdout else {
-            return;
-        };
-        let mut chunk = [0_u8; 16 * 1_024];
-        loop {
-            match stdout.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => {
-                    let mut buffer = reader_slot.lock().expect("lsof reader lock");
-                    if buffer.len() > MAX_LSOF_OUTPUT_BYTES {
-                        break;
-                    }
-                    buffer.extend_from_slice(&chunk[..read]);
-                }
-                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-    });
-    let deadline = Instant::now() + LSOF_DEADLINE;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Vec::new();
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Vec::new();
-            }
-        }
-    };
-    // The child exited; its stdout closes once lsof's own helper children
-    // are reaped, so wait briefly before taking the output.
-    let grace_deadline = Instant::now() + READER_GRACE;
-    while !reader.is_finished() && Instant::now() < grace_deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    let output = collected.lock().expect("lsof output lock").clone();
-    if !status.success() || output.len() > MAX_LSOF_OUTPUT_BYTES {
-        return Vec::new();
-    }
-    output
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| line.strip_prefix(b"n"))
-        .filter_map(|line| std::str::from_utf8(line).ok())
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .collect()
+    fd_paths::open_paths(pid)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -627,9 +689,20 @@ mod tests {
     fn open_file_paths_reports_absolute_paths_and_skips_missing_processes() {
         use super::open_file_paths;
 
-        // The test binary itself holds open files, all reported absolutely.
+        // A file this test holds open must be reported (absolute), proving
+        // the fd scan actually resolves vnode paths. The kernel reports the
+        // canonical path (`/private/var` on macOS), so compare canonically.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let held = temp.path().join("held-open.txt");
+        std::fs::write(&held, "held").expect("write held file");
+        let _file = std::fs::File::open(&held).expect("hold file open");
+        let expected = held.canonicalize().expect("canonicalize held file");
         let paths = open_file_paths(std::process::id());
         assert!(paths.iter().all(|path| path.is_absolute()));
+        assert!(
+            paths.contains(&expected),
+            "held file must appear in {paths:?}"
+        );
 
         // A process that cannot exist yields no evidence instead of hanging.
         assert!(open_file_paths(u32::MAX - 1).is_empty());
