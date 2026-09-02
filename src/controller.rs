@@ -471,6 +471,12 @@ fn print_agent_launch_help(
 }
 
 pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
+    // Deletion re-checks live-session protection before each removal, but
+    // a confirmed batch issues those checks back-to-back. Sharing one
+    // snapshot within a short window keeps a batch from re-running
+    // process discovery per session while still refreshing between
+    // separate user actions.
+    const PROTECTION_SNAPSHOT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
     match &args.command {
         Some(SessionSubcommand::Rename { target, title }) => {
             return rename_session(args, settings, target, title);
@@ -504,6 +510,9 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         let export_directory =
             std::env::current_dir().context("failed to resolve the session export directory")?;
         let mut clipboard = crate::clipboard::SessionClipboard::default();
+        let protection_cache = std::cell::RefCell::new(
+            None::<(std::time::Instant, crate::session::SessionProtection)>,
+        );
         let selected = tui::manage_sessions(
             sessions.to_vec(),
             protection,
@@ -512,10 +521,25 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             |detail, scope| crate::export::export_session_detail(detail, &export_directory, scope),
             |detail, scope| clipboard.copy_detail(detail, scope),
             |session| {
-                if session_protection(&catalog, settings)?
-                    .protected_targets
-                    .contains(&session.target())
-                {
+                let protected = {
+                    let mut cache = protection_cache.borrow_mut();
+                    let fresh = cache.as_ref().is_some_and(|(taken_at, _)| {
+                        taken_at.elapsed() < PROTECTION_SNAPSHOT_WINDOW
+                    });
+                    if !fresh {
+                        *cache = Some((
+                            std::time::Instant::now(),
+                            session_protection(&catalog, settings)?,
+                        ));
+                    }
+                    cache
+                        .as_ref()
+                        .expect("protection snapshot was just stored")
+                        .1
+                        .protected_targets
+                        .contains(&session.target())
+                };
+                if protected {
                     bail!("cannot delete a session that may be attached to a running agent");
                 }
                 catalog.delete_session(session)

@@ -948,14 +948,21 @@ fn read_json_file(path: &Path) -> Result<Option<Value>> {
     Ok(serde_json::from_slice(&bytes).ok())
 }
 
-fn visit_bounded_lines(path: &Path, visitor: impl FnMut(&[u8])) -> Result<bool> {
-    visit_bounded_lines_limit(path, None, visitor)
+fn visit_bounded_lines(path: &Path, mut visitor: impl FnMut(&[u8])) -> Result<bool> {
+    visit_bounded_lines_limit(path, None, |line| {
+        visitor(line);
+        true
+    })
 }
 
+/// Visit at most `limit` complete lines (`None` for the whole file), with
+/// oversized records skipped instead of buffered. The visitor returns `false`
+/// to stop early once it has every field it needs, so discovery never parses
+/// the bulk of a transcript. Returns whether any record was skipped.
 fn visit_bounded_lines_limit(
     path: &Path,
     limit: Option<usize>,
-    mut visitor: impl FnMut(&[u8]),
+    mut visitor: impl FnMut(&[u8]) -> bool,
 ) -> Result<bool> {
     let file = File::open(path)
         .with_context(|| format!("failed to read agent session {}", path.display()))?;
@@ -990,7 +997,9 @@ fn visit_bounded_lines_limit(
         reader.consume(length);
         if newline.is_some() {
             if !overflow {
-                visitor(trim_carriage_return(&line));
+                if !visitor(trim_carriage_return(&line)) {
+                    return Ok(skipped);
+                }
                 visited += 1;
             }
             line.clear();
@@ -1297,6 +1306,43 @@ mod tests {
 
         let catalog = SessionCatalog::scan(home).expect("scan sessions");
         assert_indexed_provider_sessions(&catalog);
+    }
+
+    #[test]
+    fn codex_fork_rollout_keeps_the_parent_session_identity() {
+        let temp = tempdir().expect("temp home");
+        let home = temp.path();
+        write(
+            &home.join(".codex/sessions/2026/01/02/parent.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"parent-id\",\"cwd\":\"/work\",\"timestamp\":\"2026-01-02T03:00:00Z\"}}\n",
+        );
+        // A forked rollout states its own meta first and re-states the parent
+        // session's meta right after; the later record owns the identity, so
+        // the fork file merges into the parent session instead of listing a
+        // separate one.
+        write(
+            &home.join(".codex/sessions/2026/01/02/fork.jsonl"),
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"fork-id\",\"forked_from_id\":\"parent-id\",\"cwd\":\"/work\",\"timestamp\":\"2026-01-02T03:04:05Z\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"parent-id\",\"cwd\":\"/work\",\"timestamp\":\"2026-01-02T03:00:00Z\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Fix fork rendering\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"never reached\"}]}}\n",
+            ),
+        );
+        let catalog = SessionCatalog::scan(home).expect("scan sessions");
+        assert!(
+            !catalog
+                .sessions()
+                .iter()
+                .any(|session| session.id == "fork-id")
+        );
+        let parent = catalog
+            .resolve(Some("codex"), "parent-id")
+            .expect("parent session");
+        assert_eq!(parent.title.as_deref(), Some("Fix fork rendering"));
+        let mut native_files = vec![parent.path.clone()];
+        native_files.extend(parent.related_paths.iter().cloned());
+        assert_eq!(native_files.len(), 2);
     }
 
     #[test]

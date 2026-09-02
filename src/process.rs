@@ -195,18 +195,88 @@ fn open_file_paths_platform(pid: u32) -> Vec<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn open_file_paths_platform(pid: u32) -> Vec<PathBuf> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
     const MAX_LSOF_OUTPUT_BYTES: usize = 16 * 1_024 * 1_024;
-    let Ok(output) = Command::new("/usr/sbin/lsof")
+    // lsof can stall for half a minute on a process holding sockets that
+    // trigger blocking kernel queries (observed ~30s at 0% CPU). Evidence
+    // collection must stay bounded: past the deadline the process yields no
+    // evidence, and callers already treat missing evidence as "no exact
+    // association", which keeps deletion protection fail-closed. A healthy
+    // lsof finishes in tens of milliseconds, so half a second leaves ample
+    // headroom while keeping interactive startup under a second even when a
+    // stalled process burns the whole budget.
+    const LSOF_DEADLINE: Duration = Duration::from_millis(500);
+    const READER_GRACE: Duration = Duration::from_secs(1);
+
+    let Ok(mut child) = Command::new("/usr/sbin/lsof")
         .args(["-Fn", "-p", &pid.to_string()])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return Vec::new();
     };
-    if !output.status.success() || output.stdout.len() > MAX_LSOF_OUTPUT_BYTES {
+    let stdout = child.stdout.take();
+    // Drain stdout on a side thread so a stalled lsof that never writes
+    // cannot deadlock the caller on a full pipe; the cap keeps runaway
+    // output bounded.
+    let collected: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let reader_slot = Arc::clone(&collected);
+    let reader = thread::spawn(move || {
+        let Some(mut stdout) = stdout else {
+            return;
+        };
+        let mut chunk = [0_u8; 16 * 1_024];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let mut buffer = reader_slot.lock().expect("lsof reader lock");
+                    if buffer.len() > MAX_LSOF_OUTPUT_BYTES {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    });
+    let deadline = Instant::now() + LSOF_DEADLINE;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Vec::new();
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    };
+    // The child exited; its stdout closes once lsof's own helper children
+    // are reaped, so wait briefly before taking the output.
+    let grace_deadline = Instant::now() + READER_GRACE;
+    while !reader.is_finished() && Instant::now() < grace_deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let output = collected.lock().expect("lsof output lock").clone();
+    if !status.success() || output.len() > MAX_LSOF_OUTPUT_BYTES {
         return Vec::new();
     }
     output
-        .stdout
         .split(|byte| *byte == b'\n')
         .filter_map(|line| line.strip_prefix(b"n"))
         .filter_map(|line| std::str::from_utf8(line).ok())
@@ -242,6 +312,21 @@ pub fn recognize_agent(process: &ProcessSnapshot) -> Option<AgentKind> {
         return None;
     }
 
+    // OMP extension hosts (`omp --extension <script>`, e.g. status-bar
+    // extensions) also outlive interactive sessions. Like the worker daemons
+    // above they are helpers: matching them would protect the whole OMP
+    // catalog for the extension's lifetime, and their open sockets can even
+    // stall open-file evidence collection.
+    if executable == "omp"
+        && process
+            .command
+            .iter()
+            .skip(1)
+            .any(|argument| argument == "--extension" || argument.starts_with("--extension="))
+    {
+        return None;
+    }
+
     match executable.as_str() {
         "claude" => return Some(AgentKind::ClaudeCode),
         "codex" => return Some(AgentKind::Codex),
@@ -258,7 +343,17 @@ pub fn recognize_agent(process: &ProcessSnapshot) -> Option<AgentKind> {
         return None;
     }
 
-    let command = process.command.join(" ").to_ascii_lowercase();
+    // macOS can append environment entries to the reported argv (observed
+    // with npm-spawned helpers). A leaked `PATH` that lists an agent's install
+    // directory must not turn an unrelated helper into that agent.
+    let command = process
+        .command
+        .iter()
+        .filter(|argument| !is_environment_assignment(argument))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
     if command.contains("@anthropic-ai/claude-code") {
         Some(AgentKind::ClaudeCode)
     } else if command.contains("@openai/codex") {
@@ -274,6 +369,21 @@ pub fn recognize_agent(process: &ProcessSnapshot) -> Option<AgentKind> {
     } else {
         None
     }
+}
+
+/// Whether one reported argument looks like a leaked `NAME=value` environment
+/// entry rather than a real argv element. macOS can append environment
+/// entries to the arguments of npm-spawned helpers, so evidence matching and
+/// display both drop these before use.
+fn is_environment_assignment(argument: &str) -> bool {
+    let Some((name, _)) = argument.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn discover_live_agents(
@@ -418,6 +528,9 @@ fn snapshot(pid: sysinfo::Pid, process: &sysinfo::Process) -> ProcessSnapshot {
             .cmd()
             .iter()
             .map(|part| part.to_string_lossy().into_owned())
+            // Drop environment entries macOS can append to argv so neither
+            // evidence parsing nor display leaks `PATH` and friends.
+            .filter(|argument| !is_environment_assignment(argument))
             .collect(),
         cwd: process.cwd().map(Path::to_path_buf),
         started_at: process.start_time(),
@@ -506,6 +619,117 @@ mod tests {
             cpu_percent: 0.0,
             memory_bytes: 0,
             status: "sleeping".to_owned(),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn open_file_paths_reports_absolute_paths_and_skips_missing_processes() {
+        use super::open_file_paths;
+
+        // The test binary itself holds open files, all reported absolutely.
+        let paths = open_file_paths(std::process::id());
+        assert!(paths.iter().all(|path| path.is_absolute()));
+
+        // A process that cannot exist yields no evidence instead of hanging.
+        assert!(open_file_paths(u32::MAX - 1).is_empty());
+    }
+
+    #[test]
+    fn omp_extension_hosts_are_not_live_agents() {
+        let host = process(
+            11,
+            "/usr/local/bin/omp",
+            &[
+                "omp",
+                "--extension",
+                "/Users/swd/.omp/agent/extensions/orca-agent-status.ts",
+            ],
+        );
+        assert_eq!(
+            recognize_agent_with_custom(&host, &BTreeMap::new()).expect("recognition"),
+            None
+        );
+
+        // An interactive omp run stays a live agent.
+        let interactive = process(12, "/usr/local/bin/omp", &["omp"]);
+        assert_eq!(
+            recognize_agent_with_custom(&interactive, &BTreeMap::new()).expect("recognition"),
+            Some(AgentKind::OhMyPi)
+        );
+    }
+
+    #[test]
+    fn leaked_environment_arguments_do_not_impersonate_agents() {
+        // macOS can append environment entries to the argv of npm-spawned
+        // helpers. A `PATH` that lists an agent's install directory must not
+        // turn an MCP server into that agent (which would fail-closed protect
+        // the whole provider catalog).
+        let mcp_server = process(
+            13,
+            "/opt/homebrew/bin/node",
+            &[
+                "npm",
+                "exec",
+                "@upstash/context7-mcp@latest",
+                "HOME=/Users/swd",
+                "PATH=/Users/swd/.local/share/mise/installs/opencode/latest:/usr/bin",
+            ],
+        );
+        assert_eq!(
+            recognize_agent_with_custom(&mcp_server, &BTreeMap::new()).expect("recognition"),
+            None
+        );
+
+        // The same helper without the leaked environment stays unrecognized,
+        // and a real npm-run agent is still recognized from its real argv.
+        let clean = process(
+            14,
+            "/opt/homebrew/bin/node",
+            &["npm", "exec", "@upstash/context7-mcp@latest"],
+        );
+        assert_eq!(
+            recognize_agent_with_custom(&clean, &BTreeMap::new()).expect("recognition"),
+            None
+        );
+        let agent = process(
+            15,
+            "/opt/homebrew/bin/node",
+            &[
+                "npm",
+                "exec",
+                "@anthropic-ai/claude-code",
+                "HOME=/Users/swd",
+            ],
+        );
+        assert_eq!(
+            recognize_agent_with_custom(&agent, &BTreeMap::new()).expect("recognition"),
+            Some(AgentKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn environment_assignment_detection_covers_common_shapes() {
+        use super::is_environment_assignment;
+
+        for assignment in [
+            "HOME=/Users/swd",
+            "PATH=/usr/bin:/bin",
+            "_=/usr/bin/env",
+            "LC_ALL=en_US.UTF-8",
+        ] {
+            assert!(is_environment_assignment(assignment), "{assignment}");
+        }
+        for argument in [
+            "--extension=/tmp/x.ts",
+            "@upstash/context7-mcp@latest",
+            "resume",
+            "abc123",
+            "--resume",
+            "-p",
+            "pt-token-with=signs",
+        ] {
+            assert!(!is_environment_assignment(argument), "{argument}");
         }
     }
 

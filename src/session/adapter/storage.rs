@@ -26,15 +26,20 @@ pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Resul
         let mut title = None;
         let mut project = None;
         let mut started_at = None;
+        let mut forked = false;
         visit_bounded_lines_limit(&path, Some(128), |line| {
             let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return;
+                return true;
             };
             if record.get("type").and_then(Value::as_str) == Some("session_meta") {
                 id = string_at(&record, "/payload/id");
                 project = string_at(&record, "/payload/cwd").map(PathBuf::from);
                 started_at = string_at(&record, "/payload/timestamp")
                     .or_else(|| string_at(&record, "/timestamp"));
+                // A forked or resumed rollout re-states the parent session's
+                // meta after its own, and the later record owns the session
+                // identity. Keep reading so that later meta can still win.
+                forked = string_at(&record, "/payload/forked_from_id").is_some();
             }
             if title.is_none()
                 && record.pointer("/payload/type").and_then(Value::as_str) == Some("message")
@@ -42,6 +47,18 @@ pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Resul
             {
                 title = record.pointer("/payload/content").and_then(content_preview);
             }
+            // A plain rollout carries one session_meta preamble; once it and a
+            // title are in hand, later lines can only repeat known values. A
+            // forked or resumed rollout must keep reading because a later
+            // session_meta owns the session identity.
+            forked
+                || !(id.is_some()
+                    && project.is_some()
+                    && started_at.is_some()
+                    && (title.is_some()
+                        || id
+                            .as_deref()
+                            .is_some_and(|id| indexed_titles.contains_key(id))))
         })?;
         if let Some(id) = id {
             let title = indexed_titles.get(&id).cloned().or(title);
@@ -77,7 +94,7 @@ pub(super) fn scan_claude(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
         let mut started_at = None;
         visit_bounded_lines_limit(&path, Some(64), |line| {
             let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return;
+                return true;
             };
             id = id.take().or_else(|| string_at(&record, "/sessionId"));
             project = project
@@ -92,6 +109,9 @@ pub(super) fn scan_claude(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
             {
                 title = record.pointer("/message/content").and_then(content_preview);
             }
+            // Every field is first-seen-wins, so once all four are present no
+            // later line can change the discovered session.
+            !(id.is_some() && project.is_some() && started_at.is_some() && title.is_some())
         })?;
         if let Some(id) = id.or_else(|| file_stem(&path)) {
             sessions.push(session(
@@ -370,21 +390,22 @@ fn grok_first_user_preview(updates: &Path) -> Option<String> {
     let mut title = None;
     let _ = visit_bounded_lines_limit(updates, Some(64), |line| {
         if title.is_some() {
-            return;
+            return false;
         }
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            return;
+            return true;
         };
         if record
             .pointer("/params/update/sessionUpdate")
             .and_then(Value::as_str)
             != Some("user_message_chunk")
         {
-            return;
+            return true;
         }
         title = record
             .pointer("/params/update/content")
             .and_then(content_preview);
+        title.is_none()
     });
     title
 }
@@ -478,7 +499,7 @@ fn scan_pi_sessions(root: &Path, kind: &AgentKind, sessions: &mut Vec<AgentSessi
         let mut started_at = None;
         visit_bounded_lines_limit(&path, Some(64), |line| {
             let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                return;
+                return true;
             };
             if record.get("type").and_then(Value::as_str) == Some("session") {
                 id = string_at(&record, "/id");
@@ -493,6 +514,9 @@ fn scan_pi_sessions(root: &Path, kind: &AgentKind, sessions: &mut Vec<AgentSessi
             {
                 title = record.pointer("/message/content").and_then(content_preview);
             }
+            // The session header record leads the file; once it and a title
+            // are in hand, later lines can only repeat known values.
+            !(id.is_some() && project.is_some() && started_at.is_some() && title.is_some())
         })?;
         if let Some(id) = id {
             sessions.push(session(
