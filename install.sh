@@ -151,9 +151,12 @@ install_binary() {
         warn "Failed to download pre-built binary for $TARGET."
         if command -v cargo >/dev/null 2>&1; then
             info "Cargo detected. Attempting to build and install from source..."
-            cargo install --git "https://github.com/$REPO" --locked
-            success "Successfully installed $BINARY_NAME via cargo!"
-            exit 0
+            if cargo install --git "https://github.com/$REPO" --locked; then
+                success "Successfully installed $BINARY_NAME via cargo!"
+                exit 0
+            else
+                error "Cargo build failed. $BINARY_NAME requires Rust 1.96.1+ (Rust 2024 edition). Please update Rust with 'rustup update' or install a pre-built binary."
+            fi
         else
             error "Binary download failed and cargo is not installed. Please check https://github.com/$REPO for releases."
         fi
