@@ -20,13 +20,20 @@ without a daemon, account, or remote data store.
 
 ## Install
 
-Requires Rust 1.96.1 or newer; `cargo install` builds from source.
+### Quick install (macOS & Linux)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sxwedo/mena/main/install.sh | sh
+```
+
+### Build from source with Cargo
+
+Requires Rust 1.96.1 or newer:
 
 ```sh
 cargo install --git https://github.com/sxwedo/mena --locked
 mena --version
 ```
-
 To build from a checkout:
 
 ```sh

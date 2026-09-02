@@ -19,13 +19,20 @@ Agent Skill，以及审计 MCP 注册。无需守护进程、账号或远程数�
 
 ## 安装
 
-需要 Rust 1.96.1 或更高版本；`cargo install` 会从源码编译。
+### 快速安装 (macOS 与 Linux)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sxwedo/mena/main/install.sh | sh
+```
+
+### 通过 Cargo 从源码安装
+
+需要 Rust 1.96.1 或更高版本：
 
 ```sh
 cargo install --git https://github.com/sxwedo/mena --locked
 mena --version
 ```
-
 从仓库源码构建：
 
 ```sh
