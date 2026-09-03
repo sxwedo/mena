@@ -42,14 +42,12 @@ impl AgentSession {
     }
 
     /// Compact row label for crowded lists: the provider slug plus the first
-    /// ID characters, with the slug right-aligned to the longest built-in
-    /// provider so every ID starts at the same column. Details, exports,
+    /// ID characters, left-aligned for clean tabular display. Details, exports,
     /// clipboard content, and JSON output always keep the full target.
     pub(crate) fn short_target(&self) -> String {
         const SHORT_ID_CHARS: usize = 8;
-        const PROVIDER_WIDTH: usize = 8;
         let prefix: String = self.id.chars().take(SHORT_ID_CHARS).collect();
-        format!("{:>PROVIDER_WIDTH$}:{prefix}", self.kind.slug())
+        format!("{}:{prefix}", self.kind.slug())
     }
 }
 

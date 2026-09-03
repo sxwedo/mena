@@ -215,17 +215,17 @@ fn session_target_is_first_and_visible_at_eighty_columns() {
     let screen = buffer_text(terminal.backend().buffer(), 80, 24);
     // The list shows the short target; the full target is reserved for
     // details, exports, and JSON output.
-    assert_eq!(short, "   codex:019fbd66");
+    assert_eq!(short, "codex:019fbd66");
     assert!(screen.contains(&short));
     assert!(!screen.contains(&target));
-    // Column 0 is the narrow mark column; TARGET remains the first labeled one.
+    // Column 0 is the narrow mark column; Target remains the first labeled one.
     assert_eq!(
         session_columns(80).first().map(|column| column.label),
         Some("")
     );
     assert_eq!(
         session_columns(80).get(1).map(|column| column.label),
-        Some("TARGET")
+        Some("Target")
     );
 }
 

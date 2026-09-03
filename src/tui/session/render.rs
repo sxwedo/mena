@@ -199,7 +199,7 @@ fn render_session_table_widget(frame: &mut Frame<'_>, area: Rect, app: &mut Sess
         .block(panel_block(table_title, true))
         .column_spacing(1)
         .row_highlight_style(selection_style())
-        .highlight_symbol("> ");
+        .highlight_symbol("▎ ");
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
@@ -246,7 +246,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     );
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(UI.panel).fg(UI.text))
         .title_style(Style::default().fg(theme.popup_title))
@@ -1013,7 +1013,7 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     if width >= 120 {
         vec![
             column(SessionColumn::Marked, "", Constraint::Length(1)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(20)),
+            column(SessionColumn::Target, "Target", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Agent, "Agent", Constraint::Length(12)),
             column(SessionColumn::Project, "Project", Constraint::Length(14)),
@@ -1023,14 +1023,14 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
     } else if width >= 80 {
         vec![
             column(SessionColumn::Marked, "", Constraint::Length(1)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(20)),
+            column(SessionColumn::Target, "Target", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
         ]
     } else {
         vec![
             column(SessionColumn::Marked, "", Constraint::Length(1)),
-            column(SessionColumn::Target, "TARGET", Constraint::Length(20)),
+            column(SessionColumn::Target, "Target", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(12)),
         ]
@@ -1093,33 +1093,31 @@ pub(crate) fn session_cell(
             };
             Cell::from(Span::styled(age_str, style))
         }
-        _ => Cell::from(session_value(session, column, app)),
-    }
-}
-fn session_value(session: &AgentSession, column: SessionColumn, app: &SessionsApp) -> String {
-    match column {
-        SessionColumn::Marked => {
-            if app.marked_targets.contains(&session.target()) {
-                "◆".to_owned()
-            } else {
-                "·".to_owned()
-            }
+        SessionColumn::Target => {
+            let target = session.short_target();
+            Cell::from(Span::styled(target, Style::default().fg(UI.signal)))
         }
-        SessionColumn::Target => session.short_target(),
-        SessionColumn::Active => {
-            if app.active_targets.contains(&session.target()) {
-                "●".to_owned()
+        SessionColumn::Project => {
+            let label = project_label(session.project.as_deref());
+            let style = if label == "-" {
+                Style::default().fg(UI.muted)
             } else {
-                String::new()
-            }
+                Style::default().fg(UI.text_soft)
+            };
+            Cell::from(Span::styled(label, style))
         }
-        SessionColumn::Agent => session.kind.to_string(),
-        SessionColumn::Project => project_label(session.project.as_deref()),
-        SessionColumn::Title => session
-            .title
-            .clone()
-            .unwrap_or_else(|| "(untitled)".to_owned()),
-        SessionColumn::Updated => format_age(session.updated_at),
+        SessionColumn::Title => {
+            let (title, is_placeholder) = session
+                .title
+                .as_ref()
+                .map_or_else(|| ("(untitled)".to_owned(), true), |t| (t.clone(), false));
+            let style = if is_placeholder {
+                Style::default().fg(UI.muted)
+            } else {
+                Style::default().fg(UI.text)
+            };
+            Cell::from(Span::styled(title, style))
+        }
     }
 }
 

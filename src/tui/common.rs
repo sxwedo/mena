@@ -107,7 +107,7 @@ pub(crate) fn panel_title(
 pub(crate) fn panel_block(title: Line<'_>, active: bool) -> Block<'_> {
     Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(if active { UI.signal } else { UI.border }))
         .style(Style::default().bg(UI.panel).fg(UI.text))
         .title(title)
@@ -338,14 +338,23 @@ pub(super) fn themed_key_hints(
     let mut spans = Vec::new();
     for (index, (key, action)) in hints.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  │  ", Style::default().fg(separator_color)));
+            spans.push(Span::styled("   ", Style::default()));
         }
-        spans.push(Span::styled("[", Style::default().fg(separator_color)));
+        spans.push(Span::styled(
+            "[",
+            Style::default().fg(separator_color).bg(UI.panel_alt),
+        ));
         spans.push(Span::styled(
             (*key).to_owned(),
-            Style::default().fg(key_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(key_color)
+                .bg(UI.panel_alt)
+                .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled("]", Style::default().fg(separator_color)));
+        spans.push(Span::styled(
+            "]",
+            Style::default().fg(separator_color).bg(UI.panel_alt),
+        ));
         spans.push(Span::styled(
             format!(" {action}"),
             Style::default().fg(text_color),
@@ -376,7 +385,7 @@ pub(crate) fn render_header_frame(frame: &mut ratatui::Frame<'_>, area: Rect, ti
 
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Plain)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(UI.border))
         .style(Style::default().bg(UI.panel).fg(UI.text))
         .title(Span::styled(
