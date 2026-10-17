@@ -64,7 +64,7 @@ mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 |---|---|
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena ps` | List running coding-agent processes |
-| `mena sessions` / `mena ss` | Search, inspect, rename, resume, continue with another agent, export, and delete sessions |
+| `mena sessions` / `mena ss` | Search, inspect, rename, resume, continue with another agent, export, trash, and restore sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse grouped registrations; open/edit/delete config; explicitly probe metadata |
 | `mena memories` / `mena ms` | List, read, edit, and delete agent memory files |
@@ -118,7 +118,8 @@ semantics.
 - Live-session association requires provider-native evidence. Uncertain cases
   fail closed for deletion.
 - Session deletion validates identifiers, canonical paths, symlink containment,
-  and live-process protection before removing data.
+  and live-process protection, then moves native files into the mena trash.
+  `mena ss restore` puts one entry back and refuses to overwrite an existing path.
 - Memory discovery is static and read-bounded; edits go through the configured
   editor and deletions require explicit confirmation with root containment.
 

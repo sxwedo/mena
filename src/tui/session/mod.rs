@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::session::{
     AgentSession, DeletionSummary, DetailScope, SessionDetail, SessionProtection,
@@ -72,12 +71,6 @@ fn run_session_browser(
         // is swallowed until the scan finishes. Each tick redraws the spinner.
         if pump_search(&mut app, callbacks.load_detail.as_mut())
             .context("failed to advance transcript search")?
-        {
-            continue;
-        }
-
-        if !crossterm::event::poll(Duration::from_millis(40))
-            .context("failed to poll terminal input")?
         {
             continue;
         }
@@ -214,6 +207,7 @@ fn run_session_browser(
                     KeyCode::Char('d') => {
                         app.request_delete();
                     }
+                    KeyCode::Char('f') => app.cycle_age(),
                     KeyCode::Char('t') => app.begin_rename(),
                     _ => {}
                 }

@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use ratatui::layout::Constraint;
@@ -115,6 +115,8 @@ pub(crate) struct InProgressSearch {
     pub(crate) query: String,
     /// Session indices whose transcripts match the query, accumulated as we go.
     pub(crate) hits: BTreeSet<usize>,
+    /// First matching line for a session, keyed by `provider:id`.
+    pub(crate) snippets: BTreeMap<String, String>,
     /// Number of sessions whose transcripts failed to load.
     pub(crate) errors: u32,
     /// Index (into `SessionsApp::sessions`) of the next session to scan.
@@ -146,6 +148,11 @@ pub(crate) struct SessionsApp {
     /// A message search currently running incrementally. `Some` only between
     /// pressing Enter (commit) and the scan finishing (or Esc cancelling).
     pub(crate) search_in_progress: Option<InProgressSearch>,
+    /// First transcript hit for each matching session, shown beside the title.
+    pub(crate) search_snippets: BTreeMap<String, String>,
+    /// `0` shows every age. Otherwise only sessions updated within this many days.
+    pub(crate) since_days: u64,
+    listed_at: u64,
     /// Whether the table renders flat or with per-project group headers.
     pub(crate) grouping: Grouping,
     /// Set of project keys currently collapsed in Project grouping mode.
@@ -201,6 +208,11 @@ impl SessionsApp {
             status: None,
             message_search: None,
             search_in_progress: None,
+            search_snippets: BTreeMap::new(),
+            since_days: 0,
+            listed_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs()),
             grouping: Grouping::Flat,
             collapsed_projects: BTreeSet::default(),
             preview_scope: DetailScope::Conversation,
@@ -217,12 +229,21 @@ impl SessionsApp {
         let query = self.query.to_ascii_lowercase();
         let scalar_hits = |session: &AgentSession| session_matches(session, &query);
         let message_hits = self.message_search.as_ref();
+        let since_days = self.since_days;
+        let listed_at = self.listed_at;
         self.filtered = self
             .sessions
             .iter()
             .enumerate()
             .filter(|(index, session)| {
-                scalar_hits(session) || message_hits.is_some_and(|hits| hits.contains(index))
+                (since_days == 0
+                    || crate::session::updated_within_days(
+                        session.updated_at,
+                        since_days,
+                        listed_at,
+                    ))
+                    && (scalar_hits(session)
+                        || message_hits.is_some_and(|hits| hits.contains(index)))
             })
             .map(|(index, _)| index)
             .collect();
@@ -333,6 +354,22 @@ impl SessionsApp {
         )));
     }
 
+    pub(crate) fn cycle_age(&mut self) {
+        self.since_days = match self.since_days {
+            0 => 1,
+            1 => 7,
+            7 => 30,
+            _ => 0,
+        };
+        self.recompute_filter();
+        let label = if self.since_days == 0 {
+            "all".to_owned()
+        } else {
+            format!("{}d", self.since_days)
+        };
+        self.status = Some(StatusMessage::success(format!("Age: {label}")));
+    }
+
     /// Commit a full-text search over session transcripts. `hits` are the indices
     /// of sessions whose messages contain the (already lowercased) query. Clears
     /// any prior message search so a fresh Enter re-runs against current results.
@@ -343,6 +380,7 @@ impl SessionsApp {
 
     /// Drop any committed message search, returning to scalar-only filtering.
     pub(crate) fn clear_message_search(&mut self) {
+        self.search_snippets.clear();
         if self.message_search.take().is_some() {
             self.recompute_filter();
         }

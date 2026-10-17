@@ -26,11 +26,14 @@ Provider 过滤值为 `claude`、`codex`、`cursor`、`gemini`；scope 过滤值
 | Provider | 用户级 | 项目级 |
 |---|---|---|
 | Claude | `~/.claude/CLAUDE.md` | `CLAUDE.md`、`CLAUDE.local.md`，以及自动记忆目录 `~/.claude/projects/<编码后的 cwd>/memory/*.md` |
-| Codex | `~/.codex/AGENTS.md`、`~/.codex/memories/*.md` | `AGENTS.md` |
+| Codex | `~/.codex/AGENTS.md`、`~/.codex/AGENTS.override.md`、`~/.codex/memories/*.md` | `AGENTS.md`、`AGENTS.override.md` |
 | Cursor | — | `.cursor/rules/*.mdc` |
 | Gemini | `~/.gemini/GEMINI.md` | — |
+| Goose | `~/.config/goose/.goosehints` | `.goosehints` |
+| OMP | `~/.omp/agent/AGENTS.md` | — |
+| Pi | `~/.pi/agent/AGENTS.md` | — |
 
-`AGENTS.md` 归属于 Codex（即使其他 Agent 也会读取它），因此只出现一次，不会被重复删除。
+`AGENTS.md` 归属于 Codex（即使其他 Agent 也会读取它），因此只出现一次，不会被重复删除。工作区路径含 `-` 时不列出 Claude 自动记忆，因为 Claude 把 `-` 和 `/` 编成同一个目录名，两个项目可能共用一处存储。
 
 ## 安全性
 

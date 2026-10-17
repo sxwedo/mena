@@ -174,18 +174,20 @@ impl ProviderAdapter {
         self,
         home: &Path,
         include_empty: bool,
+        include_archived: bool,
         sessions: &mut Vec<AgentSession>,
+        warnings: &mut Vec<String>,
     ) -> Result<()> {
         match self {
-            Self::ClaudeCode => scan_claude(home, sessions),
-            Self::Codex => scan_codex(home, sessions),
+            Self::ClaudeCode => scan_claude(home, sessions, warnings),
+            Self::Codex => scan_codex(home, sessions, warnings),
             Self::Goose => Ok(()),
-            Self::GeminiCli => scan_gemini(home, sessions),
-            Self::OpenCode => scan_opencode(home, sessions),
-            Self::Pi => scan_pi(home, sessions),
-            Self::OhMyPi => scan_oh_my_pi(home, sessions),
-            Self::Cursor => scan_cursor(home, include_empty, sessions),
-            Self::Grok => scan_grok(home, include_empty, sessions),
+            Self::GeminiCli => scan_gemini(home, sessions, warnings),
+            Self::OpenCode => scan_opencode(home, sessions, warnings),
+            Self::Pi => scan_pi(home, sessions, warnings),
+            Self::OhMyPi => scan_oh_my_pi(home, sessions, warnings),
+            Self::Cursor => scan_cursor(home, include_empty, include_archived, sessions, warnings),
+            Self::Grok => scan_grok(home, include_empty, sessions, warnings),
         }
     }
 
@@ -236,10 +238,11 @@ impl ProviderAdapter {
 
         let roots = self.storage_roots(home);
         validate_deletion_targets(&roots, &files, &directories)?;
+        let mut trash = super::trash::TrashBatch::create(home, selected.kind.slug(), &selected.id)?;
         let index_records = match self {
             Self::Codex => delete_codex_index_records(home, &selected.id)?,
             Self::ClaudeCode => delete_claude_index_records(home, &selected.id)?,
-            Self::Cursor => delete_cursor_index_records(home, &selected.id)?,
+            Self::Cursor => delete_cursor_index_records(home, &selected.id, &mut trash)?,
             Self::GeminiCli
             | Self::OpenCode
             | Self::Pi
@@ -253,13 +256,14 @@ impl ProviderAdapter {
             ..DeletionSummary::default()
         };
         for file in files {
-            remove_file_if_present(&file, &mut summary)?;
+            remove_file_if_present(&file, &mut summary, &mut trash)?;
         }
         let mut directories: Vec<_> = directories.into_iter().collect();
         directories.sort_by_key(|directory| std::cmp::Reverse(directory.components().count()));
         for directory in directories {
-            remove_tree_if_present(&directory, &mut summary)?;
+            remove_tree_if_present(&directory, &mut summary, &mut trash)?;
         }
+        super::trash::finish(trash)?;
         Ok(summary)
     }
 

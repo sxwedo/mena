@@ -25,9 +25,12 @@ Provider 筛选支持 `claude`、`codex`、`cursor`、`opencode` 和 `omp`；Sco
 |---|---|---|
 | Claude | `~/.claude/skills` | `.claude/skills` |
 | Codex | `~/.codex/skills` | `.codex/skills` |
-| Cursor | `~/.cursor/rules` | `.cursor/rules` |
+| Cursor | `~/.cursor/skills` | `.cursor/skills` |
 | OpenCode | `~/.config/opencode/skills` | `.opencode/skills` |
-| OMP / 共享 | `~/.agents/skills` | `.agents/skills` |
+| OMP | `~/.omp/agent/skills` | — |
+| Pi | `~/.pi/agent/skills` | — |
+| Gemini | `~/.gemini/skills` | — |
+| 共享（`agents`） | `~/.agents/skills` | `.agents/skills` |
 
 入口可以是直接放置的 Markdown 文件，也可以是包含 `SKILL.md`、`skill.md` 或
 `README.md` 的目录；目录入口按这个顺序查找。

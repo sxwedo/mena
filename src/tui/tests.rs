@@ -1360,7 +1360,7 @@ fn confirmed_batch_deletion_reports_aggregate_summary() {
     assert_eq!(app.mode, BrowserMode::Browse);
     assert!(app.status.as_ref().is_some_and(|status| {
         !status.is_error
-            && status.text.contains("Permanently deleted 2 sessions")
+            && status.text.contains("Moved 2 sessions to trash")
             && status
                 .text
                 .contains("2 files, 2 directories, 4 index records")
@@ -1523,7 +1523,7 @@ fn delete_confirmation_lists_targets_and_names_the_keys() {
     assert!(screen.contains("codex:beta"));
     // Imperative guidance names each key and its outcome.
     assert!(screen.contains("Press y"));
-    assert!(screen.contains("delete all 2 sessions permanently"));
+    assert!(screen.contains("move all 2 sessions to trash"));
     assert!(screen.contains("Press n or Esc"));
     assert!(screen.contains("keep everything, nothing is deleted"));
 }
@@ -1773,6 +1773,7 @@ fn search_progress_text_reports_scanned_and_hit_counts() {
     let progress = InProgressSearch {
         query: "rewrite".to_owned(),
         hits: [1usize, 4].into_iter().collect(),
+        snippets: BTreeMap::new(),
         errors: 0,
         cursor: 3,
         started: std::time::Instant::now(),

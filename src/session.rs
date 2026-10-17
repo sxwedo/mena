@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,13 +10,118 @@ use serde_json::Value;
 use crate::process::{AgentKind, LiveAgent};
 
 mod adapter;
+mod relocate;
 mod titles;
+mod trash;
+
+pub use relocate::{commit_claude_relocation, preview_claude_relocation};
+pub use trash::restore_session;
 
 pub use adapter::NativeResumeCommand;
 
 const MAX_SESSION_FILES: usize = 50_000;
 const MAX_JSON_BYTES: u64 = 64 * 1_024 * 1_024;
 const MAX_RECORD_BYTES: usize = 8 * 1_024 * 1_024;
+
+/// Claude Code's project-directory key. Every character that is not an ASCII
+/// letter or digit becomes `-`, which is how Claude names `~/.claude/projects`.
+#[must_use]
+pub fn claude_project_key(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    if text.is_empty() {
+        return None;
+    }
+    let key: String = text
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if key.chars().all(|character| character == '-') {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+/// Whether `updated_at` falls inside the last `days` of 86400-second windows.
+/// Zero days means every session.
+#[must_use]
+pub const fn updated_within_days(updated_at: u64, days: u64, now: u64) -> bool {
+    days == 0 || updated_at >= now.saturating_sub(days.saturating_mul(86_400))
+}
+
+/// Scan a transcript until the first case-insensitive `query` hit.
+///
+/// Reads in fixed windows and stops. The returned text is a short slice
+/// around that hit, prefixed with a role when one is visible just before it.
+pub fn first_transcript_hit(path: &Path, query: &str) -> Result<Option<String>> {
+    if query.is_empty() || !path.is_file() {
+        return Ok(None);
+    }
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to read agent session {}", path.display()))?;
+    let mut carry = Vec::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read agent session {}", path.display()));
+            }
+        };
+        carry.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&carry);
+        let lower = text.to_ascii_lowercase();
+        if let Some(at) = lower.find(query) {
+            return Ok(Some(transcript_snippet(&text, at, query.len())));
+        }
+        let keep = query.len().saturating_add(240).max(256);
+        if carry.len() > keep {
+            carry.drain(..carry.len() - keep);
+        }
+    }
+    Ok(None)
+}
+
+fn transcript_snippet(text: &str, at: usize, needle: usize) -> String {
+    let start = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= at.saturating_sub(36))
+        .last()
+        .unwrap_or(0);
+    let end = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= (at + needle + 36).min(text.len()))
+        .unwrap_or(text.len());
+    let body = text[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let prefix = &text[..at];
+    let role = if prefix.contains("\"role\":\"user\"") || prefix.contains("\"type\":\"user\"") {
+        "USER"
+    } else if prefix.contains("\"role\":\"assistant\"") || prefix.contains("\"type\":\"assistant\"")
+    {
+        "ASSISTANT"
+    } else {
+        ""
+    };
+    if role.is_empty() {
+        body
+    } else {
+        format!("{role}: {body}")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentSession {
@@ -379,12 +484,13 @@ pub struct SessionCatalog {
     overlay_path: PathBuf,
     sessions: Vec<AgentSession>,
     native_titles: BTreeMap<String, Option<String>>,
+    warnings: Vec<String>,
 }
 
 impl SessionCatalog {
     #[cfg(test)]
     pub fn scan(home: &Path) -> Result<Self> {
-        Self::scan_provider(home, None, false)
+        Self::scan_provider(home, None, false, false)
     }
 
     /// Scan provider-owned session storage, optionally keeping messageless
@@ -397,12 +503,20 @@ impl SessionCatalog {
         home: &Path,
         provider: Option<&AgentKind>,
         include_empty: bool,
+        include_archived: bool,
     ) -> Result<Self> {
         let overlay_path = titles::path_for(home);
         let mut sessions = Vec::new();
+        let mut warnings = Vec::new();
         for adapter in adapter::ProviderAdapter::SESSION_CATALOG {
             if provider.is_none_or(|kind| adapter.matches(kind)) {
-                adapter.discover(home, include_empty, &mut sessions)?;
+                adapter.discover(
+                    home,
+                    include_empty,
+                    include_archived,
+                    &mut sessions,
+                    &mut warnings,
+                )?;
             }
         }
         sessions.sort_by(|left, right| {
@@ -423,11 +537,19 @@ impl SessionCatalog {
             overlay_path,
             sessions,
             native_titles,
+            warnings,
         })
     }
 
     pub fn sessions(&self) -> &[AgentSession] {
         &self.sessions
+    }
+
+    /// Directories discovery skipped because they could not be read.
+    /// A missing directory is not a warning; an unreadable one is.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Collapse native records describing the same logical session into one
@@ -712,7 +834,11 @@ fn validate_storage_identifier(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn remove_file_if_present(path: &Path, summary: &mut DeletionSummary) -> Result<()> {
+fn remove_file_if_present(
+    path: &Path,
+    summary: &mut DeletionSummary,
+    trash: &mut trash::TrashBatch,
+) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -722,15 +848,18 @@ fn remove_file_if_present(path: &Path, summary: &mut DeletionSummary) -> Result<
         }
     };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        return remove_tree_if_present(path, summary);
+        return remove_tree_if_present(path, summary, trash);
     }
-    fs::remove_file(path)
-        .with_context(|| format!("failed to permanently delete {}", path.display()))?;
+    trash.keep_file(path)?;
     summary.files += 1;
     Ok(())
 }
 
-fn remove_tree_if_present(path: &Path, summary: &mut DeletionSummary) -> Result<()> {
+fn remove_tree_if_present(
+    path: &Path,
+    summary: &mut DeletionSummary,
+    trash: &mut trash::TrashBatch,
+) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -740,7 +869,7 @@ fn remove_tree_if_present(path: &Path, summary: &mut DeletionSummary) -> Result<
         }
     };
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return remove_file_if_present(path, summary);
+        return remove_file_if_present(path, summary, trash);
     }
     for entry in fs::read_dir(path)
         .with_context(|| format!("failed to inspect session directory {}", path.display()))?
@@ -751,13 +880,17 @@ fn remove_tree_if_present(path: &Path, summary: &mut DeletionSummary) -> Result<
         let child_metadata = fs::symlink_metadata(&child)
             .with_context(|| format!("failed to inspect session artifact {}", child.display()))?;
         if child_metadata.is_dir() && !child_metadata.file_type().is_symlink() {
-            remove_tree_if_present(&child, summary)?;
+            remove_tree_if_present(&child, summary, trash)?;
         } else {
-            remove_file_if_present(&child, summary)?;
+            remove_file_if_present(&child, summary, trash)?;
         }
     }
-    fs::remove_dir(path)
-        .with_context(|| format!("failed to permanently delete {}", path.display()))?;
+    fs::remove_dir(path).with_context(|| {
+        format!(
+            "failed to remove empty session directory {}",
+            path.display()
+        )
+    })?;
     summary.directories += 1;
     Ok(())
 }
@@ -897,32 +1030,103 @@ fn session(
     })
 }
 
-fn files_with_extension(root: &Path, extension: &str) -> Result<Vec<PathBuf>> {
-    if !root.exists() {
-        return Ok(Vec::new());
+struct SessionWalk {
+    files: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
+/// Discovery walk. An unreadable directory is reported and skipped so one
+/// protected folder cannot hide every other session. Detail loading keeps
+/// the strict [`files_with_extension`] path.
+fn walk_session_files(root: &Path, extension: &str, strict: bool) -> Result<SessionWalk> {
+    let mut walked = SessionWalk {
+        files: Vec::new(),
+        warnings: Vec::new(),
+    };
+    match fs::metadata(root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(walked),
+        Err(error) if !strict => {
+            walked.warnings.push(format!(
+                "skipped unreadable session directory {}: {error}",
+                root.display()
+            ));
+            return Ok(walked);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect agent sessions in {}", root.display())
+            });
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            if strict {
+                bail!("agent session path is not a directory: {}", root.display());
+            }
+            walked.warnings.push(format!(
+                "skipped session path that is not a directory: {}",
+                root.display()
+            ));
+            return Ok(walked);
+        }
+        Ok(_) => {}
     }
     let mut pending = vec![root.to_path_buf()];
-    let mut files = Vec::new();
     while let Some(directory) = pending.pop() {
-        let entries = fs::read_dir(&directory)
-            .with_context(|| format!("failed to read agent sessions in {}", directory.display()))?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if !strict => {
+                walked.warnings.push(format!(
+                    "skipped unreadable session directory {}: {error}",
+                    directory.display()
+                ));
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read agent sessions in {}", directory.display())
+                });
+            }
+        };
         for entry in entries {
-            let entry = entry.with_context(|| {
-                format!("failed to read an agent session in {}", directory.display())
-            })?;
-            let file_type = entry.file_type().with_context(|| {
-                format!(
-                    "failed to inspect agent session path {}",
-                    entry.path().display()
-                )
-            })?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if !strict => {
+                    walked.warnings.push(format!(
+                        "skipped an unreadable session entry in {}: {error}",
+                        directory.display()
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to read an agent session in {}", directory.display())
+                    });
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if !strict => {
+                    walked.warnings.push(format!(
+                        "skipped session path {}: {error}",
+                        entry.path().display()
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to inspect agent session path {}",
+                            entry.path().display()
+                        )
+                    });
+                }
+            };
             if file_type.is_dir() {
                 pending.push(entry.path());
             } else if file_type.is_file()
                 && entry.path().extension().and_then(|value| value.to_str()) == Some(extension)
             {
-                files.push(entry.path());
-                if files.len() > MAX_SESSION_FILES {
+                walked.files.push(entry.path());
+                if walked.files.len() > MAX_SESSION_FILES {
                     bail!(
                         "agent session scan exceeded {MAX_SESSION_FILES} files under {}",
                         root.display()
@@ -931,9 +1135,21 @@ fn files_with_extension(root: &Path, extension: &str) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    files.sort();
-    Ok(files)
+    walked.files.sort();
+    Ok(walked)
 }
+
+fn files_with_extension(root: &Path, extension: &str) -> Result<Vec<PathBuf>> {
+    Ok(walk_session_files(root, extension, true)?.files)
+}
+
+fn session_files(root: &Path, extension: &str, warnings: &mut Vec<String>) -> Result<Vec<PathBuf>> {
+    let walked = walk_session_files(root, extension, false)?;
+    warnings.extend(walked.warnings);
+    Ok(walked.files)
+}
+
+const DISCOVERY_JSON_BYTES: u64 = 1024 * 1024;
 
 fn read_json_file(path: &Path) -> Result<Option<Value>> {
     let metadata = fs::metadata(path)
@@ -944,6 +1160,79 @@ fn read_json_file(path: &Path) -> Result<Option<Value>> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read agent session {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes).ok())
+}
+
+/// Read only the prefix of a JSON session during discovery. A complete file
+/// under 1 MiB is parsed normally. A larger file contributes `sessionId` and
+/// `startTime` when those fields appear in the prefix, and is skipped when
+/// they do not.
+fn read_discovery_json(path: &Path) -> Result<Option<Value>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to inspect agent session {}", path.display()))?;
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to read agent session {}", path.display()))?;
+    let limit = usize::try_from(metadata.len().min(DISCOVERY_JSON_BYTES)).unwrap_or(usize::MAX);
+    let mut bytes = vec![0; limit];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match file.read(&mut bytes[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read agent session {}", path.display()));
+            }
+        }
+    }
+    bytes.truncate(filled);
+    if metadata.len() <= DISCOVERY_JSON_BYTES {
+        return Ok(serde_json::from_slice(&bytes).ok());
+    }
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        return Ok(Some(value));
+    }
+    Ok(discovery_prefix_value(&bytes))
+}
+
+fn discovery_prefix_value(bytes: &[u8]) -> Option<Value> {
+    let text = String::from_utf8_lossy(bytes);
+    let session_id = json_string_field(&text, "sessionId")?;
+    let mut map = serde_json::Map::new();
+    map.insert("sessionId".into(), Value::String(session_id));
+    if let Some(start) = json_string_field(&text, "startTime") {
+        map.insert("startTime".into(), Value::String(start));
+    }
+    Some(Value::Object(map))
+}
+
+fn json_string_field(text: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let start = text.find(&needle)?;
+    let rest = text[start + needle.len()..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => return Some(out),
+            '\\' => {
+                let escaped = chars.next()?;
+                out.push(match escaped {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '"' | '\\' | '/' => escaped,
+                    _ => return None,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    None
 }
 
 fn visit_bounded_lines(path: &Path, mut visitor: impl FnMut(&[u8])) -> Result<bool> {
@@ -2582,7 +2871,7 @@ mod tests {
                 .any(|session| session.id == "01a05b0f-7770-7cd1-896a-f144f338b84b")
         );
 
-        let expanded = SessionCatalog::scan_provider(home, Some(&AgentKind::Grok), true)
+        let expanded = SessionCatalog::scan_provider(home, Some(&AgentKind::Grok), true, false)
             .expect("scan grok drafts");
         assert!(
             expanded
@@ -2641,7 +2930,7 @@ mod tests {
         super::set_test_grok_home(Some(grok_root.path().to_path_buf()));
         let _guard = super::TestGrokHomeGuard;
         let catalog =
-            SessionCatalog::scan_provider(home, None, false).expect("scan with GROK_HOME");
+            SessionCatalog::scan_provider(home, None, false, false).expect("scan with GROK_HOME");
 
         assert!(
             catalog
@@ -3269,7 +3558,7 @@ mod tests {
         assert_eq!(sessions[0].title.as_deref(), Some("Valid question"));
 
         let expanded =
-            SessionCatalog::scan_provider(home, None, true).expect("scan home with drafts");
+            SessionCatalog::scan_provider(home, None, true, false).expect("scan home with drafts");
         let expanded_sessions = expanded.sessions();
         assert_eq!(expanded_sessions.len(), 2);
         assert!(

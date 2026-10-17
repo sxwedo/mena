@@ -7,22 +7,28 @@ const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DiscoveredProvider {
+    Agents,
     Claude,
     Codex,
     Cursor,
+    Gemini,
     OpenCode,
     Omp,
+    Pi,
 }
 
 impl DiscoveredProvider {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Agents => "agents",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Omp => "omp",
+            Self::Pi => "pi",
         }
     }
 }
@@ -69,7 +75,10 @@ pub fn discover_skills(
                 home.join(".claude").join("skills"),
                 DiscoveredProvider::Claude,
             ),
-            (home.join(".agents").join("skills"), DiscoveredProvider::Omp),
+            (
+                home.join(".agents").join("skills"),
+                DiscoveredProvider::Agents,
+            ),
             (
                 home.join(".config").join("opencode").join("skills"),
                 DiscoveredProvider::OpenCode,
@@ -79,8 +88,20 @@ pub fn discover_skills(
                 DiscoveredProvider::Codex,
             ),
             (
-                home.join(".cursor").join("rules"),
+                home.join(".cursor").join("skills"),
                 DiscoveredProvider::Cursor,
+            ),
+            (
+                home.join(".pi").join("agent").join("skills"),
+                DiscoveredProvider::Pi,
+            ),
+            (
+                home.join(".omp").join("agent").join("skills"),
+                DiscoveredProvider::Omp,
+            ),
+            (
+                home.join(".gemini").join("skills"),
+                DiscoveredProvider::Gemini,
             ),
         ];
 
@@ -102,13 +123,19 @@ pub fn discover_skills(
                 ws.join(".claude").join("skills"),
                 DiscoveredProvider::Claude,
             ),
-            (ws.join(".agents").join("skills"), DiscoveredProvider::Omp),
+            (
+                ws.join(".agents").join("skills"),
+                DiscoveredProvider::Agents,
+            ),
             (
                 ws.join(".opencode").join("skills"),
                 DiscoveredProvider::OpenCode,
             ),
             (ws.join(".codex").join("skills"), DiscoveredProvider::Codex),
-            (ws.join(".cursor").join("rules"), DiscoveredProvider::Cursor),
+            (
+                ws.join(".cursor").join("skills"),
+                DiscoveredProvider::Cursor,
+            ),
         ];
 
         for (root, provider) in workspace_targets {

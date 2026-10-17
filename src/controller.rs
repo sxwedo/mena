@@ -211,7 +211,7 @@ fn confirm_delete_memory(path: &std::path::Path) -> Result<()> {
 
 pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir().context("could not resolve current working directory")?;
-    let catalog = scan_sessions(None, false)?;
+    let catalog = scan_sessions(None, false, false)?;
     let custom = &settings.agent.custom;
 
     let cwd_sessions: Vec<AgentSession> = catalog
@@ -481,6 +481,10 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
         Some(SessionSubcommand::Rename { target, title }) => {
             return rename_session(args, settings, target, title);
         }
+        Some(SessionSubcommand::Restore { target }) => return restore_trashed_session(target),
+        Some(SessionSubcommand::Relocate { from, to, yes }) => {
+            return relocate_claude_project(from, to, yes.as_deref());
+        }
         None => {}
     }
     let provider = args
@@ -495,13 +499,8 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             })
         })
         .transpose()?;
-    let catalog = scan_sessions(provider.as_ref(), args.include_empty)?;
-    let count = args
-        .limit
-        .and_then(|limit| usize::try_from(limit).ok())
-        .unwrap_or_else(|| catalog.sessions().len())
-        .min(catalog.sessions().len());
-    let sessions = &catalog.sessions()[..count];
+    let catalog = scan_sessions(provider.as_ref(), args.include_empty, args.include_archived)?;
+    let sessions = listed_sessions(&catalog, args);
     if args.json {
         let values: Vec<_> = sessions.iter().map(session_list_json).collect();
         println!("{}", serde_json::to_string_pretty(&values)?);
@@ -514,7 +513,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             None::<(std::time::Instant, crate::session::SessionProtection)>,
         );
         let selected = tui::manage_sessions(
-            sessions.to_vec(),
+            sessions,
             protection,
             &settings.ui.session_detail.colors,
             |session| catalog.detail(session),
@@ -557,7 +556,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
             }
         }
     } else {
-        print!("{}", render_session_table(sessions));
+        print!("{}", render_session_table(&sessions));
     }
     Ok(())
 }
@@ -583,7 +582,7 @@ fn rename_session(
             })
         })
         .transpose()?;
-    let catalog = scan_sessions(provider.as_ref(), args.include_empty)?;
+    let catalog = scan_sessions(provider.as_ref(), args.include_empty, args.include_archived)?;
     let (selector_provider, id) = split_session_selector(target, &settings.agent.custom);
     let session = catalog
         .resolve(
@@ -714,7 +713,7 @@ fn resume_target(target: &str, settings: &Settings) -> Result<()> {
         return execute_resume(&spec, &AgentKind::Custom(name.to_owned()), session_id, None);
     }
     let provider_kind = provider.and_then(AgentKind::from_slug);
-    let catalog = scan_sessions(provider_kind.as_ref(), false)?;
+    let catalog = scan_sessions(provider_kind.as_ref(), false, false)?;
     let session = catalog.resolve(provider, session_id)?;
     let (kind, id, project) = (
         session.kind.clone(),
@@ -779,10 +778,69 @@ fn custom_resume_spec(
     })
 }
 
-fn scan_sessions(provider: Option<&AgentKind>, include_empty: bool) -> Result<SessionCatalog> {
+fn listed_sessions(catalog: &SessionCatalog, args: &SessionsArgs) -> Vec<AgentSession> {
+    for warning in catalog.warnings() {
+        eprintln!("warning: {warning}");
+    }
+    let count = args
+        .limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or_else(|| catalog.sessions().len())
+        .min(catalog.sessions().len());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    catalog.sessions()[..count]
+        .iter()
+        .filter(|session| {
+            args.since_days.is_none_or(|days| {
+                crate::session::updated_within_days(session.updated_at, days, now)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn restore_trashed_session(target: &str) -> Result<()> {
+    let home = dirs::home_dir().context("could not resolve the home directory")?;
+    let restored = crate::session::restore_session(&home, target)?;
+    ui::success(format!("restored {restored}"));
+    Ok(())
+}
+
+fn relocate_claude_project(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    yes: Option<&str>,
+) -> Result<()> {
+    let home = dirs::home_dir().context("could not resolve the home directory")?;
+    let preview = crate::session::preview_claude_relocation(&home, from, to)?;
+    let Some(token) = yes else {
+        println!("from: {}", preview.from_project.display());
+        println!("to: {}", preview.to_project.display());
+        println!("store: {}", preview.source_dir.display());
+        println!("destination: {}", preview.destination_dir.display());
+        println!("files: {}", preview.session_files);
+        println!("bytes: {}", preview.bytes);
+        println!("confirm: {}", preview.token);
+        return Ok(());
+    };
+    let backup = crate::session::commit_claude_relocation(&home, from, to, token)?;
+    ui::success(format!(
+        "moved Claude project store; backup at {}",
+        backup.display()
+    ));
+    Ok(())
+}
+
+fn scan_sessions(
+    provider: Option<&AgentKind>,
+    include_empty: bool,
+    include_archived: bool,
+) -> Result<SessionCatalog> {
     let home =
         dirs::home_dir().context("could not resolve the home directory for agent sessions")?;
-    SessionCatalog::scan_provider(&home, provider, include_empty)
+    SessionCatalog::scan_provider(&home, provider, include_empty, include_archived)
 }
 
 fn session_protection(

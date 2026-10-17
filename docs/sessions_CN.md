@@ -12,12 +12,18 @@ mena ss --provider cursor --limit 20
 mena ss --include-empty
 mena ss --json
 mena ss rename codex:019f... "重构 Session catalog"
+mena ss --since-days 7
+mena ss --include-archived
+mena ss restore codex:019f...
+mena ss relocate /old/project /new/project
+mena ss relocate /old/project /new/project --yes "<token>"
 ```
 
 `--provider` 支持 `claude`、`codex`、`cursor`、`gemini`、`goose`、`grok`、
 `opencode`、`pi` 和 `omp`；`goose` 没有本地 Session 目录，始终列出为空。
 `--limit` 必须大于等于 1。Cursor 和 Grok 中没有消息的草稿默认隐藏，传入
-`--include-empty` 后才会显示。
+`--include-empty` 后才会显示。Cursor 已归档的 Session 默认隐藏，传入
+`--include-archived` 后才会显示。`--since-days N` 只保留最近 N 天（每天 86400 秒）内更新过的 Session。
 
 已保存 Session 的 Target 格式是 `provider:session-id`。只有在结果唯一时，才允许
 省略 Provider 或使用 ID 前缀。
@@ -37,14 +43,15 @@ overlay 条目。
 | `↑` / `↓`、`j` / `k` | 在可见行之间移动 |
 | `PgUp` / `PgDn`、`Home` / `End` | 翻页或跳到边缘 |
 | `/` | 搜索 Target、Provider、项目和标题 |
-| 搜索时按 `Enter` | 启动可取消的全文对话搜索 |
+| 搜索时按 `Enter` | 启动可取消的搜索，停在第一处命中并显示片段 |
 | `g` | 切换平铺或按项目分组 |
 | `Space` | 切换当前行的删除标记（首个标记开启多选） |
 | `Enter` / `i` | 打开选中的 Session |
 | `t` | 重命名选中的 Session（Enter 保存，Esc 取消） |
 | `r` | 使用 Provider 原生 CLI 恢复 |
 | `R` | 交接（handoff）给另一个已安装的 Agent |
-| `d`，再输入小写 `y` | 永久删除选中的 Session，或所有已标记的 Session |
+| `d`，再输入小写 `y` | 把选中的 Session，或所有已标记的 Session，移入 mena 回收站 |
+| `f` | 切换时间过滤：全部、1 天、7 天、30 天 |
 | `q` / `Esc` | 退出（存在标记时 `Esc` 先清空标记） |
 
 存在标记时浏览器进入批量模式：底部只显示删除相关按键，单会话按键（`r`、`R`、`Enter`、`g`、`/`、`t`）会被锁定并提示先按 `Esc` 清空标记；确认弹窗会列出最多 5 个 Target 并给出明确的按键指引（`y` 删除、`n`/`Esc` 全部保留）。受运行中 Agent 保护的 Session 会被跳过并提示，而不是阻断整批删除。
@@ -138,6 +145,10 @@ Provider 的 Session 存储。
 
 项目相同、时间接近或“最近更新”都不能建立精确关联。证据缺失或有歧义时，不会把
 任何 Session 标成 active，但删除仍会对该 Provider 的目录执行 fail-closed 保护。
+
+删除会把原生文件移到 mena 配置目录下的 `trash/sessions`，并写一份 `session.json`。`mena ss restore` 放回一条记录，且不会覆盖已经存在的路径。Cursor 索引行会先抄进这份清单再删除。
+
+`mena ss relocate` 在 Claude Code 的项目目录改名后搬走对应存储。先预览并打印确认令牌；确认后会先复制备份，再改目录名，并且只改顶层的 `cwd` 和 `projectPath`。符号链接、已存在的目标、最近一分钟写过的文件，以及编码后落在同一个 Claude 目录的两条路径，都会被拒绝。
 
 删除还会拒绝：
 

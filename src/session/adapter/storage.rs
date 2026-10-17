@@ -11,17 +11,21 @@ use serde_json::Value;
 
 use super::super::{
     AgentSession, content_preview, file_stem, files_with_extension, normalize_preview,
-    paths_equivalent, read_json_file, remove_jsonl_records, session, string_at,
-    validate_storage_identifier, visit_bounded_lines_limit,
+    paths_equivalent, read_discovery_json, read_json_file, remove_jsonl_records, session,
+    session_files, string_at, validate_storage_identifier, visit_bounded_lines_limit,
 };
 use crate::{AgentKind, ProcessSnapshot};
 
 const PROCESS_START_TOLERANCE_SECONDS: u64 = 5;
 const MAX_GROK_SESSION_DIRS: usize = 50_000;
 
-pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+pub(super) fn scan_codex(
+    home: &Path,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let indexed_titles = load_codex_titles(home);
-    for path in files_with_extension(&home.join(".codex/sessions"), "jsonl")? {
+    for path in session_files(&home.join(".codex/sessions"), "jsonl", warnings)? {
         let mut id = None;
         let mut title = None;
         let mut project = None;
@@ -77,8 +81,12 @@ pub(super) fn scan_codex(home: &Path, sessions: &mut Vec<AgentSession>) -> Resul
     Ok(())
 }
 
-pub(super) fn scan_claude(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    for path in files_with_extension(&home.join(".claude/projects"), "jsonl")? {
+pub(super) fn scan_claude(
+    home: &Path,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    for path in session_files(&home.join(".claude/projects"), "jsonl", warnings)? {
         // Subagent transcripts live under `<session>/subagents/` and carry
         // the parent session's ID; they are not independently resumable and
         // would duplicate the parent row, so they stay out of the catalog.
@@ -129,9 +137,13 @@ pub(super) fn scan_claude(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
     Ok(())
 }
 
-pub(super) fn scan_gemini(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+pub(super) fn scan_gemini(
+    home: &Path,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let root = home.join(".gemini/tmp");
-    for path in files_with_extension(&root, "json")? {
+    for path in session_files(&root, "json", warnings)? {
         if path
             .parent()
             .and_then(Path::file_name)
@@ -140,7 +152,7 @@ pub(super) fn scan_gemini(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
         {
             continue;
         }
-        let Some(value) = read_json_file(&path)? else {
+        let Some(value) = read_discovery_json(&path)? else {
             continue;
         };
         let Some(id) = string_at(&value, "/sessionId") else {
@@ -175,9 +187,13 @@ pub(super) fn scan_gemini(home: &Path, sessions: &mut Vec<AgentSession>) -> Resu
     Ok(())
 }
 
-pub(super) fn scan_opencode(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+pub(super) fn scan_opencode(
+    home: &Path,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let root = home.join(".local/share/opencode/storage");
-    for path in files_with_extension(&root.join("session"), "json")? {
+    for path in session_files(&root.join("session"), "json", warnings)? {
         let Some(value) = read_json_file(&path)? else {
             continue;
         };
@@ -201,15 +217,29 @@ pub(super) fn scan_opencode(home: &Path, sessions: &mut Vec<AgentSession>) -> Re
     Ok(())
 }
 
-pub(super) fn scan_pi(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    scan_pi_sessions(&home.join(".pi/agent/sessions"), &AgentKind::Pi, sessions)
+pub(super) fn scan_pi(
+    home: &Path,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    scan_pi_sessions(
+        &home.join(".pi/agent/sessions"),
+        &AgentKind::Pi,
+        sessions,
+        warnings,
+    )
 }
 
-pub(super) fn scan_oh_my_pi(home: &Path, sessions: &mut Vec<AgentSession>) -> Result<()> {
+pub(super) fn scan_oh_my_pi(
+    home: &Path,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     scan_pi_sessions(
         &home.join(".omp/agent/sessions"),
         &AgentKind::OhMyPi,
         sessions,
+        warnings,
     )
 }
 
@@ -229,10 +259,46 @@ pub(super) fn grok_sessions_root(os_home: &Path) -> PathBuf {
     grok_home(os_home).join("sessions")
 }
 
+fn readable_dirs(path: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            warnings.push(format!(
+                "skipped unreadable session directory {}: {error}",
+                path.display()
+            ));
+            return Vec::new();
+        }
+    };
+    let mut directories = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!(
+                    "skipped an unreadable session entry in {}: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => directories.push(entry.path()),
+            Ok(_) => {}
+            Err(error) => warnings.push(format!(
+                "skipped session path {}: {error}",
+                entry.path().display()
+            )),
+        }
+    }
+    directories
+}
+
 pub(super) fn scan_grok(
     home: &Path,
     include_empty: bool,
     sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
 ) -> Result<()> {
     let root = grok_sessions_root(home);
     if !root.exists() {
@@ -240,39 +306,9 @@ pub(super) fn scan_grok(
     }
 
     let mut discovered = 0_usize;
-    for group_entry in fs::read_dir(&root)
-        .with_context(|| format!("failed to read Grok sessions in {}", root.display()))?
-    {
-        let group_entry = group_entry.with_context(|| {
-            format!("failed to read a Grok session group in {}", root.display())
-        })?;
-        let group_type = group_entry.file_type().with_context(|| {
-            format!(
-                "failed to inspect Grok session path {}",
-                group_entry.path().display()
-            )
-        })?;
-        if !group_type.is_dir() {
-            continue;
-        }
-        let group_path = group_entry.path();
+    for group_path in readable_dirs(&root, warnings) {
         let group_project = grok_group_project(&group_path);
-
-        for session_entry in fs::read_dir(&group_path)
-            .with_context(|| format!("failed to read Grok sessions in {}", group_path.display()))?
-        {
-            let session_entry = session_entry.with_context(|| {
-                format!("failed to read a Grok session in {}", group_path.display())
-            })?;
-            let session_type = session_entry.file_type().with_context(|| {
-                format!(
-                    "failed to inspect Grok session path {}",
-                    session_entry.path().display()
-                )
-            })?;
-            if !session_type.is_dir() {
-                continue;
-            }
+        for session_dir in readable_dirs(&group_path, warnings) {
             discovered += 1;
             if discovered > MAX_GROK_SESSION_DIRS {
                 anyhow::bail!(
@@ -280,7 +316,6 @@ pub(super) fn scan_grok(
                     root.display()
                 );
             }
-            let session_dir = session_entry.path();
             let Some(id) = session_dir
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -491,8 +526,13 @@ pub(super) fn runtime_claude_session_ids(
     Ok(string_at(&record, "/sessionId").into_iter().collect())
 }
 
-fn scan_pi_sessions(root: &Path, kind: &AgentKind, sessions: &mut Vec<AgentSession>) -> Result<()> {
-    for path in files_with_extension(root, "jsonl")? {
+fn scan_pi_sessions(
+    root: &Path,
+    kind: &AgentKind,
+    sessions: &mut Vec<AgentSession>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    for path in session_files(root, "jsonl", warnings)? {
         let mut id = None;
         let mut title = None;
         let mut project = None;
@@ -865,7 +905,9 @@ pub(super) fn cursor_global_storage_dirs(home: &Path) -> Vec<PathBuf> {
 pub(super) fn scan_cursor(
     home: &Path,
     include_empty: bool,
+    include_archived: bool,
     sessions: &mut Vec<AgentSession>,
+    _warnings: &mut Vec<String>,
 ) -> Result<()> {
     for global_dir in cursor_global_storage_dirs(home) {
         let db_path = global_dir.join("state.vscdb");
@@ -898,7 +940,10 @@ pub(super) fn scan_cursor(
 
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
-                        let (id, created_at, last_updated_at, _is_archived, value_str) = row;
+                        let (id, created_at, last_updated_at, is_archived, value_str) = row;
+                        if is_archived.unwrap_or(0) != 0 && !include_archived {
+                            continue;
+                        }
                         let (mut title, project, created_ms, updated_ms) =
                             parse_composer_json(value_str.as_deref());
                         if title.is_none() {
@@ -950,6 +995,17 @@ pub(super) fn scan_cursor(
                                     let Some(id) = string_at(comp, "/composerId") else {
                                         continue;
                                     };
+                                    let archived = comp
+                                        .get("isArchived")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false)
+                                        || comp
+                                            .get("isArchived")
+                                            .and_then(Value::as_i64)
+                                            .is_some_and(|value| value != 0);
+                                    if archived && !include_archived {
+                                        continue;
+                                    }
                                     let mut title = string_at(comp, "/name")
                                         .or_else(|| string_at(comp, "/text"))
                                         .or_else(|| string_at(comp, "/subtitle"));
@@ -1013,7 +1069,11 @@ pub(super) fn collect_cursor_artifacts(
 }
 
 #[allow(clippy::unnecessary_wraps, clippy::collapsible_if)]
-pub(super) fn delete_cursor_index_records(home: &Path, session_id: &str) -> Result<usize> {
+pub(super) fn delete_cursor_index_records(
+    home: &Path,
+    session_id: &str,
+    trash: &mut super::super::trash::TrashBatch,
+) -> Result<usize> {
     let mut removed = 0_usize;
     for global_dir in cursor_global_storage_dirs(home) {
         let db_path = global_dir.join("state.vscdb");
@@ -1031,6 +1091,7 @@ pub(super) fn delete_cursor_index_records(home: &Path, session_id: &str) -> Resu
         };
 
         if sqlite_table_exists_conn(&transaction, "composerHeaders").unwrap_or(false) {
+            keep_cursor_headers(&transaction, &db_path, session_id, trash)?;
             if let Ok(cnt) = transaction.execute(
                 "DELETE FROM composerHeaders WHERE composerId = ?1",
                 params![session_id],
@@ -1043,6 +1104,14 @@ pub(super) fn delete_cursor_index_records(home: &Path, session_id: &str) -> Resu
         let bubble_pattern = format!("bubbleId:{session_id}:%");
 
         if sqlite_table_exists_conn(&transaction, "cursorDiskKV").unwrap_or(false) {
+            keep_cursor_kv(
+                &transaction,
+                &db_path,
+                "cursorDiskKV",
+                &composer_key,
+                &bubble_pattern,
+                trash,
+            )?;
             if let Ok(cnt) = transaction.execute(
                 "DELETE FROM cursorDiskKV WHERE key = ?1 OR key LIKE ?2",
                 params![composer_key, bubble_pattern],
@@ -1052,6 +1121,14 @@ pub(super) fn delete_cursor_index_records(home: &Path, session_id: &str) -> Resu
         }
 
         if sqlite_table_exists_conn(&transaction, "ItemTable").unwrap_or(false) {
+            keep_cursor_kv(
+                &transaction,
+                &db_path,
+                "ItemTable",
+                &composer_key,
+                &bubble_pattern,
+                trash,
+            )?;
             if let Ok(cnt) = transaction.execute(
                 "DELETE FROM ItemTable WHERE key = ?1 OR key LIKE ?2",
                 params![composer_key, bubble_pattern],
@@ -1063,6 +1140,60 @@ pub(super) fn delete_cursor_index_records(home: &Path, session_id: &str) -> Resu
         let _ = transaction.commit();
     }
     Ok(removed)
+}
+
+fn keep_cursor_headers(
+    connection: &rusqlite::Connection,
+    database: &Path,
+    session_id: &str,
+    trash: &mut super::super::trash::TrashBatch,
+) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT composerId, createdAt, lastUpdatedAt, isArchived, CAST(value AS BLOB) FROM composerHeaders WHERE composerId = ?1",
+    )?;
+    let mut rows = statement.query(params![session_id])?;
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let value: Vec<u8> = row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default();
+        trash.push_cursor_row(super::super::trash::CursorRow {
+            database: database.to_path_buf(),
+            table: "composerHeaders".to_owned(),
+            key,
+            value_hex: super::super::trash::encode_hex(&value),
+            created_at: row.get(1)?,
+            updated_at: row.get(2)?,
+            is_archived: row.get(3)?,
+        });
+    }
+    Ok(())
+}
+
+fn keep_cursor_kv(
+    connection: &rusqlite::Connection,
+    database: &Path,
+    table: &str,
+    key: &str,
+    pattern: &str,
+    trash: &mut super::super::trash::TrashBatch,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT key, CAST(value AS BLOB) FROM {table} WHERE key = ?1 OR key LIKE ?2"
+    ))?;
+    let mut rows = statement.query(params![key, pattern])?;
+    while let Some(row) = rows.next()? {
+        let stored_key: String = row.get(0)?;
+        let value: Vec<u8> = row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default();
+        trash.push_cursor_row(super::super::trash::CursorRow {
+            database: database.to_path_buf(),
+            table: table.to_owned(),
+            key: stored_key,
+            value_hex: super::super::trash::encode_hex(&value),
+            created_at: None,
+            updated_at: None,
+            is_archived: None,
+        });
+    }
+    Ok(())
 }
 
 fn parse_composer_json(

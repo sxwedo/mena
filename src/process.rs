@@ -392,6 +392,7 @@ pub fn recognize_agent(process: &ProcessSnapshot) -> Option<AgentKind> {
     match executable.as_str() {
         "claude" => return Some(AgentKind::ClaudeCode),
         "codex" => return Some(AgentKind::Codex),
+        "goose" => return Some(AgentKind::Goose),
         "gemini" => return Some(AgentKind::GeminiCli),
         "opencode" => return Some(AgentKind::OpenCode),
         "pi" => return Some(AgentKind::Pi),

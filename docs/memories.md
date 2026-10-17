@@ -16,8 +16,9 @@ mena ms open codex:user:AGENTS.md
 mena ms delete CLAUDE.local.md
 ```
 
-Provider filters are `claude`, `codex`, `cursor`, and `gemini`; scope filters
-are `user` and `project`. Unsupported values fail with an actionable error.
+Provider filters are `claude`, `codex`, `cursor`, `gemini`, `goose`, `omp`, and
+`pi`; scope filters are `user` and `project`. Unsupported values fail with an
+actionable error.
 
 Names may be bare file names or `provider:scope:name` selectors. An operation
 requires one unique match; ambiguous names fail with the matching selectors
@@ -28,12 +29,17 @@ listed so they can be narrowed with `--provider` and/or `--scope`.
 | Provider | User | Project |
 |---|---|---|
 | Claude | `~/.claude/CLAUDE.md` | `CLAUDE.md`, `CLAUDE.local.md`, and the auto-memory directory `~/.claude/projects/<encoded-cwd>/memory/*.md` |
-| Codex | `~/.codex/AGENTS.md`, `~/.codex/memories/*.md` | `AGENTS.md` |
+| Codex | `~/.codex/AGENTS.md`, `~/.codex/AGENTS.override.md`, `~/.codex/memories/*.md` | `AGENTS.md`, `AGENTS.override.md` |
 | Cursor | — | `.cursor/rules/*.mdc` |
 | Gemini | `~/.gemini/GEMINI.md` | — |
+| Goose | `~/.config/goose/.goosehints` | `.goosehints` |
+| OMP | `~/.omp/agent/AGENTS.md` | — |
+| Pi | `~/.pi/agent/AGENTS.md` | — |
 
 `AGENTS.md` is attributed to Codex even when other agents also read it, so it
-appears once and cannot be deleted twice.
+appears once and cannot be deleted twice. Claude auto-memory is omitted when
+the workspace path contains `-`, because Claude encodes both `-` and `/` as
+`-` and two projects can share one directory.
 
 ## Safety
 

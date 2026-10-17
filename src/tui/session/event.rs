@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -104,7 +104,7 @@ pub(crate) fn handle_confirm_delete_key(
             }
             app.status = Some(StatusMessage::success(if removed == 1 {
                 format!(
-                    "Permanently deleted {}: {} files, {} directories, {} index records",
+                    "Moved {} to trash: {} files, {} directories, {} index records",
                     targets[0].target(),
                     summary.files,
                     summary.directories,
@@ -112,7 +112,7 @@ pub(crate) fn handle_confirm_delete_key(
                 )
             } else {
                 format!(
-                    "Permanently deleted {removed} sessions: {} files, {} directories, {} index records",
+                    "Moved {removed} sessions to trash: {} files, {} directories, {} index records",
                     summary.files, summary.directories, summary.index_records
                 )
             }));
@@ -180,6 +180,7 @@ pub(crate) fn start_message_search(app: &mut SessionsApp, has_loader: bool) -> b
     app.search_in_progress = Some(InProgressSearch {
         query,
         hits: BTreeSet::new(),
+        snippets: BTreeMap::new(),
         errors: 0,
         cursor: 0,
         started: Instant::now(),
@@ -205,30 +206,64 @@ where
         let index = progress.cursor;
         progress.cursor += 1;
         let session = &app.sessions[index];
+        let target = session.target();
+        let path = session.path.clone();
+        let file_backed = path.is_file()
+            && !matches!(
+                session.kind,
+                crate::process::AgentKind::OpenCode
+                    | crate::process::AgentKind::Cursor
+                    | crate::process::AgentKind::Goose
+                    | crate::process::AgentKind::Custom(_)
+            );
         // Scalar matches count as hits without paying for a transcript load.
         if session_matches(session, &query) {
             progress.hits.insert(index);
             continue;
         }
+        if file_backed {
+            match crate::session::first_transcript_hit(&path, &query) {
+                Ok(Some(snippet)) => {
+                    progress.snippets.insert(target, snippet);
+                    progress.hits.insert(index);
+                }
+                Ok(None) => {}
+                Err(_) => progress.errors += 1,
+            }
+            return false;
+        }
         match load_detail(session) {
-            Ok(detail)
-                if detail
+            Ok(detail) => {
+                if let Some(message) = detail
                     .messages
                     .iter()
-                    .any(|message| message.content.to_ascii_lowercase().contains(&query)) =>
-            {
-                progress.hits.insert(index);
+                    .find(|message| message.content.to_ascii_lowercase().contains(&query))
+                {
+                    progress.snippets.insert(
+                        target,
+                        format!(
+                            "{}: {}",
+                            message.kind.label(),
+                            snippet_text(&message.content, &query)
+                        ),
+                    );
+                    progress.hits.insert(index);
+                }
             }
-            Ok(_) => {}
             Err(_) => progress.errors += 1,
         }
         // Did real I/O this iteration — yield back to the loop for a redraw.
         return false;
     }
     // Cursor reached the end: commit.
-    let InProgressSearch { hits, errors, .. } =
-        app.search_in_progress.take().expect("in-progress search");
+    let InProgressSearch {
+        hits,
+        errors,
+        snippets,
+        ..
+    } = app.search_in_progress.take().expect("in-progress search");
     let matched = hits.len();
+    app.search_snippets = snippets;
     app.apply_message_search(hits);
     app.status = if errors > 0 {
         Some(StatusMessage::error(format!(
@@ -246,6 +281,28 @@ where
 }
 
 /// Drop an in-progress search without committing partial results (Esc).
+fn snippet_text(content: &str, query: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    let at = lower.find(query).unwrap_or(0);
+    let start = at.saturating_sub(36);
+    let end = (at + query.len() + 36).min(content.len());
+    let start = content
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= start)
+        .last()
+        .unwrap_or(0);
+    let end = content
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= end)
+        .unwrap_or(content.len());
+    content[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn abort_message_search(app: &mut SessionsApp) {
     if app.search_in_progress.take().is_some() {
         app.status = Some(StatusMessage::error(

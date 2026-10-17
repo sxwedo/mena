@@ -28,9 +28,12 @@ arbitrary first result.
 |---|---|---|
 | Claude | `~/.claude/skills` | `.claude/skills` |
 | Codex | `~/.codex/skills` | `.codex/skills` |
-| Cursor | `~/.cursor/rules` | `.cursor/rules` |
+| Cursor | `~/.cursor/skills` | `.cursor/skills` |
 | OpenCode | `~/.config/opencode/skills` | `.opencode/skills` |
-| OMP/shared | `~/.agents/skills` | `.agents/skills` |
+| OMP | `~/.omp/agent/skills` | — |
+| Pi | `~/.pi/agent/skills` | — |
+| Gemini | `~/.gemini/skills` | — |
+| Shared (`agents`) | `~/.agents/skills` | `.agents/skills` |
 
 An entry may be a direct Markdown file or a directory containing `SKILL.md`,
 `skill.md`, or `README.md` (checked in that order).

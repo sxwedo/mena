@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-const MEMORY_PROVIDERS: &[&str] = &["claude", "codex", "cursor", "gemini"];
+const MEMORY_PROVIDERS: &[&str] = &["claude", "codex", "cursor", "gemini", "goose", "omp", "pi"];
 const MEMORY_SCOPES: &[&str] = &["user", "project"];
 
 /// Upper bound for a single memory-file read.
@@ -61,6 +61,25 @@ impl MemoryCatalog {
                 &home.join(".claude/CLAUDE.md"),
             );
             catalog.push_file("codex", "user", "AGENTS.md", &home.join(".codex/AGENTS.md"));
+            catalog.push_file(
+                "codex",
+                "user",
+                "AGENTS.override.md",
+                &home.join(".codex/AGENTS.override.md"),
+            );
+            catalog.push_file("pi", "user", "AGENTS.md", &home.join(".pi/agent/AGENTS.md"));
+            catalog.push_file(
+                "omp",
+                "user",
+                "AGENTS.md",
+                &home.join(".omp/agent/AGENTS.md"),
+            );
+            catalog.push_file(
+                "goose",
+                "user",
+                ".goosehints",
+                &home.join(".config/goose/.goosehints"),
+            );
             catalog.push_directory(
                 "codex",
                 "user",
@@ -76,11 +95,14 @@ impl MemoryCatalog {
             );
 
             if let Some(workspace) = workspace_dir {
-                // Claude auto-memory is stored under the home directory keyed by
-                // the encoded workspace path (`/` replaced with `-`).
-                let encoded = workspace.to_string_lossy().replace('/', "-");
-                let auto_root = home.join(".claude/projects").join(encoded).join("memory");
-                catalog.push_directory("claude", "project", "memory", &auto_root, &["md"]);
+                // Claude's project key replaces both `/` and `-` with `-`.
+                // A hyphenated path can name another project's store, so mena
+                // leaves that directory unread instead of opening the wrong one.
+                if !workspace.to_string_lossy().contains('-') {
+                    let encoded = workspace.to_string_lossy().replace('/', "-");
+                    let auto_root = home.join(".claude/projects").join(encoded).join("memory");
+                    catalog.push_directory("claude", "project", "memory", &auto_root, &["md"]);
+                }
             }
         }
 
@@ -102,6 +124,18 @@ impl MemoryCatalog {
                 "project",
                 "AGENTS.md",
                 &workspace.join("AGENTS.md"),
+            );
+            catalog.push_file(
+                "codex",
+                "project",
+                "AGENTS.override.md",
+                &workspace.join("AGENTS.override.md"),
+            );
+            catalog.push_file(
+                "goose",
+                "project",
+                ".goosehints",
+                &workspace.join(".goosehints"),
             );
             catalog.push_directory(
                 "cursor",

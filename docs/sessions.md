@@ -12,12 +12,19 @@ mena ss --provider cursor --limit 20
 mena ss --include-empty
 mena ss --json
 mena ss rename codex:019f... "Refactor session catalog"
+mena ss --since-days 7
+mena ss --include-archived
+mena ss restore codex:019f...
+mena ss relocate /old/project /new/project
+mena ss relocate /old/project /new/project --yes "<token>"
 ```
 
 `--provider` accepts `claude`, `codex`, `cursor`, `gemini`, `goose`, `grok`,
 `opencode`, `pi`, or `omp`; `goose` has no native local session catalog and
 always lists nothing. `--limit` must be at least 1. Cursor and Grok draft
 sessions without messages are hidden unless `--include-empty` is present.
+Archived Cursor sessions are hidden unless `--include-archived` is present.
+`--since-days N` keeps sessions updated within the last N days of 86400 seconds.
 
 A saved-session target is `provider:session-id`. An unqualified ID or prefix is
 accepted only when it resolves to one logical session.
@@ -38,14 +45,15 @@ transcript up front.
 | `↑` / `↓`, `j` / `k` | Move through visible rows |
 | `PgUp` / `PgDn`, `Home` / `End` | Move by page or jump to an edge |
 | `/` | Search target, provider, project, and title |
-| `Enter` while searching | Run a cancellable full-transcript search |
+| `Enter` while searching | Run a cancellable search that stops at the first hit and shows that snippet |
 | `g` | Toggle flat or project-grouped rows |
 | `Space` | Toggle a delete mark on the selected row (the first mark opens multi-select) |
 | `Enter` / `i` | Open the selected session |
 | `t` | Rename the selected session (Enter saves, Esc cancels) |
 | `r` | Resume with the provider's native CLI |
 | `R` | Hand off to another installed agent |
-| `d`, then lowercase `y` | Permanently delete the selected session, or every marked session |
+| `d`, then lowercase `y` | Move the selected session, or every marked session, to the mena trash |
+| `f` | Cycle the age filter: all, 1 day, 7 days, 30 days |
 | `q` / `Esc` | Quit (`Esc` first clears marks when any exist) |
 
 With marks present the browser enters batch mode: the footer shows only the
@@ -158,6 +166,17 @@ An active indicator requires exact provider-native evidence:
 Project equality, recency, and timestamps alone never establish an exact
 association. If evidence is missing or ambiguous, no session is marked active,
 but deletion still fails closed for that provider's catalog.
+
+Deletion moves native files into `trash/sessions` under the mena config
+directory and writes a `session.json` manifest. `mena ss restore` puts one
+entry back and refuses to overwrite a path that already exists. Cursor index
+rows are copied into that manifest before they are removed.
+
+`mena ss relocate` moves a Claude Code project store after its directory was
+renamed. A preview prints a confirmation token. Committing copies the store
+aside, renames it, and rewrites only top-level `cwd` and `projectPath` fields.
+It refuses symlinks, a destination that already exists, files written in the
+last minute, and paths that encode to the same Claude directory.
 
 Deletion also rejects:
 

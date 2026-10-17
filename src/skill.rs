@@ -10,7 +10,9 @@ use adapter::{
     DiscoveredSkillFile, discover_skills, parse_skill_detail, read_skill_children, read_skill_text,
 };
 
-const SKILL_PROVIDERS: &[&str] = &["claude", "codex", "cursor", "opencode", "omp"];
+const SKILL_PROVIDERS: &[&str] = &[
+    "agents", "claude", "codex", "cursor", "gemini", "omp", "opencode", "pi",
+];
 const SKILL_SCOPES: &[&str] = &["global", "workspace"];
 
 /// High-level representation of an Agent Skill.

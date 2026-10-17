@@ -945,7 +945,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Native session files and provider indexes are removed. This cannot be undone.",
+        "Native session files move to the mena trash. Restore with `mena ss restore`.",
         Style::default().fg(UI.amber),
     )));
     lines.push(Line::from(""));
@@ -958,7 +958,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
         ),
         Span::styled(
             format!(
-                "  delete {} permanently",
+                "  move {} to trash",
                 if batch {
                     format!("all {count} sessions")
                 } else {
@@ -998,7 +998,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
                 panel_block(
                     panel_title(
                         "Confirm deletion",
-                        Some("cannot be undone".to_owned()),
+                        Some("restore with mena ss restore".to_owned()),
                         true,
                     ),
                     true,
@@ -1107,10 +1107,13 @@ pub(crate) fn session_cell(
             Cell::from(Span::styled(label, style))
         }
         SessionColumn::Title => {
-            let (title, is_placeholder) = session
+            let (mut title, is_placeholder) = session
                 .title
                 .as_ref()
                 .map_or_else(|| ("(untitled)".to_owned(), true), |t| (t.clone(), false));
+            if let Some(snippet) = app.search_snippets.get(&session.target()) {
+                title = format!("{title} — {snippet}");
+            }
             let style = if is_placeholder {
                 Style::default().fg(UI.muted)
             } else {

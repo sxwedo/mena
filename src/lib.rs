@@ -147,6 +147,12 @@ pub struct SessionsArgs {
     /// Include messageless empty draft sessions
     #[arg(long)]
     pub include_empty: bool,
+    /// Include Cursor sessions the client has archived
+    #[arg(long)]
+    pub include_archived: bool,
+    /// Hide sessions last updated more than this many days ago
+    #[arg(long)]
+    pub since_days: Option<u64>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -158,13 +164,28 @@ pub enum SessionSubcommand {
         /// New title; whitespace-only restores the provider-native title
         title: String,
     },
+    /// Put a trashed session back. Refuses to overwrite an existing file
+    Restore {
+        /// `provider:session-id` or the trash directory name
+        target: String,
+    },
+    /// Move a Claude Code project store after its directory was renamed
+    Relocate {
+        /// Old absolute project path
+        from: std::path::PathBuf,
+        /// New absolute project path; the directory must already exist
+        to: std::path::PathBuf,
+        /// Confirmation token from a preview. Omit to print the preview
+        #[arg(long)]
+        yes: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct SkillsArgs {
     #[command(subcommand)]
     pub command: Option<SkillSubcommand>,
-    /// Filter by provider: claude, codex, cursor, opencode, or omp
+    /// Filter by provider: claude, codex, cursor, opencode, omp, pi, gemini, or agents
     #[arg(long)]
     pub provider: Option<String>,
     /// Filter by scope: global or workspace
