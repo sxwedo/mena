@@ -1,4 +1,3 @@
-
 use std::{fs, path::Path};
 
 use super::{atomic_create_private, atomic_write, parent_or_current};

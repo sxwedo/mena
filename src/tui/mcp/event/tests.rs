@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -53,18 +52,54 @@ fn detail_navigation_scrolls_without_moving_the_selected_registration() {
 fn probe_key_emits_only_one_explicit_request_at_a_time() {
     let mut app = McpApp::new(vec![registration("first")]);
 
-    let first = handle_key(
+    // `p` first arms the confirmation; nothing has been started yet.
+    let armed = handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     );
-    let second = handle_key(
-        &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
-    );
+    assert!(matches!(armed, super::McpAction::Continue));
+    assert_eq!(app.pending_probe, Some(0));
+    assert_eq!(app.probe_in_progress, None);
 
-    assert!(matches!(first, super::McpAction::Probe { index: 0 }));
-    assert!(matches!(second, super::McpAction::Continue));
+    // A second `p` while the confirmation is open changes nothing.
+    let repeat = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    );
+    assert!(matches!(repeat, super::McpAction::Continue));
+    assert_eq!(app.pending_probe, Some(0));
+
+    // Lowercase `y` confirms and emits exactly one probe request.
+    let confirmed = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+    );
+    assert!(matches!(confirmed, super::McpAction::Probe { index: 0 }));
+    assert_eq!(app.pending_probe, None);
     assert_eq!(app.probe_in_progress, Some(0));
+
+    // While a probe runs, `p` neither arms nor emits another request.
+    let during = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    );
+    assert!(matches!(during, super::McpAction::Continue));
+    assert_eq!(app.pending_probe, None);
+}
+
+#[test]
+fn probe_confirmation_cancels_without_starting_anything() {
+    let mut app = McpApp::new(vec![registration("first")]);
+
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    );
+    let cancelled = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(matches!(cancelled, super::McpAction::Continue));
+    assert_eq!(app.pending_probe, None);
+    assert_eq!(app.probe_in_progress, None);
 }
 
 #[test]

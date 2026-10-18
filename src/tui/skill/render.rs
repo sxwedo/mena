@@ -7,7 +7,8 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use super::app::*;
 use crate::tui::common::{
     UI, app_header, badge, header_inner, panel_block, panel_title, render_canvas,
-    render_header_frame, responsive_key_hints, scroll_meter, selection_style, table_header_style,
+    render_header_frame, render_keymap_popup, responsive_key_hints, scroll_meter, selection_style,
+    table_header_style,
 };
 
 const COLOR_DIR: Color = UI.cyan;
@@ -101,17 +102,36 @@ pub(crate) fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
             ),
             ("/", "filter"),
             ("o", "open"),
+            ("?", "keys"),
             ("q", "quit"),
         ],
         &[
             ("Tab", "pane"),
             ("/", "filter"),
             ("o", "open"),
+            ("?", "keys"),
             ("q", "quit"),
         ],
     ));
     frame.render_widget(footer, chunks[2]);
+    if app.show_help {
+        render_keymap_popup(frame, "Skills", SKILL_HELP_KEYS);
+    }
 }
+
+const SKILL_HELP_KEYS: &[(&str, &str)] = &[
+    ("↑/↓ j/k", "move through the tree"),
+    ("Space/→/Enter", "expand or collapse a directory"),
+    ("← / h", "collapse the nearest ancestor"),
+    ("Tab / l", "switch between tree and preview"),
+    ("PgUp/PgDn", "scroll the preview"),
+    ("/", "filter by name, provider, scope, trigger"),
+    ("s", "show or hide symlinked skills"),
+    ("o", "open the selected file's directory"),
+    ("1/3/4", "switch to Sessions / MCP / Memories"),
+    ("?", "toggle this keymap"),
+    ("q / Esc", "close the preview or quit"),
+];
 
 #[allow(clippy::too_many_lines)]
 fn render_skill_list(frame: &mut Frame, area: Rect, app: &SkillsApp) {

@@ -7,8 +7,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventK
 
 use super::app::{McpApp, McpFocus};
 use crate::mcp::McpRegistration;
-use crate::tui::common::ManagedTerminal;
-use crate::tui::common::is_key_press;
+use crate::tui::common::{ManagedTerminal, Surface, is_key_press, surface_for_digit};
 
 pub(crate) fn run_mcp_browser(
     registrations: Vec<McpRegistration>,
@@ -16,7 +15,7 @@ pub(crate) fn run_mcp_browser(
     mut locate: impl FnMut(&McpRegistration) -> Result<usize>,
     mut refresh: impl FnMut() -> Result<Vec<McpRegistration>>,
     mut delete: impl FnMut(&McpRegistration) -> Result<()>,
-) -> Result<()> {
+) -> Result<Option<Surface>> {
     let mut app = McpApp::new(registrations);
     let (request_tx, request_rx) = mpsc::sync_channel::<(usize, McpRegistration)>(1);
     let (result_tx, result_rx) = mpsc::channel();
@@ -35,7 +34,8 @@ pub(crate) fn run_mcp_browser(
     );
     let mut terminal = Some(ManagedTerminal::enter_with_native_selection()?);
 
-    let loop_result = (|| -> Result<()> {
+    let loop_result = (|| -> Result<Option<Surface>> {
+        let mut jump: Option<Surface> = None;
         loop {
             while let Ok((index, result)) = result_rx.try_recv() {
                 app.finish_probe(index, result);
@@ -72,6 +72,10 @@ pub(crate) fn run_mcp_browser(
                         app.exit_after_probe = true;
                     }
                     McpAction::Quit => break,
+                    McpAction::Jump(surface) => {
+                        jump = Some(surface);
+                        break;
+                    }
                     McpAction::Probe { index } => {
                         let registration = app.registrations[index].clone();
                         if let Err(error) = request_tx.send((index, registration)) {
@@ -126,7 +130,7 @@ pub(crate) fn run_mcp_browser(
                 app.marquee_offset = app.marquee_offset.wrapping_add(1);
             }
         }
-        Ok(())
+        Ok(jump)
     })();
 
     drop(terminal.take());
@@ -139,12 +143,13 @@ pub(crate) fn run_mcp_browser(
                 .map_err(|_| anyhow!("MCP probe worker panicked"))
         },
     );
-    loop_result.and(worker_result)
+    loop_result.and_then(|jump| worker_result.map(|()| jump))
 }
 
 pub(crate) enum McpAction {
     Continue,
     Quit,
+    Jump(Surface),
     Probe { index: usize },
     Open { index: usize },
     Edit { index: usize },
@@ -182,6 +187,25 @@ pub(crate) fn handle_event(app: &mut McpApp, input: &Event) -> McpAction {
 }
 
 pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
+    // The `?` overlay explains the keymap; any key closes it.
+    if app.show_help {
+        app.show_help = false;
+        return McpAction::Continue;
+    }
+    if app.pending_probe.is_some() {
+        return match key.code {
+            KeyCode::Char('y') => {
+                app.pending_probe = None;
+                app.begin_probe()
+                    .map_or(McpAction::Continue, |index| McpAction::Probe { index })
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                app.cancel_probe();
+                McpAction::Continue
+            }
+            _ => McpAction::Continue,
+        };
+    }
     if let Some(index) = app.pending_delete {
         return match key.code {
             KeyCode::Char('y') => McpAction::Delete { index },
@@ -235,9 +259,17 @@ pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
             app.is_searching = true;
             McpAction::Continue
         }
-        KeyCode::Char('p') => app
-            .begin_probe()
-            .map_or(McpAction::Continue, |index| McpAction::Probe { index }),
+        KeyCode::Char('p') => {
+            app.arm_probe();
+            McpAction::Continue
+        }
+        KeyCode::Char('?') => {
+            app.show_help = true;
+            McpAction::Continue
+        }
+        KeyCode::Char(digit @ '1'..='4') => {
+            surface_for_digit(digit).map_or(McpAction::Continue, McpAction::Jump)
+        }
         KeyCode::Char('o') => app
             .selected_catalog_index()
             .map_or(McpAction::Continue, |index| McpAction::Open { index }),

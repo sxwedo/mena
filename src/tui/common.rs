@@ -5,9 +5,9 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 use crossterm::event::{KeyEvent, KeyEventKind};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders};
-use ratatui::{DefaultTerminal, layout::Rect};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::{DefaultTerminal, Frame, layout::Rect};
 
 use crate::settings::{ConfigColor, SessionDetailColorSettings};
 
@@ -55,7 +55,62 @@ pub(crate) const UI: UiPalette = UiPalette {
     muted: Color::Rgb(115, 125, 137),
 };
 
-pub(crate) fn render_canvas(frame: &mut ratatui::Frame<'_>) {
+/// A mena browsing surface. Every browser jumps between surfaces with the
+/// same digit keys, so switching context never requires exiting to the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Surface {
+    Sessions,
+    Skills,
+    Mcp,
+    Memories,
+}
+
+/// Map a `1`–`4` key press to the surface it switches to.
+pub(crate) const fn surface_for_digit(character: char) -> Option<Surface> {
+    match character {
+        '1' => Some(Surface::Sessions),
+        '2' => Some(Surface::Skills),
+        '3' => Some(Surface::Mcp),
+        '4' => Some(Surface::Memories),
+        _ => None,
+    }
+}
+
+/// Render the shared `?` keymap overlay: a centered card listing every key
+/// action for the current surface. Any key press closes it.
+pub(crate) fn render_keymap_popup(
+    frame: &mut Frame<'_>,
+    section: &'static str,
+    keys: &[(&str, &str)],
+) {
+    let height = u16::try_from(keys.len() + 4).unwrap_or(u16::MAX);
+    let popup = centered_rect(frame.area(), 64, height);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![Line::from(Span::styled(
+        section,
+        Style::default().fg(UI.signal).add_modifier(Modifier::BOLD),
+    ))];
+    for (key, action) in keys {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{key:<12}"),
+                Style::default().fg(UI.signal).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(*action, Style::default().fg(UI.text_soft)),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(panel_block(
+                panel_title("Keys", Some("press any key to close".to_owned()), true),
+                true,
+            ))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+pub(crate) fn render_canvas(frame: &mut Frame<'_>) {
     let area = frame.area();
     frame.render_widget(
         Block::new().style(Style::default().bg(UI.canvas).fg(UI.text)),

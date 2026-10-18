@@ -6,14 +6,15 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 use super::app::*;
 use super::render::draw_skills;
 use crate::skill::{AgentSkill, SkillEntry};
-use crate::tui::common::ManagedTerminal;
+use crate::tui::common::{ManagedTerminal, Surface, surface_for_digit};
 
 pub fn run_skill_browser(
     skills: Vec<AgentSkill>,
     load_entry: &mut impl FnMut(&AgentSkill, &std::path::Path) -> Result<SkillEntry>,
-) -> Result<()> {
+) -> Result<Option<Surface>> {
     let mut app = SkillsApp::new(skills);
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
+    let mut jump: Option<Surface> = None;
 
     loop {
         // Refresh preview when selection changes (path-keyed cache)
@@ -77,6 +78,12 @@ pub fn run_skill_browser(
                         continue;
                     }
 
+                    // The `?` overlay explains the keymap; any key closes it.
+                    if app.show_help {
+                        app.show_help = false;
+                        continue;
+                    }
+
                     if app.is_searching {
                         match key.code {
                             KeyCode::Esc | KeyCode::Enter => {
@@ -115,6 +122,15 @@ pub fn run_skill_browser(
                         KeyCode::Char('s') => {
                             app.show_symlinks = !app.show_symlinks;
                             app.rebuild_rows();
+                        }
+                        KeyCode::Char('?') => {
+                            app.show_help = true;
+                        }
+                        KeyCode::Char(digit @ '1'..='4') => {
+                            if let Some(surface) = surface_for_digit(digit) {
+                                jump = Some(surface);
+                                break;
+                            }
                         }
                         KeyCode::Char('/') => {
                             app.is_searching = true;
@@ -189,7 +205,7 @@ pub fn run_skill_browser(
         }
     }
 
-    Ok(())
+    Ok(jump)
 }
 /// Open `path` in the best available editor, degrading gracefully:
 /// $VISUAL → $EDITOR → `code` → `cursor` → `open` (macOS / xdg-open).

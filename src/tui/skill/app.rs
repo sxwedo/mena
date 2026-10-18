@@ -29,6 +29,7 @@ pub(crate) enum SkillRow {
     },
 }
 
+#[allow(clippy::struct_excessive_bools)] // UI state flags; grouping them hurts readability
 pub(crate) struct SkillsApp {
     pub(crate) skills: Vec<AgentSkill>,
     /// Set of expanded directory paths.
@@ -49,6 +50,8 @@ pub(crate) struct SkillsApp {
     pub(crate) focus: SkillFocus,
     pub(crate) marquee_offset: usize,
     pub(crate) show_symlinks: bool,
+    /// Whether the `?` keymap overlay is visible.
+    pub(crate) show_help: bool,
 }
 
 impl SkillsApp {
@@ -79,6 +82,7 @@ impl SkillsApp {
             focus: SkillFocus::List,
             marquee_offset: 0,
             show_symlinks: false,
+            show_help: false,
         };
         app.rebuild_rows();
         app

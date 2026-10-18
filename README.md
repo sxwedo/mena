@@ -56,7 +56,7 @@ mena sk inspect ponytail      # inspect one uniquely named Skill
 mena mcp                      # interactively browse MCP registrations
 mena mcp open codegraph       # open source config at the registration
 mena mcp inspect codegraph --probe  # explicitly discover live MCP metadata
-mena memories                 # list agent memory files
+mena memories                 # browse agent memory files
 mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 ```
 
@@ -67,8 +67,14 @@ mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 | `mena sessions` / `mena ss` | Search, inspect, rename, resume, continue with another agent, export, trash, and restore sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse grouped registrations; open/edit/delete config; explicitly probe metadata |
-| `mena memories` / `mena ms` | List, read, edit, and delete agent memory files |
+| `mena memories` / `mena ms` | Browse, read, edit, and delete agent memory files |
 | `mena config init` | Create `~/.config/mena/config.toml` |
+
+Every interactive browser shares one keymap: `/` filters, `?` shows the full
+keymap, `1`–`4` jump between Sessions, Skills, MCP, and Memories, and `p` is
+the only key that can start a process or contact a network endpoint — always
+behind an explicit confirmation. Each command also takes `--list` to print
+the plain table without opening the browser.
 
 ## Provider support
 

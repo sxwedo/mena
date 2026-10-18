@@ -40,9 +40,12 @@ Browser keys:
   or a terminal editor;
 - `d` asks for lowercase-`y` confirmation before permanently removing a
   writable registration from its native source;
-- `p` explicitly probes the selected registration in a worker thread, so list
-  browsing remains responsive; the result stays attached to that registration
-  even if selection moves;
+- `p` first shows exactly what a probe would start — the selector, the source
+  file, and the command or URL — then lowercase `y` runs it in a worker thread
+  so list browsing remains responsive; the result stays attached to that
+  registration even if selection moves;
+- `?` shows the full keymap overlay;
+- `1` / `2` / `4` jump to Sessions / Skills / Memories;
 - `q`/`Esc` goes back or exits. If a probe is running, mena waits for its bounded
   cleanup before exiting so a stdio child is not abandoned.
 
@@ -54,6 +57,7 @@ List filters are applied before inspection:
   `shared`.
 - `--source`: an exact configuration path or path suffix.
 - `--json`: stable machine-readable output.
+- `--list`: print the plain table without opening the interactive browser.
 
 The normal selector is `provider:scope:name`. Mena deliberately records every
 source instead of applying a client's precedence rules. If two sources still

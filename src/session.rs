@@ -1056,6 +1056,7 @@ fn skip_or_fail(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn walk_session_files(root: &Path, extension: &str, strict: bool) -> Result<SessionWalk> {
     let mut walked = SessionWalk {
         files: Vec::new(),

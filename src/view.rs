@@ -287,7 +287,7 @@ pub fn render_memory_detail(detail: &MemoryDetail) -> String {
     out
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * 1024;
     if bytes < KIB {

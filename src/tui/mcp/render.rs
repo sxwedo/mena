@@ -9,8 +9,8 @@ use super::app::{McpApp, McpDetailLayout, McpFocus};
 use crate::mcp::McpRegistration;
 use crate::tui::common::{
     UI, app_header, badge, centered_rect, header_inner, key_hints, panel_block, panel_title,
-    render_canvas, render_header_frame, responsive_key_hints, scroll_meter, selection_style,
-    table_header_style,
+    render_canvas, render_header_frame, render_keymap_popup, responsive_key_hints, scroll_meter,
+    selection_style, table_header_style,
 };
 
 pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
@@ -44,7 +44,27 @@ pub(crate) fn draw_mcp(frame: &mut Frame<'_>, app: &mut McpApp) {
     if app.pending_delete.is_some() {
         render_delete_confirmation(frame, app);
     }
+    if app.pending_probe.is_some() {
+        render_probe_confirmation(frame, app);
+    }
+    if app.show_help {
+        render_keymap_popup(frame, "MCP", MCP_HELP_KEYS);
+    }
 }
+
+const MCP_HELP_KEYS: &[(&str, &str)] = &[
+    ("↑/↓ j/k", "move the list, scroll after Tab"),
+    ("Enter", "toggle the full-screen inspector"),
+    ("Tab ←→ h/l", "switch between list and detail"),
+    ("/", "filter registrations"),
+    ("o", "open the source config at the definition"),
+    ("e", "edit the source config in $VISUAL/$EDITOR"),
+    ("d", "delete a writable registration (y confirms)"),
+    ("p", "probe: starts the server or contacts the endpoint"),
+    ("1/2/4", "switch to Sessions / Skills / Memories"),
+    ("?", "toggle this keymap"),
+    ("q / Esc", "back, or exit"),
+];
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &McpApp) {
     render_header_frame(frame, area, " MCP registrations ");
@@ -281,17 +301,79 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect) {
                 ("p", "probe"),
                 ("/", "filter"),
                 ("Enter", "focus"),
+                ("?", "keys"),
                 ("q", "back"),
             ],
             &[
                 ("p", "probe"),
                 ("/", "filter"),
                 ("Enter", "focus"),
+                ("?", "keys"),
                 ("q", "back"),
             ],
         ))
         .alignment(Alignment::Center),
         area,
+    );
+}
+
+fn render_probe_confirmation(frame: &mut Frame<'_>, app: &McpApp) {
+    let Some(registration) = app
+        .pending_probe
+        .and_then(|index| app.registrations.get(index))
+    else {
+        return;
+    };
+    let target = registration
+        .command
+        .clone()
+        .or_else(|| registration.url.clone())
+        .unwrap_or_else(|| registration.transport.as_str().to_owned());
+    let area = centered_rect(frame.area(), 88, 10);
+    frame.render_widget(Clear, area);
+    let block = panel_block(
+        panel_title(
+            "Live probe",
+            Some("explicit network action".to_owned()),
+            true,
+        ),
+        true,
+    )
+    .border_style(Style::default().fg(UI.signal));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Target: ", Style::default().fg(UI.muted)),
+            Span::styled(
+                registration.selector.clone(),
+                Style::default().fg(UI.text).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Source: ", Style::default().fg(UI.muted)),
+            Span::styled(
+                registration.source.display().to_string(),
+                Style::default().fg(UI.text_soft),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Will run: ", Style::default().fg(UI.muted)),
+            Span::styled(target, Style::default().fg(UI.text_soft)),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            "Starts the server process or contacts the endpoint to read protocol metadata. Tools, resources, and prompts are never called.",
+            Style::default().fg(UI.amber),
+        )),
+        Line::default(),
+        key_hints(&[("y", "probe now"), ("n/Esc", "cancel")]),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
     );
 }
 

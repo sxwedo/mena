@@ -16,6 +16,7 @@ use crate::session::{
 use crate::settings::{CustomAgentSettings, Settings};
 use crate::skill::SkillCatalog;
 use crate::tui;
+use crate::tui::common::Surface;
 pub use crate::ui;
 use crate::view::{
     render_mcp_detail, render_mcp_table, render_memory_detail, render_memory_table,
@@ -34,7 +35,7 @@ use crate::{
 ///
 /// Returns an error when a configuration is invalid, a selector is ambiguous,
 /// or a requested live probe cannot be performed.
-pub fn run_mcp(args: &McpArgs) -> Result<()> {
+pub fn run_mcp(args: &McpArgs) -> Result<Option<Surface>> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().context("could not resolve current directory")?;
     let catalog = Arc::new(McpCatalog::scan(home.as_deref(), Some(&current_dir))?);
@@ -109,21 +110,21 @@ pub fn run_mcp(args: &McpArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&registrations)?);
             } else if registrations.is_empty() {
                 ui::info("no MCP registrations discovered");
-            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                run_mcp_tui(&catalog, args, registrations.into_iter().cloned().collect())?;
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
+                return run_mcp_tui(&catalog, args, registrations.into_iter().cloned().collect());
             } else {
                 print!("{}", render_mcp_table(&registrations));
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn run_mcp_tui(
     catalog: &Arc<McpCatalog>,
     args: &McpArgs,
     registrations: Vec<McpRegistration>,
-) -> Result<()> {
+) -> Result<Option<Surface>> {
     let probe_catalog = Arc::clone(catalog);
     let locate_catalog = Arc::clone(catalog);
     let refresh_catalog = Arc::clone(catalog);
@@ -152,7 +153,7 @@ fn run_mcp_tui(
 ///
 /// Returns an actionable error when a selector is ambiguous, a file cannot be
 /// read within the size bound, or a deletion is refused by validation.
-pub fn run_memories(args: &MemoriesArgs) -> Result<()> {
+pub fn run_memories(args: &MemoriesArgs) -> Result<Option<Surface>> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().context("could not resolve current directory")?;
     let catalog = MemoryCatalog::scan(home.as_deref(), Some(&current_dir))?;
@@ -189,13 +190,20 @@ pub fn run_memories(args: &MemoriesArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&filtered)?);
             } else if filtered.is_empty() {
                 ui::info("no memory files discovered");
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
+                let jump = tui::manage_memories(
+                    filtered,
+                    |path| catalog.read(path),
+                    |path| catalog.delete(path),
+                )?;
+                return Ok(jump);
             } else {
                 print!("{}", render_memory_table(&filtered));
             }
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 fn confirm_delete_memory(path: &std::path::Path) -> Result<()> {
@@ -470,7 +478,7 @@ fn print_agent_launch_help(
     println!("\nRun `mena agent <provider>` to launch an agent directly.");
 }
 
-pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
+pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<Surface>> {
     // Deletion re-checks live-session protection before each removal, but
     // a confirmed batch issues those checks back-to-back. Sharing one
     // snapshot within a short window keeps a batch from re-running
@@ -479,11 +487,13 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
     const PROTECTION_SNAPSHOT_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
     match &args.command {
         Some(SessionSubcommand::Rename { target, title }) => {
-            return rename_session(args, settings, target, title);
+            return rename_session(args, settings, target, title).map(|()| None);
         }
-        Some(SessionSubcommand::Restore { target }) => return restore_trashed_session(target),
+        Some(SessionSubcommand::Restore { target }) => {
+            return restore_trashed_session(target).map(|()| None);
+        }
         Some(SessionSubcommand::Relocate { from, to, yes }) => {
-            return relocate_claude_project(from, to, yes.as_deref());
+            return relocate_claude_project(from, to, yes.as_deref()).map(|()| None);
         }
         None => {}
     }
@@ -504,7 +514,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
     if args.json {
         let values: Vec<_> = sessions.iter().map(session_list_json).collect();
         println!("{}", serde_json::to_string_pretty(&values)?);
-    } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+    } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
         let protection = session_protection(&catalog, settings)?;
         let export_directory =
             std::env::current_dir().context("failed to resolve the session export directory")?;
@@ -553,12 +563,13 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<()> {
                 tui::session::SessionBrowserResult::ContinueWith(session) => {
                     continue_with_agent(&catalog, &session, settings)?;
                 }
+                tui::session::SessionBrowserResult::Jump(surface) => return Ok(Some(surface)),
             }
         }
     } else {
         print!("{}", render_session_table(&sessions));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn rename_session(
@@ -674,7 +685,7 @@ fn execute_continuation(
 /// # Errors
 ///
 /// Returns an error if scanning fails or a targeted skill is missing.
-pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<()> {
+pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<Option<Surface>> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().ok();
     let catalog = SkillCatalog::scan(home.as_deref(), current_dir.as_deref())?;
@@ -694,15 +705,15 @@ pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&filtered)?);
             } else if filtered.is_empty() {
                 ui::info("no skills discovered");
-            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                tui::manage_skills(filtered, |skill, path| catalog.entry(skill, path))?;
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
+                return tui::manage_skills(filtered, |skill, path| catalog.entry(skill, path));
             } else {
                 print!("{}", render_skill_table(&filtered));
             }
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 fn resume_target(target: &str, settings: &Settings) -> Result<()> {

@@ -11,6 +11,7 @@ mena ss --provider codex
 mena ss --provider cursor --limit 20
 mena ss --include-empty
 mena ss --json
+mena ss --list
 mena ss rename codex:019f... "Refactor session catalog"
 mena ss --since-days 7
 mena ss --include-archived
@@ -38,36 +39,41 @@ when that variable is set). Deleting a session also removes its overlay entry.
 ## Interactive browser
 
 The browser reads detail lazily, so opening a large catalog does not parse every
-transcript up front.
+transcript up front. `--list` prints the plain table without opening the full-
+screen browser.
 
 | Key | Action |
 |---|---|
 | `↑` / `↓`, `j` / `k` | Move through visible rows |
 | `PgUp` / `PgDn`, `Home` / `End` | Move by page or jump to an edge |
-| `/` | Search target, provider, project, and title |
-| `Enter` while searching | Run a cancellable search that stops at the first hit and shows that snippet |
+| `/` | Filter target, provider, project, and title; Enter closes the box |
+| `m` | Search transcripts: Enter starts a cancellable scan that stops at the first hit and shows that snippet on a second line |
 | `g` | Toggle flat or project-grouped rows |
-| `Space` | Toggle a delete mark on the selected row (the first mark opens multi-select) |
-| `Enter` / `i` | Open the selected session |
+| `Space` | Toggle a delete mark on the selected row |
+| `Enter` / `i` | Open the selected session (or expand a group header) |
 | `t` | Rename the selected session (Enter saves, Esc cancels) |
 | `r` | Resume with the provider's native CLI |
 | `R` | Hand off to another installed agent |
 | `d`, then lowercase `y` | Move the selected session, or every marked session, to the mena trash |
 | `f` | Cycle the age filter: all, 1 day, 7 days, 30 days |
+| `?` | Show the full keymap overlay |
+| `2` / `3` / `4` | Jump to Skills / MCP / Memories |
 | `q` / `Esc` | Quit (`Esc` first clears marks when any exist) |
 
-With marks present the browser enters batch mode: the footer shows only the
-delete actions, single-session keys (`r`, `R`, `Enter`, `g`, `/`, `t`) explain that
-they are locked until `Esc` clears the marks, and the confirmation dialog lists
-up to five targets with imperative key guidance (`y` deletes, `n`/`Esc` keeps
-everything). Sessions protected by a running agent are skipped from the batch
-with a notice instead of blocking the whole deletion.
+Marks do not lock the browser: every action keeps working on the selected row,
+and `d` simply deletes the marked set instead of the selection. The header
+shows the committed state as persistent badges — the age filter, project
+grouping, and the mark count once marks exist — so a status message can scroll
+away without hiding the current filter. Deleting a session attached to a
+running agent is still refused, and protected sessions are skipped from a
+batch with a notice instead of blocking the whole deletion.
 
 The list shows compact targets (`provider:first-8-id-characters`) to leave
 room for titles; the detail view, delete confirmations, exports, clipboard
-content, and `--json` output always carry the full `provider:session-id`. In
-project-grouped rows, each group header spans the row width and shows the full
-project path.
+content, and `--json` output always carry the full `provider:session-id`. A
+transcript-search hit renders as a muted second line under the title instead of
+rewriting it. In project-grouped rows, each group header spans the row width
+and shows the full project path.
 
 Inside the detail view:
 
@@ -76,10 +82,10 @@ Inside the detail view:
 | `↑` / `↓`, `j` / `k` | Scroll without moving the outer selection |
 | `PgUp` / `PgDn`, `Home` / `End` | Page or jump within the transcript |
 | `Shift+↑` / `Shift+↓` | Jump between user and assistant messages |
-| `p` / `Shift+P` | Show conversation-only / complete transcript |
+| `s` / `S` | Show conversation-only / complete transcript |
 | `/` | Search the transcript; `Enter` keeps, `Esc` cancels |
 | `n` / `N` | Jump to the next / previous match after a search |
-| `c` / `e` | Copy / export Markdown using the active preview scope |
+| `c` / `x` | Copy / export Markdown using the active preview scope |
 | `t` | Rename this session and return to the list |
 | `r` | Resume this session |
 | `R` | Hand off to another installed agent |

@@ -24,17 +24,39 @@ open all day.
 Provider symbols retain subtle identity colors inside the shared shell. These
 are identity cues only; operational state uses the semantic colors above.
 
+## Shared keymap
+
+The same key means the same thing in every browser:
+
+- `/` always filters the loaded catalog fields. It never scans transcripts and
+  never starts a process.
+- `Enter` opens the primary view for the selection.
+- `o` opens the native artifact: the Skill directory, the MCP source config,
+  or the memory file in the configured editor.
+- `e` edits a native configuration; it never exports.
+- `p` is the only key that can start a process or contact an endpoint, and it
+  always shows a confirmation naming the selector, the source, and what will
+  run before anything starts.
+- `d` deletes. The confirmation states the exact consequence — trash with a
+  restore path for sessions, an irreversible rewrite for MCP and memory files.
+- `?` opens a full keymap overlay for the current surface; any key closes it.
+- `1`–`4` jump between Sessions, Skills, MCP, and Memories without returning
+  to the shell.
+
 ## Responsive layout
 
 The interface adapts from the frame size on every redraw:
 
-- below 100 columns, the Skill list/preview and MCP list/details panes stack
-  vertically;
+- below 100 columns, the Skill list/preview, MCP list/details, and memory
+  list/preview panes stack vertically;
 - below 88 columns, the launcher hides its lower-priority session-context
   column;
 - below 96 columns, footers collapse to the primary key hints;
 - the Session table preserves `TARGET` as its first column at every width, and
   detail views retain independent scrolling.
+
+Footers show primary actions only; `?` always reveals the complete keymap, so
+  narrow terminals lose discoverability, not capability.
 
 Fullscreen detail modes, list selection, search, mouse/keyboard scrolling, and
 confirmation behavior do not change when the layout reflows.

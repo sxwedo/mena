@@ -194,8 +194,9 @@ fn session_layout_displays_titles_and_filters_by_them() {
         .expect("draw sessions");
     let screen = buffer_text(terminal.backend().buffer(), 100, 18);
     assert!(screen.contains("Fix terminal rendering"));
-    assert!(screen.contains("[t] rename"));
+    assert!(screen.contains("[r] resume"));
     assert!(screen.contains("[R] handoff"));
+    assert!(screen.contains("[d] delete"));
     assert!(screen.lines().all(|line| line.chars().count() == 100));
 }
 
@@ -422,12 +423,12 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
         "complete first answer",
         "complete second answer",
         "[Shift+↑/↓] msg",
-        "[p] chat",
-        "[Shift+P] all",
+        "[s] chat",
+        "[S] all",
         "[c] copy",
         "[r] resume",
         "[R] handoff",
-        "[e] export",
+        "[x] export",
         "[Esc] close",
     ] {
         assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
@@ -625,10 +626,10 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
     let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
     app.open_detail(SessionDetail { session, messages });
 
-    // Shift+P (uppercase P) switches to the complete preview.
+    // S (uppercase) switches to the complete preview.
     handle_detail_key(
         &mut app,
-        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
         None,
         None,
     );
@@ -640,14 +641,14 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
     let complete = buffer_text(terminal.backend().buffer(), 80, 30);
     assert!(
         complete.contains("full-only tool content"),
-        "Shift+P must reveal tool messages\n{complete}"
+        "S must reveal tool messages\n{complete}"
     );
     assert!(complete.contains("(complete)"));
 
-    // p returns to the conversation-only preview.
+    // s returns to the conversation-only preview.
     handle_detail_key(
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
         None,
         None,
     );
@@ -1125,7 +1126,7 @@ fn exporting_from_detail_keeps_selection_scroll_and_popup_open() {
 
     handle_detail_key(
         &mut app,
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         Some(&mut export),
         None,
     );
@@ -1258,7 +1259,7 @@ fn failed_detail_export_keeps_context_and_reports_a_red_error() {
 
     handle_detail_key(
         &mut app,
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         Some(&mut export),
         None,
     );
@@ -1451,24 +1452,25 @@ fn batch_delete_explains_protection_when_nothing_is_deletable() {
 }
 
 #[test]
-fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
+fn marked_sessions_keep_single_session_actions_unlocked() {
     let first = transcript_session("alpha", "First", "/tmp/alpha.jsonl");
     let second = transcript_session("beta", "Second", "/tmp/beta.jsonl");
     let mut app = SessionsApp::new(vec![first, second], BTreeSet::default());
 
-    // No marks: the regular footer advertises resume and details, and only
-    // Space — not `a` — offers marking until multi-select is open.
+    // No marks: the regular footer advertises resume, details, grouping,
+    // and the age filter alongside marking.
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
     terminal
         .draw(|frame| draw_sessions(frame, &mut app, 0))
         .expect("draw unmarked sessions");
     let plain = buffer_text(terminal.backend().buffer(), 120, 24);
     assert!(plain.contains("[r] resume"));
-    assert!(plain.contains("[t] rename"));
-    assert!(plain.contains("[Space] mark"));
+    assert!(plain.contains("[m] text"));
+    assert!(plain.contains("[?] keys"));
     assert!(!plain.contains("[Space/a] mark"));
 
-    // With a mark, the footer switches to delete-only guidance.
+    // With a mark, the footer leads with delete guidance and the header
+    // shows the mark count.
     app.first();
     app.toggle_mark();
     terminal
@@ -1476,29 +1478,34 @@ fn batch_mode_locks_single_session_actions_and_shows_delete_only_footer() {
         .expect("draw marked sessions");
     let marked = buffer_text(terminal.backend().buffer(), 120, 24);
     assert!(marked.contains("[d] delete marked"));
-    assert!(marked.contains("[Esc] clear"));
+    assert!(marked.contains("[Esc] clear marks"));
+    assert!(marked.contains("[Enter] details"));
     assert!(!marked.contains("[r] resume"));
-    assert!(marked.contains("◆ 1 marked for deletion"));
+    assert!(marked.contains("1 marked"));
 
-    // Single-session keys lock with an explanation; marking keys stay free.
-    let locked = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
-    assert!(is_batch_locked_key(&app, &locked));
-    assert!(is_batch_locked_key(
-        &app,
-        &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)
-    ));
-    assert!(!is_batch_locked_key(
-        &app,
-        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)
-    ));
-    assert!(!is_batch_locked_key(
-        &app,
-        &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
-    ));
-    // Without marks the same keys act normally.
-    app.marked_targets.clear();
-    assert_eq!(app.marked_count(), 0);
-    assert!(!is_batch_locked_key(&app, &locked));
+    // Marks no longer lock single-session actions: filtering still opens.
+    app.begin_filter_search();
+    assert_eq!(app.mode, BrowserMode::Search);
+    assert_eq!(app.search_scope, SearchScope::Filter);
+    app.mode = BrowserMode::Browse;
+
+    // Transcript search opens with its own commit semantics.
+    app.begin_transcript_search();
+    assert_eq!(app.mode, BrowserMode::Search);
+    assert_eq!(app.search_scope, SearchScope::Transcripts);
+    app.mode = BrowserMode::Browse;
+
+    // The `?` overlay covers the keymap, including actions that no longer
+    // fit the footer; any key closes it.
+    app.show_help = true;
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw help overlay");
+    let help = buffer_text(terminal.backend().buffer(), 120, 24);
+    assert!(help.contains("flat or project-grouped rows"));
+    assert!(help.contains("cycle age filter"));
+    assert!(help.contains("rename (mena-owned title)"));
+    app.show_help = false;
 }
 
 #[test]
@@ -1518,7 +1525,7 @@ fn delete_confirmation_lists_targets_and_names_the_keys() {
         .expect("draw delete confirmation");
 
     let screen = buffer_text(terminal.backend().buffer(), 110, 30);
-    assert!(screen.contains("DELETE 2 SESSIONS"));
+    assert!(screen.contains("MOVE 2 SESSIONS TO TRASH"));
     assert!(screen.contains("codex:alpha"));
     assert!(screen.contains("codex:beta"));
     // Imperative guidance names each key and its outcome.
@@ -2216,4 +2223,17 @@ fn selected_open_path_returns_containing_directory() {
     assert_eq!(app.selected_open_path(), Some(skill_dir));
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn digit_keys_map_to_the_shared_surface_set() {
+    use super::common::{Surface, surface_for_digit};
+
+    assert_eq!(surface_for_digit('1'), Some(Surface::Sessions));
+    assert_eq!(surface_for_digit('2'), Some(Surface::Skills));
+    assert_eq!(surface_for_digit('3'), Some(Surface::Mcp));
+    assert_eq!(surface_for_digit('4'), Some(Surface::Memories));
+    assert_eq!(surface_for_digit('0'), None);
+    assert_eq!(surface_for_digit('5'), None);
+    assert_eq!(surface_for_digit('q'), None);
 }

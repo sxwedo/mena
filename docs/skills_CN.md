@@ -9,6 +9,7 @@
 mena sk
 mena sk --provider codex
 mena sk --scope workspace --json
+mena sk --list
 mena sk inspect ponytail
 mena sk --provider codex --scope global inspect ponytail --json
 ```
@@ -47,9 +48,12 @@ Provider 筛选支持 `claude`、`codex`、`cursor`、`opencode` 和 `omp`；Sco
 | `/` | 按名称、Provider、Scope、位置、Trigger 或描述筛选 |
 | `s` | 显示或隐藏顶层符号链接 Skill |
 | `o` | 打开所选文件所在目录 |
+| `?` | 显示完整键位浮层 |
+| `1` / `3` / `4` | 跳转到 Sessions / MCP / Memories |
 | `q` / `Esc` | 关闭预览或退出 |
 
 目录内容统一通过 Skill Catalog 加载并缓存；搜索和界面重绘不会反复遍历文件系统。
+`--list` 直接输出纯表格，不打开交互式浏览器。
 
 ## 读取限制与路径范围
 

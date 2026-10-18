@@ -22,6 +22,7 @@ pub(crate) struct McpNotice {
     pub(crate) error: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)] // UI state flags; grouping them hurts readability
 pub(crate) struct McpApp {
     pub(crate) registrations: Vec<McpRegistration>,
     pub(crate) visible: Vec<usize>,
@@ -36,7 +37,11 @@ pub(crate) struct McpApp {
     pub(crate) marquee_offset: usize,
     pub(crate) probe_in_progress: Option<usize>,
     pub(crate) exit_after_probe: bool,
+    /// Registration awaiting the lowercase-`y` probe confirmation.
+    pub(crate) pending_probe: Option<usize>,
     pub(crate) pending_delete: Option<usize>,
+    /// Whether the `?` keymap overlay is visible.
+    pub(crate) show_help: bool,
     pub(crate) notice: Option<McpNotice>,
     search_index: Vec<String>,
     probe_details: HashMap<usize, McpDetail>,
@@ -62,7 +67,9 @@ impl McpApp {
             marquee_offset: 0,
             probe_in_progress: None,
             exit_after_probe: false,
+            pending_probe: None,
             pending_delete: None,
+            show_help: false,
             notice: None,
             search_index,
             probe_details: HashMap::new(),
@@ -156,6 +163,20 @@ impl McpApp {
             .detail_scroll
             .saturating_add_signed(amount)
             .min(self.detail_max_scroll);
+    }
+
+    /// Arm the probe confirmation for the selected registration. `p` always
+    /// shows what will be started before anything runs.
+    pub(crate) fn arm_probe(&mut self) {
+        if self.probe_in_progress.is_some() || self.selected_catalog_index().is_none() {
+            return;
+        }
+        self.pending_probe = self.selected_catalog_index();
+        self.notice = None;
+    }
+
+    pub(crate) const fn cancel_probe(&mut self) {
+        self.pending_probe = None;
     }
 
     pub(crate) fn begin_probe(&mut self) -> Option<usize> {

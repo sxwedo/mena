@@ -29,6 +29,7 @@ pub use memory::{MemoryCatalog, MemoryDetail, MemoryFile};
 pub use process::{AgentKind, ProcessSnapshot};
 pub use settings::Settings;
 pub use skill::{AgentSkill, SkillCatalog, SkillDetail};
+use tui::common::Surface;
 
 /// Mena command-line arguments.
 #[derive(Debug, Args)]
@@ -63,7 +64,7 @@ pub enum AgentCommand {
     Memories(MemoriesArgs),
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct MemoriesArgs {
     #[command(subcommand)]
     pub command: Option<MemorySubcommand>,
@@ -76,6 +77,9 @@ pub struct MemoriesArgs {
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,
+    /// Print a plain table instead of opening the interactive browser
+    #[arg(long)]
+    pub list: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -131,7 +135,8 @@ pub struct PsArgs {
     pub verbose: bool,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
+#[allow(clippy::struct_excessive_bools)] // flat CLI flags; grouping them hurts clap output
 pub struct SessionsArgs {
     #[command(subcommand)]
     pub command: Option<SessionSubcommand>,
@@ -144,6 +149,9 @@ pub struct SessionsArgs {
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,
+    /// Print a plain table instead of opening the interactive browser
+    #[arg(long)]
+    pub list: bool,
     /// Include messageless empty draft sessions
     #[arg(long)]
     pub include_empty: bool,
@@ -181,7 +189,7 @@ pub enum SessionSubcommand {
     },
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct SkillsArgs {
     #[command(subcommand)]
     pub command: Option<SkillSubcommand>,
@@ -194,6 +202,9 @@ pub struct SkillsArgs {
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,
+    /// Print a plain table instead of opening the interactive browser
+    #[arg(long)]
+    pub list: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -208,7 +219,7 @@ pub enum SkillSubcommand {
     },
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct McpArgs {
     #[command(subcommand)]
     pub command: Option<McpSubcommand>,
@@ -224,6 +235,9 @@ pub struct McpArgs {
     /// Emit stable machine-readable JSON
     #[arg(long)]
     pub json: bool,
+    /// Print a plain table instead of opening the interactive browser
+    #[arg(long)]
+    pub list: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -269,11 +283,62 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
         },
         AgentCommand::Agent(args) => controller::run_agent(&args, settings),
         AgentCommand::Ps(args) => controller::run_ps(&args, settings),
-        AgentCommand::Sessions(args) => controller::run_sessions(&args, settings),
-        AgentCommand::Skills(args) => controller::run_skills(&args, settings),
-        AgentCommand::Mcp(args) => controller::run_mcp(&args),
-        AgentCommand::Memories(args) => controller::run_memories(&args),
+        AgentCommand::Sessions(args) => browse_surfaces(
+            Surface::Sessions,
+            settings,
+            &args,
+            &SkillsArgs::default(),
+            &McpArgs::default(),
+            &MemoriesArgs::default(),
+        ),
+        AgentCommand::Skills(args) => browse_surfaces(
+            Surface::Skills,
+            settings,
+            &SessionsArgs::default(),
+            &args,
+            &McpArgs::default(),
+            &MemoriesArgs::default(),
+        ),
+        AgentCommand::Mcp(args) => browse_surfaces(
+            Surface::Mcp,
+            settings,
+            &SessionsArgs::default(),
+            &SkillsArgs::default(),
+            &args,
+            &MemoriesArgs::default(),
+        ),
+        AgentCommand::Memories(args) => browse_surfaces(
+            Surface::Memories,
+            settings,
+            &SessionsArgs::default(),
+            &SkillsArgs::default(),
+            &McpArgs::default(),
+            &args,
+        ),
     }
+}
+
+/// Drive the four browsing surfaces. Each browser returns the surface the
+/// user jumped to with a digit key, so switching never exits to the shell.
+fn browse_surfaces(
+    initial: tui::common::Surface,
+    settings: &Settings,
+    sessions: &SessionsArgs,
+    skills: &SkillsArgs,
+    mcp: &McpArgs,
+    memories: &MemoriesArgs,
+) -> Result<()> {
+    use tui::common::Surface;
+    let mut next = Some(initial);
+    while let Some(surface) = next {
+        next = match surface {
+            Surface::Sessions => controller::run_sessions(sessions, settings)?,
+            Surface::Skills => controller::run_skills(skills, settings)?,
+            Surface::Mcp => controller::run_mcp(mcp)?,
+            Surface::Memories => controller::run_memories(memories)?,
+        };
+    }
+    Ok(())
 }
 
 #[cfg(test)]

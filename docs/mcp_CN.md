@@ -23,7 +23,8 @@ mena mcp --provider codex inspect codegraph --probe --timeout 15
 ```
 
 在交互终端中，`mena mcp` 会打开按客户端分组的可搜索浏览器；初始详情完全来自静态
-配置。管道输出仍是普通表格，`--json` 始终输出机器可读数据。
+配置。管道输出仍是普通表格，`--json` 始终输出机器可读数据，`--list` 不打开
+浏览器直接输出纯表格。
 
 浏览器快捷键：
 
@@ -34,8 +35,11 @@ mena mcp --provider codex inspect codegraph --probe --timeout 15
 - `o`：打开当前注册的准确来源文件并定位到定义行；
 - `e`：暂停浏览器，通过 `$VISUAL`、`$EDITOR` 或终端编辑器编辑该定义；
 - `d`：预览精确目标，经小写 `y` 确认后从原生配置中永久删除可写注册；
-- `p`：在工作线程显式 probe 当前注册，列表仍可继续操作；即使选择移动，结果也只会
-  绑定到发起 probe 的注册；
+- `p`：先展示 probe 将启动的确切内容——selector、源文件和命令或 URL——
+  再由小写 `y` 确认；probe 在工作线程运行，列表仍可继续操作；即使选择移动，
+  结果也只会绑定到发起 probe 的注册；
+- `?`：显示完整键位浮层；
+- `1` / `2` / `4`：跳转到 Sessions / Skills / Memories；
 - `q`/`Esc`：返回或退出。Probe 运行中退出时，Mena 会等待有界清理完成，避免遗留
   stdio 子进程。
 

@@ -55,7 +55,7 @@ mena sk inspect ponytail      # 检查唯一命名的 Skill
 mena mcp                      # 交互浏览 MCP 注册
 mena mcp open codegraph       # 打开来源配置并定位到该注册
 mena mcp inspect codegraph --probe  # 显式发现实时 MCP 元数据
-mena memories                 # 列出 Agent 记忆文件
+mena memories                 # 浏览 Agent 记忆文件
 mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 ```
 
@@ -66,8 +66,13 @@ mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 | `mena sessions` / `mena ss` | 搜索、检查、重命名、恢复、换 Agent 继续、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
 | `mena mcp` | 分组浏览注册，打开/编辑/删除配置，并显式探测元数据 |
-| `mena memories` / `mena ms` | 列出、读取、编辑和删除 Agent 记忆文件 |
+| `mena memories` / `mena ms` | 浏览、读取、编辑和删除 Agent 记忆文件 |
 | `mena config init` | 创建 `~/.config/mena/config.toml` |
+
+所有交互浏览器共享同一套按键：`/` 过滤、`?` 展开完整键位、`1`–`4` 在
+Sessions、Skills、MCP 和 Memories 之间直接切换；`p` 是唯一可能启动进程或访问
+网络的按键，且始终需要显式确认。各命令均支持 `--list`，不打开浏览器直接输出
+纯表格。
 
 ## Provider 支持
 

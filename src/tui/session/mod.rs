@@ -11,7 +11,7 @@ use crate::session::{
     AgentSession, DeletionSummary, DetailScope, SessionDetail, SessionProtection,
 };
 use crate::settings::SessionDetailColorSettings;
-use crate::tui::common::{ManagedTerminal, SessionDetailTheme, is_key_press};
+use crate::tui::common::{ManagedTerminal, SessionDetailTheme, is_key_press, surface_for_digit};
 
 pub(crate) use self::app::*;
 pub(crate) use self::event::*;
@@ -130,13 +130,21 @@ fn run_session_browser(
         }
         match input {
             Event::Key(key) if is_key_press(&key) => {
+                // The `?` overlay explains the keymap; any key closes it.
+                if app.show_help {
+                    app.show_help = false;
+                    continue;
+                }
                 if app.mode == BrowserMode::Search {
                     if key.code == KeyCode::Enter {
-                        // Enter commits the query. If a transcript loader is
-                        // available, kick off an incremental full-text search
-                        // (animated, Esc-cancellable); otherwise fall back to a
-                        // synchronous scalar-only filter.
-                        start_message_search(&mut app, callbacks.load_detail.is_some());
+                        // Filter mode narrows live and Enter just closes the
+                        // box. Transcript mode (opened with `m`) commits an
+                        // incremental full-text scan that Esc can cancel.
+                        if app.search_scope == SearchScope::Transcripts
+                            && callbacks.load_detail.is_some()
+                        {
+                            start_message_search(&mut app, true);
+                        }
                         app.mode = BrowserMode::Browse;
                     } else {
                         handle_search_key(&mut app, key);
@@ -173,17 +181,18 @@ fn run_session_browser(
                     KeyCode::Home => app.first(),
                     KeyCode::End => app.last(),
                     KeyCode::Char(' ') => app.toggle_mark(),
-                    // Batch mode: marks define a delete set, so single-session
-                    // actions lock until the marks are cleared with Esc.
-                    KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/' | 't')
-                        if is_batch_locked_key(&app, &key) =>
+                    KeyCode::Char('?') => app.show_help = true,
+                    KeyCode::Char('/') => app.begin_filter_search(),
+                    KeyCode::Char('m') => app.begin_transcript_search(),
+                    KeyCode::Char(digit @ '1'..='4')
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                     {
-                        app.status = Some(StatusMessage::error(
-                            "Batch mode: only d (delete) acts on marks — press Esc to clear marks first"
-                                .to_owned(),
-                        ));
+                        if let Some(surface) = surface_for_digit(digit) {
+                            return Ok(Some(SessionBrowserResult::Jump(surface)));
+                        }
                     }
-                    KeyCode::Char('/') => app.mode = BrowserMode::Search,
                     KeyCode::Char('g') => app.cycle_grouping(),
                     KeyCode::Char('r' | 'R') => {
                         return Ok(session_action_for_key(&app, key));

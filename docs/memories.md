@@ -10,6 +10,7 @@ Discovery is static: mena never launches a process to collect memories.
 mena ms
 mena ms --provider claude
 mena ms --scope project --json
+mena ms --list
 mena ms inspect CLAUDE.md --json
 mena ms inspect claude:user:CLAUDE.md
 mena ms open codex:user:AGENTS.md
@@ -23,6 +24,27 @@ actionable error.
 Names may be bare file names or `provider:scope:name` selectors. An operation
 requires one unique match; ambiguous names fail with the matching selectors
 listed so they can be narrowed with `--provider` and/or `--scope`.
+
+## Interactive browser
+
+With an interactive terminal, `mena ms` opens a master-detail browser using the
+same Calm Console shell as the other surfaces. `--list` prints the plain table
+instead.
+
+| Key | Action |
+|---|---|
+| `↑` / `↓`, `j` / `k` | Move through files, or scroll the preview after `Tab` |
+| `Home` / `End`, `PgUp` / `PgDn` | Jump or page the preview |
+| `Tab` / `l`, `h` | Switch between list and preview |
+| `/` | Filter by name, provider, scope, or location |
+| `o` | Edit the selected file in `$VISUAL`/`$EDITOR` |
+| `d`, then lowercase `y` | Delete the selected file after confirmation |
+| `?` | Show the full keymap overlay |
+| `1` / `2` / `3` | Jump to Sessions / Skills / MCP |
+| `q` / `Esc` | Quit |
+
+The confirmation dialog names the exact file, selector, and path before the
+lowercase `y` takes effect.
 
 ## Discovery locations
 

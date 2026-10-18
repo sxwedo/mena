@@ -49,20 +49,6 @@ pub(crate) fn pump_search(
     Ok(true)
 }
 
-/// Single-session actions stay locked while marks define a delete batch:
-/// resume, continue-with, details, grouping, and filtering all act outside
-/// the batch, so they explain themselves instead of firing.
-pub(crate) fn is_batch_locked_key(app: &SessionsApp, key: &KeyEvent) -> bool {
-    app.marked_count() > 0
-        && matches!(
-            key.code,
-            KeyCode::Enter | KeyCode::Char('r' | 'R' | 'g' | 'i' | '/' | 't')
-        )
-        && !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-}
-
 pub(crate) fn handle_confirm_delete_key(
     app: &mut SessionsApp,
     key: KeyEvent,
@@ -394,7 +380,7 @@ pub(crate) fn handle_detail_key(
                 });
             }
         }
-        KeyCode::Char('e') => {
+        KeyCode::Char('x') => {
             let result = app
                 .detail
                 .as_ref()
@@ -411,8 +397,8 @@ pub(crate) fn handle_detail_key(
                 });
             }
         }
-        KeyCode::Char('p') => app.set_preview_scope(DetailScope::Conversation),
-        KeyCode::Char('P') => app.set_preview_scope(DetailScope::All),
+        KeyCode::Char('s') => app.set_preview_scope(DetailScope::Conversation),
+        KeyCode::Char('S') => app.set_preview_scope(DetailScope::All),
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
             app.jump_detail_primary(false);
         }

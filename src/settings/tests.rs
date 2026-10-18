@@ -1,4 +1,3 @@
-
 use super::{ConfigColor, DEFAULT_CONFIG_TEMPLATE, Settings};
 
 #[test]

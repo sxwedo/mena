@@ -10,6 +10,7 @@ tree browser for related files.
 mena sk
 mena sk --provider codex
 mena sk --scope workspace --json
+mena sk --list
 mena sk inspect ponytail
 mena sk --provider codex --scope global inspect ponytail --json
 ```
@@ -50,10 +51,13 @@ An entry may be a direct Markdown file or a directory containing `SKILL.md`,
 | `/` | Filter by name, provider, scope, location, trigger, or description |
 | `s` | Show or hide top-level symlinked Skills |
 | `o` | Open the selected file's containing directory |
+| `?` | Show the full keymap overlay |
+| `1` / `3` / `4` | Jump to Sessions / MCP / Memories |
 | `q` / `Esc` | Close the preview or quit |
 
 Directory contents are loaded through the Skill catalog and cached for the
-browser. Search and redraw do not repeatedly walk the filesystem.
+browser. Search and redraw do not repeatedly walk the filesystem. `--list`
+prints the plain table without opening the interactive browser.
 
 ## Read limits and containment
 

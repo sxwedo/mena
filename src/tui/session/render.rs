@@ -10,8 +10,8 @@ use super::app::*;
 use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKind};
 use crate::tui::common::{
     SessionDetailTheme, UI, app_header, badge, centered_rect, header_inner, panel_block,
-    panel_title, render_canvas, render_header_frame, responsive_key_hints, scroll_meter,
-    selection_style, table_header_style, themed_key_hints, thinking_orb_spans,
+    panel_title, render_canvas, render_header_frame, render_keymap_popup, responsive_key_hints,
+    scroll_meter, selection_style, table_header_style, themed_key_hints, thinking_orb_spans,
 };
 use crate::view::{
     TOOL_TOKEN_ACCOUNTING_NOTE, format_duration, format_metric_error, format_model_usage_summary,
@@ -33,7 +33,26 @@ pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, _tick:
     render_session_footer(frame, areas[2], app);
     render_session_detail_popup(frame, app);
     render_delete_confirmation(frame, app);
+    if app.show_help {
+        render_keymap_popup(frame, "Sessions", SESSION_HELP_KEYS);
+    }
 }
+
+const SESSION_HELP_KEYS: &[(&str, &str)] = &[
+    ("↑/↓ j/k", "move through rows"),
+    ("Enter / i", "open the selected session"),
+    ("/", "filter target, provider, project, title"),
+    ("m", "search every transcript (Enter starts)"),
+    ("g", "flat or project-grouped rows"),
+    ("f", "cycle age filter: all, 1d, 7d, 30d"),
+    ("Space", "toggle delete marks"),
+    ("d", "move marked or selected sessions to trash"),
+    ("t", "rename (mena-owned title)"),
+    ("r / R", "resume / continue with another agent"),
+    ("2/3/4", "switch to Skills / MCP / Memories"),
+    ("?", "toggle this keymap"),
+    ("q / Esc", "quit (Esc clears marks first)"),
+];
 
 fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
     if app.mode == BrowserMode::Rename {
@@ -41,7 +60,11 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
         return;
     }
     let (state_color, state) = if app.mode == BrowserMode::Search {
-        (UI.amber, "Filter")
+        if app.search_scope == SearchScope::Transcripts {
+            (UI.amber, "Transcripts")
+        } else {
+            (UI.amber, "Filter")
+        }
     } else {
         (UI.cyan, "All")
     };
@@ -61,45 +84,38 @@ fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
         Style::default().fg(UI.text)
     };
 
+    // Persistent state badges: the active search state, the committed age
+    // and grouping filters, and the delete-mark count once marks exist.
+    let mut context = vec![
+        badge(state, state_color),
+        Span::styled("  Search: ", Style::default().fg(UI.muted)),
+        Span::styled(
+            format!(
+                "{query}{}",
+                if app.mode == BrowserMode::Search {
+                    "▌"
+                } else {
+                    ""
+                }
+            ),
+            query_style,
+        ),
+        Span::styled(
+            format!("  {}/{} visible", app.filtered.len(), app.sessions.len()),
+            Style::default().fg(UI.muted),
+        ),
+    ];
+    if app.since_days > 0 {
+        context.push(badge(format!("Age {}d", app.since_days), UI.violet));
+    }
+    if app.grouping == Grouping::Project {
+        context.push(badge("By project", UI.violet));
+    }
+    if app.marked_count() > 0 {
+        context.push(badge(format!("{} marked", app.marked_count()), UI.amber));
+    }
     frame.render_widget(
-        Paragraph::new(app_header(
-            "Sessions",
-            vec![
-                badge(state, state_color),
-                Span::styled("  Search: ", Style::default().fg(UI.muted)),
-                Span::styled(
-                    format!(
-                        "{query}{}",
-                        if app.mode == BrowserMode::Search {
-                            "▌"
-                        } else {
-                            ""
-                        }
-                    ),
-                    query_style,
-                ),
-                Span::styled(
-                    format!("  {}/{} visible", app.filtered.len(), app.sessions.len()),
-                    Style::default().fg(UI.muted),
-                ),
-                // In batch mode the amber mark count is the headline state:
-                // every other action is locked until marks are cleared.
-                Span::styled(
-                    format!("  ◆ {} marked for deletion", app.marked_count()),
-                    Style::default()
-                        .fg(if app.marked_count() > 0 {
-                            UI.amber
-                        } else {
-                            UI.grid
-                        })
-                        .add_modifier(if app.marked_count() > 0 {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-            ],
-        )),
+        Paragraph::new(app_header("Sessions", context)),
         header_inner(area),
     );
 }
@@ -427,7 +443,7 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
             themed_key_hints(
                 &[
                     ("n/N", "jump"),
-                    ("p", "chat"),
+                    ("s", "chat"),
                     ("c", "copy"),
                     ("Esc", "clear"),
                 ],
@@ -458,12 +474,12 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
             themed_key_hints(
                 &[
                     ("Shift+↑/↓", "msg"),
-                    ("p", "chat"),
-                    ("Shift+P", "all"),
+                    ("s", "chat"),
+                    ("S", "all"),
                     ("c", "copy"),
+                    ("x", "export"),
                     ("r", "resume"),
                     ("R", "handoff"),
-                    ("e", "export"),
                     ("/", "find"),
                     ("Esc", "close"),
                 ],
@@ -474,11 +490,11 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
         } else {
             themed_key_hints(
                 &[
-                    ("p/P", "scope"),
+                    ("s/S", "scope"),
                     ("c", "copy"),
+                    ("x", "export"),
                     ("r", "resume"),
                     ("R", "handoff"),
-                    ("/", "find"),
                     ("Esc", "close"),
                 ],
                 theme.footer_key,
@@ -591,7 +607,7 @@ pub(crate) fn session_detail_content(
         )));
     } else if visible.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No user or assistant messages in this scope. Press Shift+P to show everything.",
+            "No user or assistant messages in this scope. Press S to show everything.",
             Style::default().fg(theme.empty_text),
         )));
     }
@@ -852,9 +868,8 @@ pub(crate) fn search_progress_text(progress: &InProgressSearch, total: usize) ->
 }
 
 /// Footer hints for the session browser. `Space` toggles multi-select marks;
-/// with marks present the browser is in batch mode: only marking and deleting
-/// are offered, and every other action is locked until the marks are cleared
-/// with Esc.
+/// with marks present `d` deletes the marked set while every other action
+/// keeps working on the selected row.
 fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
     if app.mode == BrowserMode::Rename {
         return responsive_key_hints(
@@ -863,13 +878,26 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
             &[("Enter", "save"), ("Esc", "cancel")],
         );
     }
+    if app.mode == BrowserMode::Search {
+        let commit = if app.search_scope == SearchScope::Transcripts {
+            ("Enter", "scan transcripts")
+        } else {
+            ("Enter", "apply filter")
+        };
+        return responsive_key_hints(
+            width,
+            &[commit, ("Esc", "clear")],
+            &[commit, ("Esc", "clear")],
+        );
+    }
     if app.marked_count() > 0 {
         return responsive_key_hints(
             width,
             &[
                 ("d", "delete marked"),
                 ("Space", "mark"),
-                ("Esc", "clear"),
+                ("Esc", "clear marks"),
+                ("Enter", "details"),
                 ("q", "quit"),
             ],
             &[("d", "delete"), ("Space", "mark"), ("Esc", "clear")],
@@ -880,16 +908,17 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
         &[
             ("Space", "mark"),
             ("/", "filter"),
+            ("m", "text"),
             ("Enter", "details"),
-            ("t", "rename"),
             ("r", "resume"),
             ("R", "handoff"),
             ("d", "delete"),
+            ("?", "keys"),
             ("q", "quit"),
         ],
         &[
-            ("Space", "mark"),
             ("/", "filter"),
+            ("m", "text"),
             ("Enter", "details"),
             ("r", "resume"),
             ("R", "handoff"),
@@ -917,9 +946,9 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
             if batch {
-                format!("DELETE {count} SESSIONS")
+                format!("MOVE {count} SESSIONS TO TRASH")
             } else {
-                "DELETE THIS SESSION".to_owned()
+                "MOVE THIS SESSION TO TRASH".to_owned()
             },
             Style::default().fg(UI.danger).add_modifier(Modifier::BOLD),
         )),
@@ -1107,19 +1136,25 @@ pub(crate) fn session_cell(
             Cell::from(Span::styled(label, style))
         }
         SessionColumn::Title => {
-            let (mut title, is_placeholder) = session
+            let (title, is_placeholder) = session
                 .title
                 .as_ref()
                 .map_or_else(|| ("(untitled)".to_owned(), true), |t| (t.clone(), false));
-            if let Some(snippet) = app.search_snippets.get(&session.target()) {
-                title = format!("{title} — {snippet}");
-            }
             let style = if is_placeholder {
                 Style::default().fg(UI.muted)
             } else {
                 Style::default().fg(UI.text)
             };
-            Cell::from(Span::styled(title, style))
+            // A transcript-search hit renders as a muted second line so the
+            // provider title stays intact.
+            if let Some(snippet) = app.search_snippets.get(&session.target()) {
+                Cell::from(Text::from(vec![
+                    Line::styled(title, style),
+                    Line::styled(format!("↳ {snippet}"), Style::default().fg(UI.muted)),
+                ]))
+            } else {
+                Cell::from(Span::styled(title, style))
+            }
         }
     }
 }

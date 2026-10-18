@@ -11,7 +11,7 @@ use ratatui::widgets::{Paragraph, TableState, Wrap};
 use super::event::session_matches;
 use super::render::{fragment_detail_line, session_detail_content, session_project_label};
 use crate::session::{AgentSession, DeletionSummary, DetailScope, SessionDetail};
-use crate::tui::common::{SessionDetailTheme, UI};
+use crate::tui::common::{SessionDetailTheme, Surface, UI};
 
 pub(crate) type DeleteCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<DeletionSummary>;
 pub(crate) type DetailCallback<'a> = &'a mut dyn FnMut(&AgentSession) -> Result<SessionDetail>;
@@ -103,6 +103,17 @@ pub(crate) enum DetailAction {
 pub(crate) enum SessionBrowserResult {
     Resume(AgentSession),
     ContinueWith(AgentSession),
+    /// The user pressed a digit key to switch to another mena surface.
+    Jump(Surface),
+}
+
+/// What Enter commits while the search box is open. `/` filters the loaded
+/// catalog fields live; `m` scans every transcript after Enter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SearchScope {
+    #[default]
+    Filter,
+    Transcripts,
 }
 
 /// A full-text message search running incrementally so the UI can show
@@ -132,6 +143,10 @@ pub(crate) struct SessionsApp {
     pub(crate) protected_targets: BTreeSet<String>,
     pub(crate) table_state: TableState,
     pub(crate) query: String,
+    /// Whether the open search box commits a scalar filter or a transcript scan.
+    pub(crate) search_scope: SearchScope,
+    /// Whether the `?` keymap overlay is visible.
+    pub(crate) show_help: bool,
     pub(crate) mode: BrowserMode,
     pub(crate) detail_theme: SessionDetailTheme,
     pub(crate) detail: Option<SessionDetail>,
@@ -197,6 +212,8 @@ impl SessionsApp {
             protected_targets,
             table_state: TableState::default(),
             query: String::new(),
+            search_scope: SearchScope::default(),
+            show_help: false,
             mode: BrowserMode::Browse,
             detail_theme,
             detail: None,
@@ -318,6 +335,22 @@ impl SessionsApp {
         self.recompute_filter();
     }
 
+    /// Open the search box in transcript mode: Enter scans every transcript
+    /// instead of only filtering the loaded catalog fields.
+    pub(crate) fn begin_transcript_search(&mut self) {
+        self.search_scope = SearchScope::Transcripts;
+        self.status = None;
+        self.mode = BrowserMode::Search;
+    }
+
+    /// Open the search box in filter mode: the catalog narrows live while
+    /// typing and Enter simply closes the box.
+    pub(crate) fn begin_filter_search(&mut self) {
+        self.search_scope = SearchScope::Filter;
+        self.status = None;
+        self.mode = BrowserMode::Search;
+    }
+
     fn collapse_all_projects(&mut self) {
         self.collapsed_projects.clear();
         for &session_index in &self.filtered {
@@ -348,10 +381,13 @@ impl SessionsApp {
         } else {
             self.clamp_selection();
         }
-        self.status = Some(StatusMessage::success(format!(
-            "Grouped: {}",
-            self.grouping.label(),
-        )));
+        self.status = Some(StatusMessage::success(
+            if self.grouping == Grouping::Project {
+                "Grouped by project — groups start collapsed, Enter expands a group".to_owned()
+            } else {
+                "Grouped: flat list".to_owned()
+            },
+        ));
     }
 
     pub(crate) fn cycle_age(&mut self) {
