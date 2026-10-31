@@ -24,7 +24,7 @@ pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, _tick:
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(frame.area());
 
@@ -45,6 +45,7 @@ const SESSION_HELP_KEYS: &[(&str, &str)] = &[
     ("m", "search every transcript (Enter starts)"),
     ("g", "flat or project-grouped rows"),
     ("f", "cycle age filter: all, 1d, 7d, 30d"),
+    ("a", "show or hide subagent sessions"),
     ("Space", "toggle delete marks"),
     ("d", "move marked or selected sessions to trash"),
     ("t", "rename (mena-owned title)"),
@@ -622,6 +623,16 @@ fn session_metadata_lines(detail: &SessionDetail, theme: SessionDetailTheme) -> 
     vec![
         session_detail_line("Target", session.target(), theme),
         session_detail_line("Agent", session.kind.to_string(), theme),
+        session_detail_line("SubAgent", session.is_subagent.to_string(), theme),
+        session_detail_line(
+            "Parent session",
+            session
+                .parent_session_id
+                .as_deref()
+                .unwrap_or("-")
+                .to_owned(),
+            theme,
+        ),
         session_detail_line(
             "Title",
             session.title.as_deref().unwrap_or("(untitled)").to_owned(),
@@ -842,7 +853,20 @@ fn render_session_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
         || footer_for_status(app, area.width),
         |progress| searching_footer_line(progress, app),
     );
-    frame.render_widget(Paragraph::new(footer).alignment(Alignment::Center), area);
+    let subagents = if app.include_subagents {
+        "SubAgents on"
+    } else {
+        "SubAgents off"
+    };
+    let toggle = if app.mode == BrowserMode::Browse && app.search_in_progress.is_none() {
+        themed_key_hints(&[("a", subagents)], UI.violet, UI.text_soft, UI.grid)
+    } else {
+        Line::styled(subagents, Style::default().fg(UI.muted))
+    };
+    frame.render_widget(
+        Paragraph::new(vec![footer, toggle]).alignment(Alignment::Center),
+        area,
+    );
 }
 
 fn footer_for_status(app: &SessionsApp, width: u16) -> Line<'static> {
@@ -1044,6 +1068,7 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
             column(SessionColumn::Marked, "", Constraint::Length(1)),
             column(SessionColumn::Target, "Target", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
+            column(SessionColumn::Type, "Type", Constraint::Length(10)),
             column(SessionColumn::Agent, "Agent", Constraint::Length(12)),
             column(SessionColumn::Project, "Project", Constraint::Length(14)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
@@ -1054,6 +1079,7 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
             column(SessionColumn::Marked, "", Constraint::Length(1)),
             column(SessionColumn::Target, "Target", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
+            column(SessionColumn::Type, "Type", Constraint::Length(10)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(18)),
         ]
     } else {
@@ -1061,6 +1087,7 @@ pub(crate) fn session_columns(width: u16) -> Vec<Column<SessionColumn>> {
             column(SessionColumn::Marked, "", Constraint::Length(1)),
             column(SessionColumn::Target, "Target", Constraint::Length(20)),
             column(SessionColumn::Active, "", Constraint::Length(1)),
+            column(SessionColumn::Type, "Type", Constraint::Length(10)),
             column(SessionColumn::Title, "Title / summary", Constraint::Min(12)),
         ]
     }
@@ -1087,6 +1114,16 @@ pub(crate) fn session_cell(
                 Cell::from(Span::styled("●", Style::default().fg(UI.success)))
             } else {
                 Cell::from("")
+            }
+        }
+        SessionColumn::Type => {
+            if session.is_subagent {
+                Cell::from(Span::styled(
+                    "[SubAgent]",
+                    Style::default().fg(UI.violet).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Cell::from(Span::styled("-", Style::default().fg(UI.muted)))
             }
         }
         SessionColumn::Agent => {
@@ -1136,10 +1173,8 @@ pub(crate) fn session_cell(
             Cell::from(Span::styled(label, style))
         }
         SessionColumn::Title => {
-            let (title, is_placeholder) = session
-                .title
-                .as_ref()
-                .map_or_else(|| ("(untitled)".to_owned(), true), |t| (t.clone(), false));
+            let title = session.title.as_deref().unwrap_or("(untitled)").to_owned();
+            let is_placeholder = session.title.is_none();
             let style = if is_placeholder {
                 Style::default().fg(UI.muted)
             } else {

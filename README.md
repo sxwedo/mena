@@ -51,6 +51,7 @@ mena ag codex --resume        # resume the latest Codex session in this project
 mena ps                       # list running coding-agent processes
 mena sessions                 # browse saved sessions
 mena ss --provider cursor     # filter sessions by provider
+mena ss --include-subagents   # include identified SubAgent sessions (a toggles in the browser)
 mena skills                   # browse installed Agent Skills
 mena sk inspect ponytail      # inspect one uniquely named Skill
 mena mcp                      # interactively browse MCP registrations
@@ -81,17 +82,20 @@ the plain table without opening the browser.
 | Provider | Launch | Sessions | Continue with | MCP config |
 |---|:---:|:---:|---|:---:|
 | Claude Code | ✓ | ✓ | OMP import; Codex handoff | ✓ |
-| Codex | ✓ | ✓ | OMP import; Claude handoff | ✓ |
+| Codex | ✓ | ✓² | OMP import; Claude handoff | ✓ |
 | Gemini CLI | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
-| OpenCode | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
+| OpenCode | ✓ | ✓² | Claude/Codex/OMP handoff | ✓ |
 | Pi | ✓ | ✓ | Claude/Codex/OMP handoff | adapter¹ |
 | Oh My Pi | ✓ | ✓ | Claude/Codex handoff | ✓ |
-| Cursor Agent | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
+| Cursor Agent | ✓ | ✓² | Claude/Codex/OMP handoff | ✓ |
 | Grok | ✓ | ✓ | Claude/Codex/OMP handoff | — |
 | Goose | ✓ | — | — | ✓ |
 | Custom configuration | ✓ | — | — | — |
 
 ¹ Pi entries are discovered only when `pi-mcp-adapter` is installed.
+
+² Native SubAgent markers are recognized and hidden by default; use
+`--include-subagents` or press `a` in the session browser to show them.
 
 Custom agents and Goose do not have a generic session catalog. `mena` returns
 an explicit unsupported result instead of guessing provider-owned paths.

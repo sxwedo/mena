@@ -58,10 +58,7 @@ pub fn render_session_table(sessions: &[AgentSession]) -> String {
                     .project
                     .as_deref()
                     .map_or_else(|| "-".to_owned(), project_label),
-                session
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "(untitled)".to_owned()),
+                session.display_title(),
                 format_age(session.updated_at),
             ]
         })

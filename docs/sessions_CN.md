@@ -10,6 +10,7 @@ mena ss
 mena ss --provider codex
 mena ss --provider cursor --limit 20
 mena ss --include-empty
+mena ss --include-subagents
 mena ss --json
 mena ss rename codex:019f... "重构 Session catalog"
 mena ss --since-days 7
@@ -24,6 +25,18 @@ mena ss relocate /old/project /new/project --yes "<token>"
 `--limit` 必须大于等于 1。Cursor 和 Grok 中没有消息的草稿默认隐藏，传入
 `--include-empty` 后才会显示。Cursor 已归档的 Session 默认隐藏，传入
 `--include-archived` 后才会显示。`--since-days N` 只保留最近 N 天（每天 86400 秒）内更新过的 Session。
+
+根据原生元数据识别的 SubAgent 默认在交互列表、纯表格和 JSON 中隐藏。
+`--include-subagents` 可以显示，列表内也可按 `a` 切换。先过滤再应用 `--limit`，
+因此隐藏的 SubAgent 不占用数量限制。
+
+识别依据是 Codex 的 `session_meta.payload.source.subagent`、OpenCode 的
+`parentID`、Cursor 的 `isSubagent`（原生列或 JSON header）。交互列表新增独立的
+`Type` 列，子会话显示 `[SubAgent]`，其他行显示 `-`；纯表格在标题前加标记。
+详情会在有记录时展示父 Session ID。Codex 的 fork 本身不代表
+SubAgent，不会根据标题或时间猜测类型。没有已识别标记的 Provider 继续保留原有行。
+Claude 嵌套的 `subagents/` transcript 共用父 Session ID，不能独立恢复，即使开启
+此选项也不会作为单独 Session 列出。
 
 已保存 Session 的 Target 格式是 `provider:session-id`。只有在结果唯一时，才允许
 省略 Provider 或使用 ID 前缀。
@@ -46,6 +59,7 @@ overlay 条目。
 | `/` | 过滤 Target、Provider、项目和标题；Enter 关闭输入框 |
 | `m` | 搜索对话内容：Enter 启动可取消的扫描，停在第一处命中并以第二行显示片段 |
 | `g` | 切换平铺或按项目分组 |
+| `a` | 显示或隐藏已识别的 SubAgent Session |
 | `Space` | 切换当前行的删除标记 |
 | `Enter` / `i` | 打开选中的 Session（或展开分组头） |
 | `t` | 重命名选中的 Session（Enter 保存，Esc 取消） |
@@ -62,6 +76,9 @@ overlay 条目。
 （存在标记时），状态消息滚走也不会丢失当前过滤信息。受运行中 Agent 保护的
 Session 仍会拒绝删除；批量删除时受保护的 Session 会被跳过并提示，而不是阻断
 整批删除。
+
+底部独立一行常驻显示 `[a] SubAgents on/off`，即使出现状态消息，也不会遮住开关。
+窄终端也保留 `Type` 列，标题截断时仍能看出是不是 SubAgent 会话。
 
 列表使用紧凑 Target（`provider:ID 前 8 位`）以留出标题空间；详情视图、删除确认、导出、剪贴板内容与 `--json` 输出始终携带完整的 `provider:session-id`。对话搜索的命中片段以淡色第二行显示，不改写原标题。按项目分组时，每个分组头会以整行宽度显示完整项目路径。
 
@@ -121,6 +138,8 @@ Tool 结果、进程、权限、hook 和未提交工作区状态都必须重新�
   "target": "codex:019f...",
   "agent": "codex",
   "session_id": "019f...",
+  "is_subagent": false,
+  "parent_session_id": null,
   "title": "Refactor session catalog",
   "project": "/work/mena",
   "log": "/home/me/.codex/sessions/...jsonl",
@@ -131,6 +150,8 @@ Tool 结果、进程、权限、hook 和未提交工作区状态都必须重新�
 
 `title` 是展示用标题：若有 mena overlay 则用 overlay，否则用 Provider 原生标题
 或首条消息预览。目录记录中不存在的字段不会被虚构出来。
+`is_subagent` 表示原生元数据是否明确标记为 SubAgent；`parent_session_id`
+有记录时为原生父 Session ID，否则为 `null`。
 
 ## 安全与运行中 Session 关联
 
@@ -152,6 +173,8 @@ Provider 的 Session 存储。
 
 项目相同、时间接近或“最近更新”都不能建立精确关联。证据缺失或有歧义时，不会把
 任何 Session 标成 active，但删除仍会对该 Provider 的目录执行 fail-closed 保护。
+SubAgent 显示开关只影响展示；隐藏的 Session 仍保留在安全目录中，用于运行关联
+和删除保护。
 
 删除会把原生文件移到 mena 配置目录下的 `trash/sessions`，并写一份 `session.json`。`mena ss restore` 放回一条记录，且不会覆盖已经存在的路径。Cursor 索引行会先抄进这份清单再删除。
 

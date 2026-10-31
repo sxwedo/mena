@@ -160,6 +160,13 @@ mod tests {
         assert_eq!(args.provider.as_deref(), Some("codex"));
         assert_eq!(args.limit, Some(12));
         assert!(args.json);
+        assert!(!args.include_subagents);
+        let cli =
+            Cli::try_parse_from(["mena", "ss", "--include-subagents"]).expect("subagent flag");
+        let AgentCommand::Sessions(args) = cli.args.command else {
+            panic!("expected sessions");
+        };
+        assert!(args.include_subagents);
     }
     #[test]
     fn ag_is_equivalent_to_agent() {

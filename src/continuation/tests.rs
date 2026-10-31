@@ -108,6 +108,8 @@ fn prepared_handoff_is_private_contains_context_and_is_removed_after_use() {
         tokens: None,
         cost_usd: None,
         related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
     };
     let target = ContinuationTarget {
         kind: AgentKind::Codex,
@@ -165,6 +167,8 @@ fn native_import_does_not_load_or_copy_the_transcript() {
         tokens: None,
         cost_usd: None,
         related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
     };
     let target = ContinuationTarget {
         kind: AgentKind::OhMyPi,

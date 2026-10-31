@@ -510,11 +510,25 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<S
         })
         .transpose()?;
     let catalog = scan_sessions(provider.as_ref(), args.include_empty, args.include_archived)?;
-    let sessions = listed_sessions(&catalog, args);
+    let interactive =
+        !args.json && !args.list && io::stdin().is_terminal() && io::stdout().is_terminal();
+    // Keep the complete selection available for the browser's visibility toggle.
+    let sessions = if interactive {
+        listed_sessions(
+            &catalog,
+            &SessionsArgs {
+                include_subagents: true,
+                limit: None,
+                ..args.clone()
+            },
+        )
+    } else {
+        listed_sessions(&catalog, args)
+    };
     if args.json {
         let values: Vec<_> = sessions.iter().map(session_list_json).collect();
         println!("{}", serde_json::to_string_pretty(&values)?);
-    } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
+    } else if interactive {
         let protection = session_protection(&catalog, settings)?;
         let export_directory =
             std::env::current_dir().context("failed to resolve the session export directory")?;
@@ -526,6 +540,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<S
             sessions,
             protection,
             &settings.ui.session_detail.colors,
+            args,
             |session| catalog.detail(session),
             |detail, scope| crate::export::export_session_detail(detail, &export_directory, scope),
             |detail, scope| clipboard.copy_detail(detail, scope),
@@ -801,13 +816,16 @@ fn listed_sessions(catalog: &SessionCatalog, args: &SessionsArgs) -> Vec<AgentSe
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
-    catalog.sessions()[..count]
+    catalog
+        .sessions()
         .iter()
         .filter(|session| {
-            args.since_days.is_none_or(|days| {
-                crate::session::updated_within_days(session.updated_at, days, now)
-            })
+            (args.include_subagents || !session.is_subagent)
+                && args.since_days.is_none_or(|days| {
+                    crate::session::updated_within_days(session.updated_at, days, now)
+                })
         })
+        .take(count)
         .cloned()
         .collect()
 }
@@ -884,6 +902,8 @@ fn session_list_json(session: &AgentSession) -> Value {
         "target": session.target(),
         "agent": session.kind.slug(),
         "session_id": session.id,
+        "is_subagent": session.is_subagent,
+        "parent_session_id": session.parent_session_id,
         "title": session.title,
         "project": session.project,
         "log": session.path,

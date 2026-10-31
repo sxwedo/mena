@@ -31,6 +31,8 @@ pub(super) fn scan_codex(
         let mut project = None;
         let mut started_at = None;
         let mut forked = false;
+        let mut is_subagent = false;
+        let mut parent_session_id = None;
         visit_bounded_lines_limit(&path, Some(128), |line| {
             let Ok(record) = serde_json::from_slice::<Value>(line) else {
                 return true;
@@ -44,6 +46,14 @@ pub(super) fn scan_codex(
                 // meta after its own, and the later record owns the session
                 // identity. Keep reading so that later meta can still win.
                 forked = string_at(&record, "/payload/forked_from_id").is_some();
+                let source = record.pointer("/payload/source");
+                is_subagent = source.is_some_and(|source| {
+                    source.get("subagent").is_some() || source.as_str() == Some("subagent")
+                });
+                parent_session_id = string_at(
+                    &record,
+                    "/payload/source/subagent/thread_spawn/parent_thread_id",
+                );
             }
             if title.is_none()
                 && record.pointer("/payload/type").and_then(Value::as_str) == Some("message")
@@ -66,7 +76,7 @@ pub(super) fn scan_codex(
         })?;
         if let Some(id) = id {
             let title = indexed_titles.get(&id).cloned().or(title);
-            sessions.push(session(
+            let mut recorded = session(
                 AgentKind::Codex,
                 id,
                 title,
@@ -75,7 +85,10 @@ pub(super) fn scan_codex(
                 started_at,
                 None,
                 None,
-            )?);
+            )?;
+            recorded.is_subagent = is_subagent;
+            recorded.parent_session_id = parent_session_id;
+            sessions.push(recorded);
         }
     }
     Ok(())
@@ -200,7 +213,7 @@ pub(super) fn scan_opencode(
         let Some(id) = string_at(&value, "/id") else {
             continue;
         };
-        sessions.push(session(
+        let mut recorded = session(
             AgentKind::OpenCode,
             id,
             string_at(&value, "/title").and_then(|title| normalize_preview(&title)),
@@ -212,7 +225,11 @@ pub(super) fn scan_opencode(
                 .map(|time| time.to_string()),
             None,
             None,
-        )?);
+        )?;
+        recorded.parent_session_id =
+            string_at(&value, "/parentID").filter(|parent| !parent.trim().is_empty());
+        recorded.is_subagent = recorded.parent_session_id.is_some();
+        sessions.push(recorded);
     }
     Ok(())
 }
@@ -925,8 +942,10 @@ pub(super) fn scan_cursor(
 
         if sqlite_table_exists_conn(&connection, "composerHeaders").unwrap_or(false) {
             if let Ok(mut stmt) = connection.prepare(
-                "SELECT composerId, createdAt, lastUpdatedAt, isArchived, value FROM composerHeaders",
-            ) {
+                "SELECT composerId, createdAt, lastUpdatedAt, isArchived, value, isSubagent FROM composerHeaders",
+            ).or_else(|_| connection.prepare(
+                "SELECT composerId, createdAt, lastUpdatedAt, isArchived, value, NULL FROM composerHeaders",
+            )) {
                 let rows = stmt.query_map([], |row| {
                     let id: String = row.get(0)?;
                     let created_at: Option<u64> =
@@ -935,17 +954,21 @@ pub(super) fn scan_cursor(
                         row.get::<_, Option<i64>>(2).ok().flatten().and_then(|v| u64::try_from(v).ok());
                     let is_archived: Option<i64> = row.get(3).ok();
                     let value_str: Option<String> = row.get(4).ok();
-                    Ok((id, created_at, last_updated_at, is_archived, value_str))
+                    let is_subagent = row.get::<_, i64>(5).is_ok_and(|value| value != 0);
+                    Ok((id, created_at, last_updated_at, is_archived, value_str, is_subagent))
                 });
 
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
-                        let (id, created_at, last_updated_at, is_archived, value_str) = row;
+                        let (id, created_at, last_updated_at, is_archived, value_str, is_subagent) = row;
                         if is_archived.unwrap_or(0) != 0 && !include_archived {
                             continue;
                         }
+                        let header = value_str.as_deref()
+                            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                            .unwrap_or(Value::Null);
                         let (mut title, project, created_ms, updated_ms) =
-                            parse_composer_json(value_str.as_deref());
+                            parse_composer_json(&header);
                         if title.is_none() {
                             title = load_cursor_first_user_message_preview(&connection, &id);
                         }
@@ -969,6 +992,7 @@ pub(super) fn scan_cursor(
                             None,
                         ) {
                             let mut sess = session_obj;
+                            sess.is_subagent = is_subagent || cursor_is_subagent(&header);
                             if let Some(updated) = updated_secs {
                                 sess.updated_at = updated;
                             }
@@ -1043,6 +1067,7 @@ pub(super) fn scan_cursor(
                                         None,
                                     ) {
                                         let mut sess = session_obj;
+                                        sess.is_subagent = cursor_is_subagent(comp);
                                         if let Some(updated) = updated_secs {
                                             sess.updated_at = updated;
                                         }
@@ -1196,18 +1221,10 @@ fn keep_cursor_kv(
     Ok(())
 }
 
-fn parse_composer_json(
-    json_str: Option<&str>,
-) -> (Option<String>, Option<PathBuf>, Option<u64>, Option<u64>) {
-    let Some(json_str) = json_str else {
-        return (None, None, None, None);
-    };
-    let Ok(val) = serde_json::from_str::<Value>(json_str) else {
-        return (None, None, None, None);
-    };
-    let title = string_at(&val, "/name")
-        .or_else(|| string_at(&val, "/text"))
-        .or_else(|| string_at(&val, "/subtitle"));
+fn parse_composer_json(val: &Value) -> (Option<String>, Option<PathBuf>, Option<u64>, Option<u64>) {
+    let title = string_at(val, "/name")
+        .or_else(|| string_at(val, "/text"))
+        .or_else(|| string_at(val, "/subtitle"));
     let project = val
         .pointer("/workspaceIdentifier/uri/fsPath")
         .and_then(Value::as_str)
@@ -1219,6 +1236,12 @@ fn parse_composer_json(
     let created_ms = val.get("createdAt").and_then(Value::as_u64);
     let updated_ms = val.get("lastUpdatedAt").and_then(Value::as_u64);
     (title, project, created_ms, updated_ms)
+}
+
+fn cursor_is_subagent(value: &Value) -> bool {
+    value.get("isSubagent").is_some_and(|value| {
+        value.as_bool() == Some(true) || value.as_i64().is_some_and(|value| value != 0)
+    })
 }
 
 fn sqlite_table_exists_conn(connection: &Connection, table: &str) -> Result<bool> {

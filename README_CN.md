@@ -50,6 +50,7 @@ mena ag codex --resume        # 恢复当前项目最近的 Codex Session
 mena ps                       # 列出运行中的编码 Agent 进程
 mena sessions                 # 浏览已保存 Session
 mena ss --provider cursor     # 按 Provider 筛选 Session
+mena ss --include-subagents   # 显示已识别的 SubAgent 会话，列表内按 a 切换
 mena skills                   # 浏览已安装的 Agent Skill
 mena sk inspect ponytail      # 检查唯一命名的 Skill
 mena mcp                      # 交互浏览 MCP 注册
@@ -79,17 +80,20 @@ Sessions、Skills、MCP 和 Memories 之间直接切换；`p` 是唯一可能启
 | Provider | 启动 | Session | 换 Agent 继续 | MCP 配置 |
 |---|:---:|:---:|---|:---:|
 | Claude Code | ✓ | ✓ | 导入 OMP；handoff 到 Codex | ✓ |
-| Codex | ✓ | ✓ | 导入 OMP；handoff 到 Claude | ✓ |
+| Codex | ✓ | ✓² | 导入 OMP；handoff 到 Claude | ✓ |
 | Gemini CLI | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
-| OpenCode | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
+| OpenCode | ✓ | ✓² | handoff 到 Claude/Codex/OMP | ✓ |
 | Pi | ✓ | ✓ | handoff 到 Claude/Codex/OMP | adapter¹ |
 | Oh My Pi | ✓ | ✓ | handoff 到 Claude/Codex | ✓ |
-| Cursor Agent | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
+| Cursor Agent | ✓ | ✓² | handoff 到 Claude/Codex/OMP | ✓ |
 | Grok | ✓ | ✓ | handoff 到 Claude/Codex/OMP | — |
 | Goose | ✓ | — | — | ✓ |
 | 自定义配置 | ✓ | — | — | — |
 
 ¹ 仅在安装 `pi-mcp-adapter` 后发现 Pi 条目。
+
+² 根据原生标记识别 SubAgent，默认隐藏；通过 `--include-subagents` 或在列表内
+按 `a` 切换显示。
 
 自定义 Agent 和 Goose 没有通用 Session 目录。`mena` 会明确返回不支持，而不会
 猜测 Provider 自己的存储路径。

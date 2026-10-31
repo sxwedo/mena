@@ -54,6 +54,8 @@ fn aggregates_only_exact_response_metrics_by_model() {
             tokens: None,
             cost_usd: None,
             related_paths: BTreeSet::new(),
+            is_subagent: false,
+            parent_session_id: None,
         },
         messages: vec![
             SessionMessage {
@@ -144,6 +146,136 @@ fn duplicate_native_records_resolve_to_one_logical_session() {
     assert_eq!(summary.files, 2);
     for path in &rollout_paths {
         assert!(!path.exists(), "{} should be removed", path.display());
+    }
+}
+
+#[test]
+fn classifies_codex_and_opencode_subagents_from_native_metadata() {
+    use serde_json::json;
+
+    let temp = tempdir().expect("temp home");
+    let sources = [
+        (
+            "spawn",
+            json!({"subagent": {"thread_spawn": {"parent_thread_id": "parent", "depth": 1}}}),
+            true,
+        ),
+        ("review", json!({"subagent": "review"}), true),
+        ("compact", json!({"subagent": "compact"}), true),
+        ("legacy", json!("subagent"), true),
+        ("plain", json!("cli"), false),
+        ("missing", json!(null), false),
+    ];
+    for (id, source, expected) in &sources {
+        let meta = json!({"type": "session_meta", "payload": {
+            "id": id, "cwd": "/work", "source": source,
+            "forked_from_id": "a-fork-is-not-subagent-evidence"
+        }});
+        write(
+            &temp.path().join(format!(".codex/sessions/{id}.jsonl")),
+            &meta.to_string(),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        assert_eq!(
+            catalog
+                .resolve(Some("codex"), id)
+                .expect("session")
+                .is_subagent,
+            *expected
+        );
+    }
+    for (id, parent, expected) in [
+        ("child", json!("parent"), true),
+        ("main", json!(null), false),
+        ("empty", json!(""), false),
+    ] {
+        let meta = json!({"id": id, "parentID": parent, "title": "SubAgent discussion"});
+        write(
+            &temp.path().join(format!(
+                ".local/share/opencode/storage/session/project/{id}.json"
+            )),
+            &meta.to_string(),
+        );
+        let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+        assert_eq!(
+            catalog
+                .resolve(Some("opencode"), id)
+                .expect("session")
+                .is_subagent,
+            expected
+        );
+    }
+    let catalog = SessionCatalog::scan(temp.path()).expect("scan sessions");
+    let child = catalog.resolve(Some("codex"), "spawn").expect("child");
+    assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
+    let detail = catalog.detail(child).expect("child detail");
+    assert!(detail.session.is_subagent);
+    assert_eq!(detail.session.parent_session_id, child.parent_session_id);
+    // Visibility must not remove child sessions from the safety catalog.
+    let agent = live_agent(AgentKind::Codex, 42, &["codex"], "/work", 0);
+    let protection = catalog.protection(&[agent]).expect("protection");
+    assert!(protection.protected_targets.contains(&child.target()));
+    assert_eq!(protection.protected_targets.len(), sources.len());
+}
+
+#[test]
+fn classifies_cursor_subagents_in_native_columns_and_legacy_headers() {
+    use serde_json::json;
+
+    for (table, column) in [(true, true), (true, false), (false, false)] {
+        let temp = tempdir().expect("temp home");
+        let dir = temp.path().join(".config/Cursor/User/globalStorage");
+        fs::create_dir_all(&dir).expect("create storage");
+        let connection = rusqlite::Connection::open(dir.join("state.vscdb")).expect("database");
+        let headers = json!({"allComposers": [
+            {"composerId": "main", "name": "Main", "isSubagent": false},
+            {"composerId": "child", "name": "Child", "isSubagent": true},
+            {"composerId": "numeric", "name": "Numeric", "isSubagent": 1}
+        ]});
+        if table {
+            connection.execute_batch(if column {
+                "CREATE TABLE composerHeaders (composerId TEXT, createdAt INTEGER, lastUpdatedAt INTEGER, isArchived INTEGER, value TEXT, isSubagent INTEGER);"
+            } else {
+                "CREATE TABLE composerHeaders (composerId TEXT, createdAt INTEGER, lastUpdatedAt INTEGER, isArchived INTEGER, value TEXT);"
+            }).expect("schema");
+            for header in headers["allComposers"].as_array().expect("headers") {
+                let mut header = header.clone();
+                if column {
+                    header.as_object_mut().expect("header").remove("isSubagent");
+                }
+                connection.execute(
+                    if column { "INSERT INTO composerHeaders (composerId, value, isSubagent) VALUES (?1, ?2, ?3)" }
+                    else { "INSERT INTO composerHeaders (composerId, value) VALUES (?1, ?2)" },
+                    rusqlite::params_from_iter(if column {
+                        vec![header["composerId"].as_str().expect("id").to_owned(), header.to_string(), if header["composerId"] == "main" { "0" } else { "1" }.to_owned()]
+                    } else {
+                        vec![header["composerId"].as_str().expect("id").to_owned(), header.to_string()]
+                    }),
+                ).expect("insert header");
+            }
+        } else {
+            connection
+                .execute_batch("CREATE TABLE ItemTable (key TEXT, value TEXT);")
+                .expect("schema");
+            connection
+                .execute(
+                    "INSERT INTO ItemTable VALUES ('composer.composerHeaders', ?1)",
+                    [headers.to_string()],
+                )
+                .expect("headers");
+        }
+        drop(connection);
+        let catalog = SessionCatalog::scan(temp.path()).expect("catalog");
+        assert_eq!(catalog.sessions().len(), 3);
+        for id in ["main", "child", "numeric"] {
+            assert_eq!(
+                catalog
+                    .resolve(Some("cursor"), id)
+                    .expect("session")
+                    .is_subagent,
+                id != "main"
+            );
+        }
     }
 }
 
@@ -2323,6 +2455,8 @@ fn set_title_rejects_sessions_outside_the_catalog() {
         project: None,
         path: temp.path().join("missing.json"),
         related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
         started_at: None,
         updated_at: 0,
         tokens: None,

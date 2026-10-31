@@ -22,6 +22,7 @@ pub(crate) fn manage_sessions(
     sessions: Vec<AgentSession>,
     protection: SessionProtection,
     detail_colors: &SessionDetailColorSettings,
+    options: &crate::SessionsArgs,
     mut load_detail: impl FnMut(&AgentSession) -> Result<SessionDetail>,
     mut export: impl FnMut(&SessionDetail, DetailScope) -> Result<PathBuf>,
     mut copy: impl FnMut(&SessionDetail, DetailScope) -> Result<()>,
@@ -33,6 +34,7 @@ pub(crate) fn manage_sessions(
         protection.exact_active_targets,
         protection.protected_targets,
         SessionDetailTheme::from(detail_colors),
+        options,
         SessionBrowserCallbacks {
             load_detail: Some(&mut load_detail),
             export: Some(&mut export),
@@ -48,6 +50,7 @@ fn run_session_browser(
     active_targets: BTreeSet<String>,
     protected_targets: BTreeSet<String>,
     detail_theme: SessionDetailTheme,
+    options: &crate::SessionsArgs,
     mut callbacks: SessionBrowserCallbacks<'_>,
 ) -> Result<Option<SessionBrowserResult>> {
     let mut app = SessionsApp::new_with_detail_theme(
@@ -56,6 +59,9 @@ fn run_session_browser(
         protected_targets,
         detail_theme,
     );
+    app.include_subagents = options.include_subagents;
+    app.limit = options.limit.and_then(|limit| usize::try_from(limit).ok());
+    app.recompute_filter();
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     let mut tick: usize = 0;
     loop {
@@ -194,6 +200,7 @@ fn run_session_browser(
                         }
                     }
                     KeyCode::Char('g') => app.cycle_grouping(),
+                    KeyCode::Char('a') => app.toggle_subagents(),
                     KeyCode::Char('r' | 'R') => {
                         return Ok(session_action_for_key(&app, key));
                     }

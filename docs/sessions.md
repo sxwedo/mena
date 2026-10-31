@@ -10,6 +10,7 @@ mena ss
 mena ss --provider codex
 mena ss --provider cursor --limit 20
 mena ss --include-empty
+mena ss --include-subagents
 mena ss --json
 mena ss --list
 mena ss rename codex:019f... "Refactor session catalog"
@@ -26,6 +27,19 @@ always lists nothing. `--limit` must be at least 1. Cursor and Grok draft
 sessions without messages are hidden unless `--include-empty` is present.
 Archived Cursor sessions are hidden unless `--include-archived` is present.
 `--since-days N` keeps sessions updated within the last N days of 86400 seconds.
+SubAgent sessions identified by native metadata are hidden by default in the
+browser, plain table, and JSON. `--include-subagents` includes them; the browser
+also supports `a` to toggle visibility. Filters apply before `--limit`, so hidden
+SubAgents do not consume the limit.
+
+Identification uses Codex `session_meta.payload.source.subagent`, OpenCode
+`parentID`, and Cursor `isSubagent` (native column or JSON header). The list marks
+these rows with `[SubAgent]` in a dedicated `Type` column (`-` for other rows);
+the plain table prefixes the title instead. Details show the parent session ID when recorded.
+Codex forks alone do not imply a SubAgent. Titles and timestamps are never used
+to guess the type. Providers without a recognized marker retain their rows.
+Claude's nested `subagents/` transcripts share the parent's session ID and
+cannot be resumed independently, so they remain excluded even with this flag.
 
 A saved-session target is `provider:session-id`. An unqualified ID or prefix is
 accepted only when it resolves to one logical session.
@@ -49,6 +63,7 @@ screen browser.
 | `/` | Filter target, provider, project, and title; Enter closes the box |
 | `m` | Search transcripts: Enter starts a cancellable scan that stops at the first hit and shows that snippet on a second line |
 | `g` | Toggle flat or project-grouped rows |
+| `a` | Show or hide identified SubAgent sessions |
 | `Space` | Toggle a delete mark on the selected row |
 | `Enter` / `i` | Open the selected session (or expand a group header) |
 | `t` | Rename the selected session (Enter saves, Esc cancels) |
@@ -67,6 +82,10 @@ grouping, and the mark count once marks exist — so a status message can scroll
 away without hiding the current filter. Deleting a session attached to a
 running agent is still refused, and protected sessions are skipped from a
 batch with a notice instead of blocking the whole deletion.
+
+The bottom row keeps `[a] SubAgents on/off` visible alongside the action footer,
+including while a status message is displayed. The `Type` column remains visible
+in narrow terminals so SubAgent identity does not depend on the title fitting.
 
 The list shows compact targets (`provider:first-8-id-characters`) to leave
 room for titles; the detail view, delete confirmations, exports, clipboard
@@ -136,6 +155,8 @@ provider did not persist one.
   "target": "codex:019f...",
   "agent": "codex",
   "session_id": "019f...",
+  "is_subagent": false,
+  "parent_session_id": null,
   "title": "Refactor session catalog",
   "project": "/work/mena",
   "log": "/home/me/.codex/sessions/...jsonl",
@@ -147,6 +168,8 @@ provider did not persist one.
 `title` is the displayed title: a mena overlay when one exists, otherwise the
 provider-native title or first-message preview. The command does not claim
 fields that are absent from the catalog record.
+`is_subagent` reports whether native metadata identifies a SubAgent;
+`parent_session_id` is its native parent ID when available, otherwise `null`.
 
 ## Safety and live-session association
 
@@ -172,6 +195,8 @@ An active indicator requires exact provider-native evidence:
 Project equality, recency, and timestamps alone never establish an exact
 association. If evidence is missing or ambiguous, no session is marked active,
 but deletion still fails closed for that provider's catalog.
+SubAgent visibility is a display filter; hidden sessions remain in the safety
+catalog for live-session association and deletion protection.
 
 Deletion moves native files into `trash/sessions` under the mena config
 directory and writes a `session.json` manifest. `mena ss restore` puts one

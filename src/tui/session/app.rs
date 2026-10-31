@@ -167,6 +167,8 @@ pub(crate) struct SessionsApp {
     pub(crate) search_snippets: BTreeMap<String, String>,
     /// `0` shows every age. Otherwise only sessions updated within this many days.
     pub(crate) since_days: u64,
+    pub(crate) include_subagents: bool,
+    pub(crate) limit: Option<usize>,
     listed_at: u64,
     /// Whether the table renders flat or with per-project group headers.
     pub(crate) grouping: Grouping,
@@ -227,6 +229,8 @@ impl SessionsApp {
             search_in_progress: None,
             search_snippets: BTreeMap::new(),
             since_days: 0,
+            include_subagents: false,
+            limit: None,
             listed_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |duration| duration.as_secs()),
@@ -253,18 +257,25 @@ impl SessionsApp {
             .iter()
             .enumerate()
             .filter(|(index, session)| {
-                (since_days == 0
-                    || crate::session::updated_within_days(
-                        session.updated_at,
-                        since_days,
-                        listed_at,
-                    ))
+                (self.include_subagents || !session.is_subagent)
+                    && (since_days == 0
+                        || crate::session::updated_within_days(
+                            session.updated_at,
+                            since_days,
+                            listed_at,
+                        ))
                     && (scalar_hits(session)
                         || message_hits.is_some_and(|hits| hits.contains(index)))
             })
             .map(|(index, _)| index)
+            .take(self.limit.unwrap_or(usize::MAX))
             .collect();
         self.clamp_selection();
+    }
+
+    pub(crate) fn toggle_subagents(&mut self) {
+        self.include_subagents = !self.include_subagents;
+        self.recompute_filter();
     }
 
     fn clamp_selection(&mut self) {
@@ -912,6 +923,7 @@ pub(crate) enum SessionColumn {
     Marked,
     Target,
     Active,
+    Type,
     Agent,
     Project,
     Title,

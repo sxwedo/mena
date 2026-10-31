@@ -137,6 +137,8 @@ fn fixture_detail() -> SessionDetail {
                 tokens: Some(123_456),
                 cost_usd: Some(1.25),
                 related_paths: BTreeSet::new(),
+                is_subagent: false,
+                parent_session_id: None,
             },
             messages: vec![
                 SessionMessage {

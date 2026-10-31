@@ -158,6 +158,9 @@ pub struct SessionsArgs {
     /// Include Cursor sessions the client has archived
     #[arg(long)]
     pub include_archived: bool,
+    /// Include sessions explicitly identified as subagents by their provider
+    #[arg(long)]
+    pub include_subagents: bool,
     /// Hide sessions last updated more than this many days ago
     #[arg(long)]
     pub since_days: Option<u64>,

@@ -1672,7 +1672,91 @@ fn fixture_session() -> AgentSession {
         tokens: Some(125_500_000),
         cost_usd: None,
         related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
     }
+}
+
+#[test]
+fn subagent_visibility_toggles_without_losing_search_or_limits() {
+    let mut child = fixture_session();
+    child.id = "child".to_owned();
+    child.title = Some("Child task".to_owned());
+    child.is_subagent = true;
+    child.parent_session_id = Some("session-id".to_owned());
+    let mut app = SessionsApp::new(vec![child, fixture_session()], BTreeSet::new());
+    assert_eq!(app.filtered, vec![1]);
+    app.limit = Some(1);
+    app.recompute_filter();
+    assert_eq!(app.filtered, vec![1]);
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 20)).expect("terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw");
+    let screen = buffer_text(terminal.backend().buffer(), 140, 20);
+    assert!(screen.contains("SubAgents off"));
+    assert!(
+        screen
+            .lines()
+            .last()
+            .expect("footer")
+            .contains("[a] SubAgents off")
+    );
+    assert!(!screen.contains("Child task"));
+
+    app.toggle_subagents();
+    assert_eq!(app.filtered, vec![0]);
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("draw");
+    let screen = buffer_text(terminal.backend().buffer(), 140, 20);
+    assert!(screen.contains("SubAgents on"));
+    assert!(screen.contains("[SubAgent]"));
+    assert!(screen.contains("Child task"));
+    for width in [60, 80, 120] {
+        app.status = Some(StatusMessage::success("Display updated".to_owned()));
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).expect("terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app, 0))
+            .expect("draw");
+        let screen = buffer_text(terminal.backend().buffer(), width, 20);
+        assert!(
+            screen
+                .lines()
+                .last()
+                .expect("footer")
+                .contains("[a] SubAgents on")
+        );
+        assert!(screen.contains("Display updated"));
+        let (_, marker_row) = find_text(terminal.backend().buffer(), width, 20, "[SubAgent]")
+            .expect("visible subagent marker");
+        assert!(
+            (3..18).contains(&marker_row),
+            "marker must be inside the table"
+        );
+        assert!(
+            session_columns(width)
+                .iter()
+                .any(|column| column.kind == SessionColumn::Type)
+        );
+    }
+
+    app.limit = None;
+    app.query = "transcript-only-query".to_owned();
+    app.message_search = Some(BTreeSet::from([0]));
+    app.recompute_filter();
+    assert_eq!(app.filtered, vec![0]);
+    app.toggle_subagents();
+    assert!(app.filtered.is_empty());
+    assert!(app.selected_session().is_none());
+    app.toggle_subagents();
+    assert_eq!(app.filtered, vec![0]);
+    app.cycle_grouping();
+    assert!(matches!(
+        app.display_rows().first(),
+        Some(DisplayRow::GroupHeader { count: 1, .. })
+    ));
 }
 
 /// Build a minimal session with the given id/title and a distinct transcript path,
@@ -1689,6 +1773,8 @@ fn transcript_session(id: &str, title: &str, path: &str) -> AgentSession {
         tokens: None,
         cost_usd: None,
         related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
     }
 }
 

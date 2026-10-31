@@ -135,6 +135,9 @@ pub struct AgentSession {
     /// is the most recently updated one and deletion removes every related
     /// file alongside it. The catalog lists each logical session once.
     pub related_paths: BTreeSet<PathBuf>,
+    /// True only when provider-native metadata identifies a subagent session.
+    pub is_subagent: bool,
+    pub parent_session_id: Option<String>,
     pub started_at: Option<String>,
     pub updated_at: u64,
     pub tokens: Option<u64>,
@@ -142,6 +145,15 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    pub(crate) fn display_title(&self) -> String {
+        let title = self.title.as_deref().unwrap_or("(untitled)");
+        if self.is_subagent {
+            format!("[SubAgent] {title}")
+        } else {
+            title.to_owned()
+        }
+    }
+
     pub(crate) fn target(&self) -> String {
         format!("{}:{}", self.kind.slug(), self.id)
     }
@@ -564,6 +576,10 @@ impl SessionCatalog {
             let key = (session.kind.clone(), session.id.clone());
             if let Some(&position) = primary_index.get(&key) {
                 let primary = &mut merged[position];
+                primary.is_subagent |= session.is_subagent;
+                if primary.parent_session_id.is_none() {
+                    primary.parent_session_id = session.parent_session_id;
+                }
                 if session.path != primary.path {
                     primary.related_paths.insert(session.path);
                 }
@@ -1024,6 +1040,8 @@ fn session(
         updated_at: modified_seconds(&path)?,
         path,
         related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
         started_at,
         tokens,
         cost_usd,
