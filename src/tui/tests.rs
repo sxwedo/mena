@@ -2437,8 +2437,13 @@ fn selected_messages_are_highlighted_and_fork_confirmation_names_the_method() {
         find_text(terminal.backend().buffer(), 100, 30, "SELECTED-MESSAGE").expect("selected text");
     assert_eq!(
         terminal.backend().buffer().cell(position).expect("cell").bg,
-        UI.selection
+        UI.message_selection
     );
+    assert_eq!(
+        terminal.backend().buffer().cell(position).expect("cell").fg,
+        UI.text
+    );
+    assert!(find_text(terminal.backend().buffer(), 100, 30, "┃").is_some());
     handle_detail_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),

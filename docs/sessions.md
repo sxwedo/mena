@@ -123,7 +123,8 @@ Conversation-only exports end in `-conv.md`; complete exports end in
 ## Fork from a message
 
 Select a visible message with `Tab` / `Shift+Tab`; the entire selected message
-is highlighted. `f` opens a confirmation naming the boundary and method.
+has a contrasting blue background, bright text, and a blue border marker.
+`f` opens a confirmation naming the boundary and method.
 Lowercase `y` creates the fork; `Esc` cancels. `F` forces a context fork.
 Message selection is separate from scrolling and does not modify the transcript.
 

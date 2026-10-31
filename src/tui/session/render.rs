@@ -317,7 +317,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         .map(|offset| offset.min(app.detail_max_scroll))
         .collect();
     app.detail_primary_offsets.dedup();
-    let (text, local_scroll) = {
+    let (text, local_scroll, selected_offsets) = {
         let layout = app
             .detail_layout
             .as_ref()
@@ -325,7 +325,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         let (start, end, local_scroll) =
             layout.visible_span(app.detail_scroll, usize::from(areas[0].height));
         if end <= start {
-            (Text::default(), local_scroll)
+            (Text::default(), local_scroll, None)
         } else {
             // Search matches carry a quiet band; the focused match glows.
             let (match_lines, focus_line) = app.detail_search.as_ref().map_or_else(
@@ -355,21 +355,32 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
                 .map(|(offset, line)| {
                     let global = start + offset;
                     let style = if focus_line == Some(global) {
-                        Style::default().bg(UI.amber)
+                        Style::default().bg(UI.amber).fg(UI.canvas)
                     } else if match_lines.contains(&global) {
                         Style::default().bg(UI.grid)
                     } else if selected_range
                         .as_ref()
                         .is_some_and(|range| range.contains(&global))
                     {
-                        Style::default().bg(UI.selection)
+                        Style::default()
+                            .bg(UI.message_selection)
+                            .fg(UI.text)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         return line.clone();
                     };
-                    line.clone().patch_style(style)
+                    let mut line = line.clone().patch_style(style);
+                    if let Some(foreground) = style.fg {
+                        for span in &mut line.spans {
+                            span.style = span.style.fg(foreground);
+                        }
+                    }
+                    line
                 })
                 .collect::<Vec<Line<'static>>>();
-            (Text::from(lines), local_scroll)
+            let selected_offsets = selected_range
+                .map(|range| layout.line_offsets[range.start]..layout.line_offsets[range.end]);
+            (Text::from(lines), local_scroll, selected_offsets)
         }
     };
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
@@ -388,6 +399,20 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     );
     frame.render_widget(block.title(title), popup);
     frame.render_widget(paragraph.scroll((local_scroll, 0)), areas[0]);
+    if let Some(range) = selected_offsets {
+        let height = usize::from(areas[0].height);
+        let top = u16::try_from(range.start.saturating_sub(app.detail_scroll).min(height))
+            .unwrap_or(areas[0].height);
+        let bottom = u16::try_from(range.end.saturating_sub(app.detail_scroll).min(height))
+            .unwrap_or(areas[0].height);
+        for row in top..bottom {
+            frame.render_widget(
+                Paragraph::new("┃")
+                    .style(Style::default().fg(UI.signal).add_modifier(Modifier::BOLD)),
+                Rect::new(popup.x, areas[0].y + row, 1, 1),
+            );
+        }
+    }
     render_detail_status_bar(frame, areas[1], app.detail_status.as_ref(), theme);
     render_detail_footer(frame, areas[2], app);
 }
