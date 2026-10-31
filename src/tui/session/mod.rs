@@ -20,6 +20,7 @@ pub(crate) use self::render::*;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn manage_sessions(
     sessions: Vec<AgentSession>,
+    saved: &mut Option<SessionsApp>,
     protection: SessionProtection,
     detail_colors: &SessionDetailColorSettings,
     options: &crate::SessionsArgs,
@@ -29,12 +30,22 @@ pub(crate) fn manage_sessions(
     mut delete: impl FnMut(&AgentSession) -> Result<DeletionSummary>,
     mut rename: impl FnMut(&AgentSession, &str) -> Result<Option<String>>,
 ) -> Result<Option<SessionBrowserResult>> {
+    let initial = saved.is_none();
+    let app = saved.get_or_insert_with(|| {
+        SessionsApp::new_with_detail_theme(
+            Vec::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            SessionDetailTheme::from(detail_colors),
+        )
+    });
+    if initial {
+        app.include_subagents = options.include_subagents;
+        app.limit = options.limit.and_then(|limit| usize::try_from(limit).ok());
+    }
+    app.refresh_catalog(sessions, protection);
     run_session_browser(
-        sessions,
-        protection.exact_active_targets,
-        protection.protected_targets,
-        SessionDetailTheme::from(detail_colors),
-        options,
+        app,
         SessionBrowserCallbacks {
             load_detail: Some(&mut load_detail),
             export: Some(&mut export),
@@ -46,28 +57,15 @@ pub(crate) fn manage_sessions(
 }
 
 fn run_session_browser(
-    sessions: Vec<AgentSession>,
-    active_targets: BTreeSet<String>,
-    protected_targets: BTreeSet<String>,
-    detail_theme: SessionDetailTheme,
-    options: &crate::SessionsArgs,
+    app: &mut SessionsApp,
     mut callbacks: SessionBrowserCallbacks<'_>,
 ) -> Result<Option<SessionBrowserResult>> {
-    let mut app = SessionsApp::new_with_detail_theme(
-        sessions,
-        active_targets,
-        protected_targets,
-        detail_theme,
-    );
-    app.include_subagents = options.include_subagents;
-    app.limit = options.limit.and_then(|limit| usize::try_from(limit).ok());
-    app.recompute_filter();
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     let mut tick: usize = 0;
     loop {
         terminal
             .terminal
-            .draw(|frame| draw_sessions(frame, &mut app, tick))
+            .draw(|frame| draw_sessions(frame, app, tick))
             .context("failed to draw session browser")?;
 
         tick = tick.wrapping_add(1);
@@ -75,7 +73,7 @@ fn run_session_browser(
         // While a transcript search runs incrementally, drive it one batch per
         // frame instead of blocking on event::read. Esc cancels; any other key
         // is swallowed until the scan finishes. Each tick redraws the spinner.
-        if pump_search(&mut app, callbacks.load_detail.as_mut())
+        if pump_search(app, callbacks.load_detail.as_mut())
             .context("failed to advance transcript search")?
         {
             continue;
@@ -106,7 +104,7 @@ fn run_session_browser(
                     continue;
                 }
                 let action = handle_detail_browser_event(
-                    &mut app,
+                    app,
                     &input,
                     &mut callbacks.export,
                     &mut callbacks.copy,
@@ -149,20 +147,39 @@ fn run_session_browser(
                         if app.search_scope == SearchScope::Transcripts
                             && callbacks.load_detail.is_some()
                         {
-                            start_message_search(&mut app, true);
+                            start_message_search(app, true);
                         }
                         app.mode = BrowserMode::Browse;
                     } else {
-                        handle_search_key(&mut app, key);
+                        handle_search_key(app, key);
+                    }
+                    continue;
+                }
+                if app.mode == BrowserMode::ConfirmFork {
+                    match key.code {
+                        KeyCode::Char('y') => {
+                            if let Some((detail, message)) =
+                                app.detail.clone().zip(app.selected_message)
+                            {
+                                return Ok(Some(SessionBrowserResult::Fork {
+                                    detail,
+                                    message,
+                                    native: app.native_fork,
+                                }));
+                            }
+                        }
+                        KeyCode::Char('F') => app.native_fork = false,
+                        KeyCode::Char('n') | KeyCode::Esc => app.mode = BrowserMode::Detail,
+                        _ => {}
                     }
                     continue;
                 }
                 if app.mode == BrowserMode::ConfirmDelete {
-                    handle_confirm_delete_key(&mut app, key, &mut callbacks.delete);
+                    handle_confirm_delete_key(app, key, &mut callbacks.delete);
                     continue;
                 }
                 if app.mode == BrowserMode::Rename {
-                    handle_rename_key(&mut app, key, &mut callbacks.rename);
+                    handle_rename_key(app, key, &mut callbacks.rename);
                     continue;
                 }
                 app.status = None;
@@ -195,14 +212,16 @@ fn run_session_browser(
                             .modifiers
                             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                     {
-                        if let Some(surface) = surface_for_digit(digit) {
+                        if let Some(surface) = surface_for_digit(digit)
+                            .filter(|surface| *surface != crate::tui::common::Surface::Sessions)
+                        {
                             return Ok(Some(SessionBrowserResult::Jump(surface)));
                         }
                     }
                     KeyCode::Char('g') => app.cycle_grouping(),
                     KeyCode::Char('a') => app.toggle_subagents(),
                     KeyCode::Char('r' | 'R') => {
-                        return Ok(session_action_for_key(&app, key));
+                        return Ok(session_action_for_key(app, key));
                     }
                     KeyCode::Enter | KeyCode::Char('i') => {
                         if let Some(DisplayRow::GroupHeader { project, .. }) = app.selected_row() {
@@ -231,7 +250,7 @@ fn run_session_browser(
             Event::Paste(value) if app.mode == BrowserMode::Search => app.append_search(&value),
             Event::Paste(value) if app.mode == BrowserMode::Rename => app.append_rename(&value),
             Event::Mouse(mouse) if app.mode == BrowserMode::Browse => {
-                handle_session_mouse(&mut app, mouse.kind);
+                handle_session_mouse(app, mouse.kind);
             }
             _ => {}
         }

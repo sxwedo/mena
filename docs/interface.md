@@ -34,9 +34,9 @@ The same key means the same thing in every browser:
 - `o` opens the native artifact: the Skill directory, the MCP source config,
   or the memory file in the configured editor.
 - `e` edits a native configuration; it never exports.
-- `p` is the only key that can start a process or contact an endpoint, and it
-  always shows a confirmation naming the selector, the source, and what will
-  run before anything starts.
+- In the MCP browser, `p` requests a live probe. It always shows a confirmation
+  naming the selector, source, and what will run before starting a configured
+  server or contacting its endpoint.
 - `d` deletes. The confirmation states the exact consequence — trash with a
   restore path for sessions, an irreversible rewrite for MCP and memory files.
 - `?` opens a full keymap overlay for the current surface; any key closes it.
@@ -51,7 +51,7 @@ The interface adapts from the frame size on every redraw:
   list/preview panes stack vertically;
 - below 88 columns, the launcher hides its lower-priority session-context
   column;
-- below 96 columns, footers collapse to the primary key hints;
+- when full key hints exceed the available width, footers fit a compact set of primary actions;
 - the Session table preserves `TARGET` as its first column at every width, and
   detail views retain independent scrolling.
 
@@ -73,3 +73,8 @@ The UI uses Unicode box-drawing characters and RGB colors. Modern terminals
 render the intended palette directly; terminals with a smaller color space may
 approximate it. Native terminal selection and `Command+C` remain available in
 Session detail views.
+
+Surface switching preserves filters, selection, expansion, and focus for the current run.
+Footers fit their actual text width. Delete and MCP probe confirmations bind their targets
+and block background navigation. In Session details, Tab / Shift+Tab highlights messages;
+f / F opens native or context fork confirmation.

@@ -142,6 +142,7 @@ fn fixture_detail() -> SessionDetail {
             },
             messages: vec![
                 SessionMessage {
+            fork_point: None,
                     kind: SessionMessageKind::User,
                     timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
                     model: None,
@@ -149,6 +150,7 @@ fn fixture_detail() -> SessionDetail {
                     content: "第一行\n第二行".to_owned(),
                 },
                 SessionMessage {
+            fork_point: None,
                     kind: SessionMessageKind::Assistant,
                     timestamp: Some("2026-01-01T00:00:02Z".to_owned()),
                     model: Some("gpt-5.5".to_owned()),
@@ -177,6 +179,7 @@ fn fixture_detail() -> SessionDetail {
                     content: "model-specific answer".to_owned(),
                 },
                 SessionMessage {
+            fork_point: None,
                     kind: SessionMessageKind::ToolCall,
                     timestamp: Some("2026-01-01T00:00:03Z".to_owned()),
                     model: None,
@@ -192,6 +195,7 @@ fn fixture_detail() -> SessionDetail {
                     content: "{\n  \"name\": \"read\",\n  \"path\": \"README.md\",\n  \"literal\": \"```\"\n}".to_owned(),
                 },
                 SessionMessage {
+            fork_point: None,
                     kind: SessionMessageKind::ToolResult,
                     timestamp: None,
                     model: None,

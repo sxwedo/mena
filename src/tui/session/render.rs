@@ -11,7 +11,8 @@ use crate::session::{AgentSession, DetailScope, SessionDetail, SessionMessageKin
 use crate::tui::common::{
     SessionDetailTheme, UI, app_header, badge, centered_rect, header_inner, panel_block,
     panel_title, render_canvas, render_header_frame, render_keymap_popup, responsive_key_hints,
-    scroll_meter, selection_style, table_header_style, themed_key_hints, thinking_orb_spans,
+    scroll_meter, selection_style, table_header_style, themed_key_hints,
+    themed_responsive_key_hints, thinking_orb_spans,
 };
 use crate::view::{
     TOOL_TOKEN_ACCOUNTING_NOTE, format_duration, format_metric_error, format_model_usage_summary,
@@ -33,8 +34,14 @@ pub(crate) fn draw_sessions(frame: &mut Frame<'_>, app: &mut SessionsApp, _tick:
     render_session_footer(frame, areas[2], app);
     render_session_detail_popup(frame, app);
     render_delete_confirmation(frame, app);
+    render_fork_confirmation(frame, app);
     if app.show_help {
-        render_keymap_popup(frame, "Sessions", SESSION_HELP_KEYS);
+        let keys = if app.detail.is_some() {
+            DETAIL_HELP_KEYS
+        } else {
+            SESSION_HELP_KEYS
+        };
+        render_keymap_popup(frame, "Sessions", keys);
     }
 }
 
@@ -53,6 +60,19 @@ const SESSION_HELP_KEYS: &[(&str, &str)] = &[
     ("2/3/4", "switch to Skills / MCP / Memories"),
     ("?", "toggle this keymap"),
     ("q / Esc", "quit (Esc clears marks first)"),
+];
+
+const DETAIL_HELP_KEYS: &[(&str, &str)] = &[
+    ("↑/↓ j/k", "scroll the transcript"),
+    ("Tab/⇧Tab", "select and highlight a message"),
+    ("Shift+↑/↓", "jump between user/assistant messages"),
+    ("f / F", "fork / force a context fork (y confirms)"),
+    ("s / S", "conversation / complete transcript"),
+    ("/ · n/N", "find text · next/previous match"),
+    ("c / x", "copy / export the current scope"),
+    ("r / R", "resume / continue with another agent"),
+    ("t", "rename the session"),
+    ("Esc / q", "return to the list"),
 ];
 
 fn render_session_search(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
@@ -233,7 +253,10 @@ pub(crate) fn session_project_label(session: &AgentSession) -> String {
 /// project path (the grouping key); the sessions below them keep compact
 /// short targets.
 fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
-    if !matches!(app.mode, BrowserMode::Detail | BrowserMode::DetailSearch) {
+    if !matches!(
+        app.mode,
+        BrowserMode::Detail | BrowserMode::DetailSearch | BrowserMode::ConfirmFork
+    ) {
         return;
     }
     if app.detail.is_none() {
@@ -246,28 +269,12 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
         frame.area().height.saturating_sub(2),
     );
     let theme = app.detail_theme;
-    let max_scroll = app.detail_max_scroll;
-    let total_h = app
-        .detail_layout
-        .as_ref()
-        .map_or(0, DetailLayoutCache::total_height);
-    let title_text = Line::styled(
-        format!(
-            " Session details  {} · line {}/{total_h} ",
-            scroll_meter(app.detail_scroll, max_scroll, 6),
-            app.detail_scroll + 1,
-        ),
-        Style::default()
-            .fg(theme.popup_title)
-            .add_modifier(Modifier::BOLD),
-    );
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(UI.panel).fg(UI.text))
-        .title_style(Style::default().fg(theme.popup_title))
-        .title(title_text);
+        .title_style(Style::default().fg(theme.popup_title));
     let inner = block.inner(popup);
     let detail_status_height = app.detail_status.as_ref().map_or(0, |status| {
         let desired = wrapped_text_height(&Text::from(status.text.as_str()), inner.width.max(1));
@@ -278,7 +285,7 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     let areas = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(detail_status_height),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(inner);
     let content_width = areas[0].width.max(1);
@@ -330,6 +337,18 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
                     )
                 },
             );
+            let selected_range = app.selected_message.and_then(|selected| {
+                let position = layout
+                    .message_starts
+                    .iter()
+                    .position(|(message, _)| *message == selected)?;
+                let first = layout.message_starts[position].1;
+                let end = layout
+                    .message_starts
+                    .get(position + 1)
+                    .map_or(layout.lines.len(), |(_, line)| *line);
+                Some(first..end)
+            });
             let lines = layout.lines[start..end]
                 .iter()
                 .enumerate()
@@ -339,6 +358,11 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
                         Style::default().bg(UI.amber)
                     } else if match_lines.contains(&global) {
                         Style::default().bg(UI.grid)
+                    } else if selected_range
+                        .as_ref()
+                        .is_some_and(|range| range.contains(&global))
+                    {
+                        Style::default().bg(UI.selection)
                     } else {
                         return line.clone();
                     };
@@ -351,7 +375,18 @@ fn render_session_detail_popup(frame: &mut Frame<'_>, app: &mut SessionsApp) {
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let title = Line::styled(
+        format!(
+            " Session details  {} · line {}/{} ",
+            scroll_meter(app.detail_scroll, app.detail_max_scroll, 6),
+            app.detail_scroll + 1,
+            content_height
+        ),
+        Style::default()
+            .fg(theme.popup_title)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(block.title(title), popup);
     frame.render_widget(paragraph.scroll((local_scroll, 0)), areas[0]);
     render_detail_status_bar(frame, areas[1], app.detail_status.as_ref(), theme);
     render_detail_footer(frame, areas[2], app);
@@ -470,40 +505,46 @@ fn render_detail_footer(frame: &mut Frame<'_>, area: Rect, app: &SessionsApp) {
         frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
         return;
     }
+    let hints = themed_responsive_key_hints(
+        area.width,
+        &[
+            ("Shift+↑/↓", "msg"),
+            ("s", "chat"),
+            ("S", "all"),
+            ("c", "copy"),
+            ("x", "export"),
+            ("r", "resume"),
+            ("R", "handoff"),
+            ("/", "find"),
+            ("Esc", "close"),
+        ],
+        &[
+            ("s/S", "scope"),
+            ("c", "copy"),
+            ("x", "export"),
+            ("r", "resume"),
+            ("R", "handoff"),
+            ("Esc", "close"),
+        ],
+        theme.footer_key,
+        theme.footer_text,
+        theme.footer_separator,
+    );
+    let controls = themed_responsive_key_hints(
+        area.width,
+        &[
+            ("Tab/Shift+Tab", "select message"),
+            ("f", "fork"),
+            ("F", "context fork"),
+            ("?", "keys"),
+        ],
+        &[("Tab/⇧Tab", "message"), ("f", "fork"), ("F", "context")],
+        theme.footer_key,
+        theme.footer_text,
+        theme.footer_separator,
+    );
     frame.render_widget(
-        Paragraph::new(if area.width >= 108 {
-            themed_key_hints(
-                &[
-                    ("Shift+↑/↓", "msg"),
-                    ("s", "chat"),
-                    ("S", "all"),
-                    ("c", "copy"),
-                    ("x", "export"),
-                    ("r", "resume"),
-                    ("R", "handoff"),
-                    ("/", "find"),
-                    ("Esc", "close"),
-                ],
-                theme.footer_key,
-                theme.footer_text,
-                theme.footer_separator,
-            )
-        } else {
-            themed_key_hints(
-                &[
-                    ("s/S", "scope"),
-                    ("c", "copy"),
-                    ("x", "export"),
-                    ("r", "resume"),
-                    ("R", "handoff"),
-                    ("Esc", "close"),
-                ],
-                theme.footer_key,
-                theme.footer_text,
-                theme.footer_separator,
-            )
-        })
-        .alignment(Alignment::Center),
+        Paragraph::new(vec![hints, controls]).alignment(Alignment::Center),
         area,
     );
 }
@@ -564,7 +605,12 @@ pub(crate) fn session_detail_content(
 ) -> SessionDetailContent {
     let mut lines = session_metadata_lines(detail, theme);
     lines.extend(model_usage_lines(detail, theme));
-    let visible: Vec<&crate::session::SessionMessage> = detail.messages_in(scope).collect();
+    let visible = detail
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| scope.keeps(message.kind))
+        .collect::<Vec<_>>();
     let hidden = detail.hidden_message_count(scope);
     let header = if scope == DetailScope::Conversation {
         format!(
@@ -592,7 +638,9 @@ pub(crate) fn session_detail_content(
         Line::from(""),
     ]);
     let mut primary_line_indices = Vec::new();
-    for message in &visible {
+    let mut message_starts = Vec::new();
+    for (index, message) in &visible {
+        message_starts.push((*index, lines.len()));
         if matches!(
             message.kind,
             SessionMessageKind::User | SessionMessageKind::Assistant
@@ -615,6 +663,7 @@ pub(crate) fn session_detail_content(
     SessionDetailContent {
         lines,
         primary_line_indices,
+        message_starts,
     }
 }
 
@@ -942,13 +991,71 @@ fn session_key_hints(app: &SessionsApp, width: u16) -> Line<'static> {
         ],
         &[
             ("/", "filter"),
-            ("m", "text"),
             ("Enter", "details"),
             ("r", "resume"),
             ("R", "handoff"),
+            ("d", "delete"),
+            ("?", "keys"),
             ("q", "quit"),
         ],
     )
+}
+
+fn render_fork_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {
+    if app.mode != BrowserMode::ConfirmFork {
+        return;
+    }
+    let Some(index) = app.selected_message else {
+        return;
+    };
+    let Some(message) = app
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.messages.get(index))
+    else {
+        return;
+    };
+    let mode = if app.native_fork {
+        "Native fork: preserve provider history"
+    } else {
+        "Context fork: prefix handoff into a fresh chat"
+    };
+    let area = centered_rect(frame.area(), 88, 12);
+    frame.render_widget(Clear, area);
+    let preview = message
+        .content
+        .chars()
+        .take(100)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lines = vec![
+        Line::from(format!("Message {} · {}", index + 1, message.kind.label())),
+        Line::styled(mode, Style::default().fg(UI.violet)),
+        Line::from(if app.native_fork {
+            "Through the selected completed turn; later turns are excluded.".to_owned()
+        } else {
+            format!(
+                "Includes messages 1–{}; later messages are excluded.",
+                index + 1
+            )
+        }),
+        Line::from("The original session and workspace files are unchanged."),
+        Line::from(preview),
+        Line::default(),
+    ];
+    let block = panel_block(panel_title("Fork from selected message", None, true), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), parts[0]);
+    let keys = responsive_key_hints(
+        parts[1].width,
+        &[("y", "fork"), ("F", "use context"), ("n/Esc", "back")],
+        &[("y", "fork"), ("F", "context"), ("Esc", "back")],
+    );
+    frame.render_widget(Paragraph::new(keys), parts[1]);
 }
 
 fn render_delete_confirmation(frame: &mut Frame<'_>, app: &SessionsApp) {

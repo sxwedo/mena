@@ -65,37 +65,40 @@ mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 |---|---|
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena ps` | List running coding-agent processes |
-| `mena sessions` / `mena ss` | Search, inspect, rename, resume, continue with another agent, export, trash, and restore sessions |
+| `mena sessions` / `mena ss` | Search, inspect, fork from messages, rename, resume, hand off, export, trash, and restore sessions |
 | `mena skills` / `mena sk` | List, filter, inspect, and browse Agent Skills |
 | `mena mcp` | Browse grouped registrations; open/edit/delete config; explicitly probe metadata |
 | `mena memories` / `mena ms` | Browse, read, edit, and delete agent memory files |
 | `mena config init` | Create `~/.config/mena/config.toml` |
 
 Every interactive browser shares one keymap: `/` filters, `?` shows the full
-keymap, `1`–`4` jump between Sessions, Skills, MCP, and Memories, and `p` is
-the only key that can start a process or contact a network endpoint — always
-behind an explicit confirmation. Each command also takes `--list` to print
+keymap, and `1`–`4` jump between Sessions, Skills, MCP, and Memories. In the MCP
+browser, `p` requests a live probe and always requires confirmation before
+starting a configured server or contacting its endpoint. Each command also takes `--list` to print
 the plain table without opening the browser.
 
 ## Provider support
 
-| Provider | Launch | Sessions | Continue with | MCP config |
-|---|:---:|:---:|---|:---:|
-| Claude Code | ✓ | ✓ | OMP import; Codex handoff | ✓ |
-| Codex | ✓ | ✓² | OMP import; Claude handoff | ✓ |
-| Gemini CLI | ✓ | ✓ | Claude/Codex/OMP handoff | ✓ |
-| OpenCode | ✓ | ✓² | Claude/Codex/OMP handoff | ✓ |
-| Pi | ✓ | ✓ | Claude/Codex/OMP handoff | adapter¹ |
-| Oh My Pi | ✓ | ✓ | Claude/Codex handoff | ✓ |
-| Cursor Agent | ✓ | ✓² | Claude/Codex/OMP handoff | ✓ |
-| Grok | ✓ | ✓ | Claude/Codex/OMP handoff | — |
-| Goose | ✓ | — | — | ✓ |
-| Custom configuration | ✓ | — | — | — |
+| Provider | Launch | Sessions | Continue with | Message fork | MCP config |
+|---|:---:|:---:|---|---|:---:|
+| Claude Code | ✓ | ✓ | OMP import; Codex handoff | context³ | ✓ |
+| Codex | ✓ | ✓² | OMP import; Claude handoff | native / context³ | ✓ |
+| Gemini CLI | ✓ | ✓ | Claude/Codex/OMP handoff | context³ | ✓ |
+| OpenCode | ✓ | ✓² | Claude/Codex/OMP handoff | context³ | ✓ |
+| Pi | ✓ | ✓ | Claude/Codex/OMP handoff | context³ | adapter¹ |
+| Oh My Pi | ✓ | ✓ | Claude/Codex handoff | context³ | ✓ |
+| Cursor Agent | ✓ | ✓² | Claude/Codex/OMP handoff | context³ | ✓ |
+| Grok | ✓ | ✓ | Claude/Codex/OMP handoff | context³ | — |
+| Goose | ✓ | — | — | — | ✓ |
+| Custom configuration | ✓ | — | — | — | — |
 
 ¹ Pi entries are discovered only when `pi-mcp-adapter` is installed.
 
 ² Native SubAgent markers are recognized and hidden by default; use
 `--include-subagents` or press `a` in the session browser to show them.
+
+³ In details, `Tab` selects and highlights a message, `f` forks, and `F` forces
+a context fork into a fresh Claude/Codex/OMP chat. Completed Codex turns support native forks.
 
 Custom agents and Goose do not have a generic session catalog. `mena` returns
 an explicit unsupported result instead of guessing provider-owned paths.

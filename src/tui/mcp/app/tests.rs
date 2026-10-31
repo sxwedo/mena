@@ -57,7 +57,7 @@ fn completed_probe_stays_bound_to_its_registration_after_selection_moves() {
     let first = registration("first", "codex", "first server");
     let second = registration("second", "claude", "second server");
     let mut app = McpApp::new(vec![first.clone(), second]);
-    let index = app.begin_probe().expect("probe request");
+    let index = app.begin_probe(0).expect("probe request");
     app.select_next();
 
     app.finish_probe(

@@ -119,6 +119,7 @@ fn prepared_handoff_is_private_contains_context_and_is_removed_after_use() {
         Ok(SessionDetail {
             session: session.clone(),
             messages: vec![SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
@@ -182,4 +183,55 @@ fn native_import_does_not_load_or_copy_the_transcript() {
     assert_eq!(prepared.command().program, "omp");
     assert_eq!(prepared.command().args, ["--from-codex"]);
     assert!(prepared.handoff_path().is_none());
+}
+
+#[test]
+fn message_fork_copies_only_the_selected_prefix_into_a_fresh_chat() {
+    let project = tempdir().expect("project");
+    let path = project.path().join("source.jsonl");
+    std::fs::write(&path, "original transcript").expect("source");
+    let session = AgentSession {
+        kind: AgentKind::Codex,
+        id: "source".to_owned(),
+        title: None,
+        project: Some(project.path().to_path_buf()),
+        path: path.clone(),
+        started_at: None,
+        updated_at: 0,
+        tokens: Some(900),
+        cost_usd: Some(1.0),
+        related_paths: BTreeSet::new(),
+        is_subagent: false,
+        parent_session_id: None,
+    };
+    let messages = ["FIRST-MARKER", "SELECTED-MARKER", "EXCLUDED-LATER-MARKER"]
+        .into_iter()
+        .map(|content| SessionMessage {
+            fork_point: None,
+            kind: SessionMessageKind::Assistant,
+            timestamp: None,
+            model: None,
+            metrics: SessionMessageMetrics::default(),
+            content: content.to_owned(),
+        })
+        .collect();
+    let detail = SessionDetail { session, messages };
+    let fork = super::prepare_message_fork(&detail, 1, &AgentKind::Codex)
+        .expect("same-agent context fork");
+    let text = std::fs::read_to_string(fork.handoff_path().expect("handoff")).expect("context");
+    assert!(text.contains("FIRST-MARKER") && text.contains("SELECTED-MARKER"));
+    assert!(!text.contains("EXCLUDED-LATER-MARKER"));
+    assert_eq!(fork.command().program, "codex");
+    assert!(
+        !fork
+            .command()
+            .args
+            .iter()
+            .any(|argument| argument == "resume")
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).expect("source"),
+        "original transcript"
+    );
+    assert!(super::prepare_message_fork(&detail, 3, &AgentKind::Codex).is_err());
 }

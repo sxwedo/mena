@@ -24,3 +24,12 @@ pub(crate) use mcp::manage_mcp;
 pub(crate) use memory::manage_memories;
 pub(crate) use session::manage_sessions;
 pub use skill::manage_skills;
+
+/// In-memory browsing state retained while moving between surfaces.
+#[derive(Default)]
+pub(crate) struct BrowseState {
+    pub(crate) sessions: Option<session::SessionsApp>,
+    pub(crate) skills: Option<skill::app::SkillsApp>,
+    pub(crate) mcp: Option<mcp::app::McpApp>,
+    pub(crate) memories: Option<memory::app::MemoriesApp>,
+}

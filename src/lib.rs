@@ -333,12 +333,13 @@ fn browse_surfaces(
 ) -> Result<()> {
     use tui::common::Surface;
     let mut next = Some(initial);
+    let mut state = tui::BrowseState::default();
     while let Some(surface) = next {
         next = match surface {
-            Surface::Sessions => controller::run_sessions(sessions, settings)?,
-            Surface::Skills => controller::run_skills(skills, settings)?,
-            Surface::Mcp => controller::run_mcp(mcp)?,
-            Surface::Memories => controller::run_memories(memories)?,
+            Surface::Sessions => controller::run_sessions(sessions, settings, &mut state)?,
+            Surface::Skills => controller::run_skills(skills, settings, &mut state)?,
+            Surface::Mcp => controller::run_mcp(mcp, &mut state)?,
+            Surface::Memories => controller::run_memories(memories, &mut state)?,
         };
     }
     Ok(())

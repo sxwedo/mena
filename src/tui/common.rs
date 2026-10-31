@@ -381,7 +381,32 @@ pub(super) fn responsive_key_hints(
     full: &[(&str, &str)],
     compact: &[(&str, &str)],
 ) -> Line<'static> {
-    key_hints(if width >= 96 { full } else { compact })
+    themed_responsive_key_hints(width, full, compact, UI.signal, UI.text_soft, UI.grid)
+}
+
+pub(super) fn themed_responsive_key_hints(
+    width: u16,
+    full: &[(&str, &str)],
+    compact: &[(&str, &str)],
+    key: Color,
+    text: Color,
+    separator: Color,
+) -> Line<'static> {
+    let full = themed_key_hints(full, key, text, separator);
+    if full.width() <= usize::from(width) {
+        return full;
+    }
+    let mut hints = compact.to_vec();
+    while themed_key_hints(&hints, key, text, separator).width() > usize::from(width)
+        && hints.len() > 1
+    {
+        let removable = hints
+            .iter()
+            .position(|(key, _)| !matches!(*key, "?" | "q" | "Esc"))
+            .unwrap_or(0);
+        hints.remove(removable);
+    }
+    themed_key_hints(&hints, key, text, separator)
 }
 
 pub(super) fn themed_key_hints(

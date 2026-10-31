@@ -14,6 +14,33 @@ pub fn edit_file_at_line(path: &Path, line: usize) -> Result<()> {
     open_with_editor(path, line, true)
 }
 
+/// Open a directory without treating editor arguments as an executable name.
+pub fn open_directory(path: &Path) -> Result<()> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    if !path.is_dir() {
+        bail!("not a directory: {}", path.display());
+    }
+    if let Some((program, arguments)) = configured_editor()? {
+        let status = Command::new(&program)
+            .args(arguments)
+            .arg(&path)
+            .status()
+            .with_context(|| format!("failed to start editor `{program}`"))?;
+        if !status.success() {
+            bail!("editor `{program}` exited with {status}");
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    return command_status(&mut Command::new("open"), &path);
+    #[cfg(target_os = "windows")]
+    return command_status(&mut Command::new("explorer.exe"), &path);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return command_status(&mut Command::new("xdg-open"), &path);
+}
+
 fn open_with_editor(path: &Path, line: usize, prefer_terminal: bool) -> Result<()> {
     let path = path
         .canonicalize()
@@ -22,18 +49,8 @@ fn open_with_editor(path: &Path, line: usize, prefer_terminal: bool) -> Result<(
         bail!("path is not a regular file: {}", path.display());
     }
 
-    for variable in ["VISUAL", "EDITOR"] {
-        let Some(configured) = std::env::var_os(variable) else {
-            continue;
-        };
-        let configured = configured.to_string_lossy();
-        let parts = shlex::split(&configured)
-            .with_context(|| format!("{variable} contains invalid shell-style quoting"))?;
-        let Some((program, arguments)) = parts.split_first() else {
-            continue;
-        };
-        return run_editor(program, arguments, &path, line)
-            .with_context(|| format!("failed to open {} using {variable}", path.display()));
+    if let Some((program, arguments)) = configured_editor()? {
+        return run_editor(&program, &arguments, &path, line);
     }
 
     let candidates = if prefer_terminal {
@@ -61,6 +78,20 @@ fn open_with_editor(path: &Path, line: usize, prefer_terminal: bool) -> Result<(
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     return command_status(&mut Command::new("xdg-open"), &path);
+}
+
+fn configured_editor() -> Result<Option<(String, Vec<String>)>> {
+    for variable in ["VISUAL", "EDITOR"] {
+        let Some(configured) = std::env::var_os(variable) else {
+            continue;
+        };
+        let parts = shlex::split(&configured.to_string_lossy())
+            .with_context(|| format!("{variable} contains invalid shell-style quoting"))?;
+        if let Some((program, arguments)) = parts.split_first() {
+            return Ok(Some((program.clone(), arguments.to_vec())));
+        }
+    }
+    Ok(None)
 }
 
 fn run_editor(program: &str, arguments: &[String], path: &Path, line: usize) -> Result<()> {

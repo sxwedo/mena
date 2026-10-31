@@ -35,7 +35,7 @@ use crate::{
 ///
 /// Returns an error when a configuration is invalid, a selector is ambiguous,
 /// or a requested live probe cannot be performed.
-pub fn run_mcp(args: &McpArgs) -> Result<Option<Surface>> {
+pub fn run_mcp(args: &McpArgs, state: &mut tui::BrowseState) -> Result<Option<Surface>> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().context("could not resolve current directory")?;
     let catalog = Arc::new(McpCatalog::scan(home.as_deref(), Some(&current_dir))?);
@@ -111,7 +111,12 @@ pub fn run_mcp(args: &McpArgs) -> Result<Option<Surface>> {
             } else if registrations.is_empty() {
                 ui::info("no MCP registrations discovered");
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
-                return run_mcp_tui(&catalog, args, registrations.into_iter().cloned().collect());
+                return run_mcp_tui(
+                    &catalog,
+                    args,
+                    registrations.into_iter().cloned().collect(),
+                    state,
+                );
             } else {
                 print!("{}", render_mcp_table(&registrations));
             }
@@ -124,6 +129,7 @@ fn run_mcp_tui(
     catalog: &Arc<McpCatalog>,
     args: &McpArgs,
     registrations: Vec<McpRegistration>,
+    state: &mut tui::BrowseState,
 ) -> Result<Option<Surface>> {
     let probe_catalog = Arc::clone(catalog);
     let locate_catalog = Arc::clone(catalog);
@@ -134,6 +140,7 @@ fn run_mcp_tui(
     let source = args.source.clone();
     tui::manage_mcp(
         registrations,
+        &mut state.mcp,
         move |registration| probe_catalog.inspect_current_registration_with_probe(registration, 10),
         move |registration| locate_catalog.source_line(registration),
         move || {
@@ -153,7 +160,7 @@ fn run_mcp_tui(
 ///
 /// Returns an actionable error when a selector is ambiguous, a file cannot be
 /// read within the size bound, or a deletion is refused by validation.
-pub fn run_memories(args: &MemoriesArgs) -> Result<Option<Surface>> {
+pub fn run_memories(args: &MemoriesArgs, state: &mut tui::BrowseState) -> Result<Option<Surface>> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().context("could not resolve current directory")?;
     let catalog = MemoryCatalog::scan(home.as_deref(), Some(&current_dir))?;
@@ -193,6 +200,7 @@ pub fn run_memories(args: &MemoriesArgs) -> Result<Option<Surface>> {
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
                 let jump = tui::manage_memories(
                     filtered,
+                    &mut state.memories,
                     |path| catalog.read(path),
                     |path| catalog.delete(path),
                 )?;
@@ -219,23 +227,32 @@ fn confirm_delete_memory(path: &std::path::Path) -> Result<()> {
 
 pub fn run_agent(args: &AgentLaunchArgs, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir().context("could not resolve current working directory")?;
-    let catalog = scan_sessions(None, false, false)?;
     let custom = &settings.agent.custom;
+    let kind = args
+        .provider
+        .as_deref()
+        .map(|provider| resolve_agent_kind(provider, custom))
+        .transpose()?;
+    let catalog = if args.fresh {
+        SessionCatalog::default()
+    } else {
+        scan_sessions(kind.as_ref(), false, false)?
+    };
 
     let cwd_sessions: Vec<AgentSession> = catalog
         .sessions()
         .iter()
         .filter(|session| {
-            session
-                .project
-                .as_deref()
-                .is_some_and(|project| crate::session::paths_equivalent(project, &cwd))
+            !session.is_subagent
+                && session
+                    .project
+                    .as_deref()
+                    .is_some_and(|project| crate::session::paths_equivalent(project, &cwd))
         })
         .cloned()
         .collect();
 
-    if let Some(ref provider_slug) = args.provider {
-        let kind = resolve_agent_kind(provider_slug, custom)?;
+    if let Some(kind) = kind {
         launch_agent_with_options(&kind, args, &cwd_sessions, custom)?;
     } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
         let choice = tui::select_and_launch_agent(custom, &cwd_sessions)?;
@@ -294,57 +311,13 @@ pub fn fresh_launch_spec(
     kind: &AgentKind,
     custom: &std::collections::BTreeMap<String, CustomAgentSettings>,
 ) -> Result<NativeResumeCommand> {
-    match kind {
-        AgentKind::ClaudeCode => Ok(NativeResumeCommand {
-            program: "claude".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::Codex => Ok(NativeResumeCommand {
-            program: "codex".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::Goose => Ok(NativeResumeCommand {
-            program: "goose".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::GeminiCli => Ok(NativeResumeCommand {
-            program: "gemini".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::OpenCode => Ok(NativeResumeCommand {
-            program: "opencode".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::Pi => Ok(NativeResumeCommand {
-            program: "pi".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::OhMyPi => Ok(NativeResumeCommand {
-            program: "omp".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::Cursor => Ok(NativeResumeCommand {
-            program: "cursor-agent".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::Grok => Ok(NativeResumeCommand {
-            program: "grok".to_owned(),
-            args: Vec::new(),
-        }),
-        AgentKind::Custom(name) => {
-            let spec = custom
-                .get(name)
-                .with_context(|| format!("custom agent `{name}` not found in configuration"))?;
-            let program = spec
-                .executables
-                .first()
-                .with_context(|| format!("custom agent `{name}` defines no executables"))?;
-            Ok(NativeResumeCommand {
-                program: program.clone(),
-                args: Vec::new(),
-            })
-        }
-    }
+    let program = kind
+        .executable_name(custom)
+        .with_context(|| format!("agent `{}` defines no executable", kind.slug()))?;
+    Ok(NativeResumeCommand {
+        program: program.to_owned(),
+        args: Vec::new(),
+    })
 }
 
 pub fn resume_launch_spec(
@@ -478,7 +451,11 @@ fn print_agent_launch_help(
     println!("\nRun `mena agent <provider>` to launch an agent directly.");
 }
 
-pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<Surface>> {
+pub fn run_sessions(
+    args: &SessionsArgs,
+    settings: &Settings,
+    state: &mut tui::BrowseState,
+) -> Result<Option<Surface>> {
     // Deletion re-checks live-session protection before each removal, but
     // a confirmed batch issues those checks back-to-back. Sharing one
     // snapshot within a short window keeps a batch from re-running
@@ -497,18 +474,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<S
         }
         None => {}
     }
-    let provider = args
-        .provider
-        .as_deref()
-        .map(|provider| {
-            AgentKind::from_slug(provider).with_context(|| {
-                format!(
-                    "unsupported session provider `{provider}`; use {}",
-                    session_provider_slugs().join(", ")
-                )
-            })
-        })
-        .transpose()?;
+    let provider = parse_session_provider(args.provider.as_deref())?;
     let catalog = scan_sessions(provider.as_ref(), args.include_empty, args.include_archived)?;
     let interactive =
         !args.json && !args.list && io::stdin().is_terminal() && io::stdout().is_terminal();
@@ -538,6 +504,7 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<S
         );
         let selected = tui::manage_sessions(
             sessions,
+            &mut state.sessions,
             protection,
             &settings.ui.session_detail.colors,
             args,
@@ -578,6 +545,13 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<S
                 tui::session::SessionBrowserResult::ContinueWith(session) => {
                     continue_with_agent(&catalog, &session, settings)?;
                 }
+                tui::session::SessionBrowserResult::Fork {
+                    detail,
+                    message,
+                    native,
+                } => {
+                    fork_from_message(&catalog, &detail, message, native, settings)?;
+                }
                 tui::session::SessionBrowserResult::Jump(surface) => return Ok(Some(surface)),
             }
         }
@@ -585,6 +559,46 @@ pub fn run_sessions(args: &SessionsArgs, settings: &Settings) -> Result<Option<S
         print!("{}", render_session_table(&sessions));
     }
     Ok(None)
+}
+
+fn fork_from_message(
+    catalog: &SessionCatalog,
+    detail: &crate::session::SessionDetail,
+    message: usize,
+    native: bool,
+    settings: &Settings,
+) -> Result<()> {
+    if native {
+        let command = catalog.fork_native(detail, message)?;
+        ui::success("created a native fork through the selected completed turn");
+        execute_continuation(&command, &detail.session, &detail.session.kind)?;
+    } else {
+        let supported = [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::OhMyPi];
+        let targets = supported
+            .into_iter()
+            .filter(|kind| kind.is_installed(&settings.agent.custom))
+            .map(|kind| crate::continuation::ContinuationTarget {
+                kind,
+                method: crate::continuation::ContinuationMethod::Handoff,
+            })
+            .collect::<Vec<_>>();
+        let target = targets
+            .iter()
+            .find(|target| target.kind == detail.session.kind)
+            .cloned();
+        let target = match target {
+            Some(target) => Some(target),
+            None if targets.is_empty() => {
+                bail!("install claude, codex, or omp to start a context fork")
+            }
+            None => tui::select_continuation_target(&detail.session, &targets)?,
+        };
+        if let Some(target) = target {
+            let fork = crate::continuation::prepare_message_fork(detail, message, &target.kind)?;
+            execute_continuation(fork.command(), &detail.session, &target.kind)?;
+        }
+    }
+    Ok(())
 }
 
 fn rename_session(
@@ -596,18 +610,7 @@ fn rename_session(
     if args.json {
         bail!("--json cannot be used with `mena ss rename`");
     }
-    let provider = args
-        .provider
-        .as_deref()
-        .map(|provider| {
-            AgentKind::from_slug(provider).with_context(|| {
-                format!(
-                    "unsupported session provider `{provider}`; use {}",
-                    session_provider_slugs().join(", ")
-                )
-            })
-        })
-        .transpose()?;
+    let provider = parse_session_provider(args.provider.as_deref())?;
     let catalog = scan_sessions(provider.as_ref(), args.include_empty, args.include_archived)?;
     let (selector_provider, id) = split_session_selector(target, &settings.agent.custom);
     let session = catalog
@@ -700,7 +703,11 @@ fn execute_continuation(
 /// # Errors
 ///
 /// Returns an error if scanning fails or a targeted skill is missing.
-pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<Option<Surface>> {
+pub fn run_skills(
+    args: &SkillsArgs,
+    _settings: &Settings,
+    state: &mut tui::BrowseState,
+) -> Result<Option<Surface>> {
     let home = dirs::home_dir();
     let current_dir = std::env::current_dir().ok();
     let catalog = SkillCatalog::scan(home.as_deref(), current_dir.as_deref())?;
@@ -721,7 +728,9 @@ pub fn run_skills(args: &SkillsArgs, _settings: &Settings) -> Result<Option<Surf
             } else if filtered.is_empty() {
                 ui::info("no skills discovered");
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() && !args.list {
-                return tui::manage_skills(filtered, |skill, path| catalog.entry(skill, path));
+                return tui::manage_skills(filtered, &mut state.skills, |skill, path| {
+                    catalog.entry(skill, path)
+                });
             } else {
                 print!("{}", render_skill_table(&filtered));
             }
@@ -802,6 +811,19 @@ fn custom_resume_spec(
             .map(|part| part.replace("{session}", id))
             .collect(),
     })
+}
+
+fn parse_session_provider(provider: Option<&str>) -> Result<Option<AgentKind>> {
+    provider
+        .map(|provider| {
+            AgentKind::from_slug(provider).with_context(|| {
+                format!(
+                    "unsupported session provider `{provider}`; use {}",
+                    session_provider_slugs().join(", ")
+                )
+            })
+        })
+        .transpose()
 }
 
 fn listed_sessions(catalog: &SessionCatalog, args: &SessionsArgs) -> Vec<AgentSession> {

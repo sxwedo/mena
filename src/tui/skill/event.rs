@@ -9,10 +9,9 @@ use crate::skill::{AgentSkill, SkillEntry};
 use crate::tui::common::{ManagedTerminal, Surface, surface_for_digit};
 
 pub fn run_skill_browser(
-    skills: Vec<AgentSkill>,
+    app: &mut SkillsApp,
     load_entry: &mut impl FnMut(&AgentSkill, &std::path::Path) -> Result<SkillEntry>,
 ) -> Result<Option<Surface>> {
-    let mut app = SkillsApp::new(skills);
     let mut terminal = ManagedTerminal::enter_with_native_selection()?;
     let mut jump: Option<Surface> = None;
 
@@ -50,7 +49,7 @@ pub fn run_skill_browser(
 
         terminal
             .terminal
-            .draw(|frame| draw_skills(frame, &app))
+            .draw(|frame| draw_skills(frame, app))
             .context("failed to draw skill browser")?;
 
         if event::poll(Duration::from_millis(90)).context("failed to poll terminal input")? {
@@ -74,6 +73,7 @@ pub fn run_skill_browser(
                     _ => {}
                 },
                 Event::Key(key) => {
+                    app.status = None;
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -127,7 +127,9 @@ pub fn run_skill_browser(
                             app.show_help = true;
                         }
                         KeyCode::Char(digit @ '1'..='4') => {
-                            if let Some(surface) = surface_for_digit(digit) {
+                            if let Some(surface) = surface_for_digit(digit)
+                                .filter(|surface| *surface != Surface::Skills)
+                            {
                                 jump = Some(surface);
                                 break;
                             }
@@ -192,7 +194,13 @@ pub fn run_skill_browser(
                         }
                         KeyCode::Char('o') => {
                             if let Some(path) = app.selected_open_path() {
-                                open_in_editor(&path);
+                                drop(terminal);
+                                let result = crate::editor::open_directory(&path);
+                                terminal = ManagedTerminal::enter_with_native_selection()?;
+                                app.status =
+                                    result.err().map(|error| format!("Open failed: {error:#}"));
+                                app.current_detail = None;
+                                app.preview_path = None;
                             }
                         }
                         _ => {}
@@ -206,39 +214,4 @@ pub fn run_skill_browser(
     }
 
     Ok(jump)
-}
-/// Open `path` in the best available editor, degrading gracefully:
-/// $VISUAL → $EDITOR → `code` → `cursor` → `open` (macOS / xdg-open).
-fn open_in_editor(path: &std::path::Path) {
-    use std::process::Command;
-
-    // Try GUI editors from env and common installs
-    let candidates: &[&str] = &["VISUAL", "EDITOR"];
-    for var in candidates {
-        if let Ok(editor) = std::env::var(var)
-            && !editor.is_empty()
-        {
-            let _ = Command::new(&editor).arg(path).spawn();
-            return;
-        }
-    }
-
-    for bin in &["code", "cursor"] {
-        if Command::new(bin).arg("--version").output().is_ok() {
-            let _ = Command::new(bin).arg(path).spawn();
-            return;
-        }
-    }
-
-    // macOS fallback: open with Finder / default app
-    #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("open").arg(path).spawn();
-    }
-
-    // Linux fallback
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = Command::new("xdg-open").arg(path).spawn();
-    }
 }

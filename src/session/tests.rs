@@ -59,6 +59,7 @@ fn aggregates_only_exact_response_metrics_by_model() {
         },
         messages: vec![
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::Assistant,
                 timestamp: None,
                 model: Some("gemini-pro".to_owned()),
@@ -69,6 +70,7 @@ fn aggregates_only_exact_response_metrics_by_model() {
                 content: "first".to_owned(),
             },
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::Assistant,
                 timestamp: None,
                 model: Some("gemini-pro".to_owned()),
@@ -401,7 +403,7 @@ fn indexes_supported_session_formats_and_real_usage_fields() {
 }
 
 #[test]
-fn codex_fork_rollout_keeps_the_parent_session_identity() {
+fn codex_fork_rollout_keeps_its_own_identity_and_deletion_separate() {
     let temp = tempdir().expect("temp home");
     let home = temp.path();
     write(
@@ -409,9 +411,8 @@ fn codex_fork_rollout_keeps_the_parent_session_identity() {
         "{\"type\":\"session_meta\",\"payload\":{\"id\":\"parent-id\",\"cwd\":\"/work\",\"timestamp\":\"2026-01-02T03:00:00Z\"}}\n",
     );
     // A forked rollout states its own meta first and re-states the parent
-    // session's meta right after; the later record owns the identity, so
-    // the fork file merges into the parent session instead of listing a
-    // separate one.
+    // session's meta as historical context. The first record owns the new
+    // fork, and neither deletion nor filtering may merge it into the parent.
     write(
         &home.join(".codex/sessions/2026/01/02/fork.jsonl"),
         concat!(
@@ -422,19 +423,20 @@ fn codex_fork_rollout_keeps_the_parent_session_identity() {
         ),
     );
     let catalog = SessionCatalog::scan(home).expect("scan sessions");
-    assert!(
-        !catalog
-            .sessions()
-            .iter()
-            .any(|session| session.id == "fork-id")
-    );
+    assert_eq!(catalog.sessions().len(), 2);
+    let fork = catalog
+        .resolve(Some("codex"), "fork-id")
+        .expect("independent fork");
+    assert_eq!(fork.title.as_deref(), Some("Fix fork rendering"));
+    assert!(fork.related_paths.is_empty());
+    assert_eq!(fork.parent_session_id.as_deref(), Some("parent-id"));
     let parent = catalog
         .resolve(Some("codex"), "parent-id")
         .expect("parent session");
-    assert_eq!(parent.title.as_deref(), Some("Fix fork rendering"));
-    let mut native_files = vec![parent.path.clone()];
-    native_files.extend(parent.related_paths.iter().cloned());
-    assert_eq!(native_files.len(), 2);
+    assert!(parent.related_paths.is_empty());
+    catalog.delete_session(fork).expect("delete only the fork");
+    assert!(parent.path.is_file());
+    assert!(!fork.path.exists());
 }
 
 #[test]
@@ -2484,4 +2486,147 @@ fn set_title_rejects_overlong_titles() {
         .set_title(session, &"a".repeat(121))
         .expect_err("overlong title");
     assert!(format!("{error:#}").contains("at most 120 characters"));
+}
+
+#[test]
+fn regression_cursor_restore_preserves_native_subagent_identity() {
+    let temp = tempdir().expect("temporary home");
+    let dir = temp.path().join(".config/Cursor/User/globalStorage");
+    fs::create_dir_all(&dir).expect("storage");
+    let connection = rusqlite::Connection::open(dir.join("state.vscdb")).expect("database");
+    connection.execute_batch("CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, createdAt INTEGER, lastUpdatedAt INTEGER, isArchived INTEGER, value TEXT, isSubagent INTEGER);").expect("schema");
+    connection
+        .execute(
+            "INSERT INTO composerHeaders VALUES ('child', 1, 1, 0, ?1, 1)",
+            [r#"{"name":"Child task"}"#],
+        )
+        .expect("header");
+    connection.execute_batch("ALTER TABLE composerHeaders ADD COLUMN workspaceId TEXT; ALTER TABLE composerHeaders ADD COLUMN recency REAL; ALTER TABLE composerHeaders ADD COLUMN checkpointAt BLOB; UPDATE composerHeaders SET workspaceId='workspace', recency=1.25, checkpointAt=x'00ff';").expect("native columns");
+    drop(connection);
+    let catalog = SessionCatalog::scan(temp.path()).expect("catalog");
+    let child = catalog.resolve(Some("cursor"), "child").expect("child");
+    assert!(child.is_subagent);
+    catalog
+        .delete_session(child)
+        .expect("trash temporary session");
+    super::restore_session(temp.path(), "cursor:child").expect("restore temporary session");
+    let connection =
+        rusqlite::Connection::open(dir.join("state.vscdb")).expect("restored database");
+    let native: (String, Option<i64>) = connection
+        .query_row(
+            "SELECT typeof(value), isSubagent FROM composerHeaders WHERE composerId = 'child'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("native row");
+    assert_eq!(native, ("text".to_owned(), Some(1)));
+    let extra: (String, f64, Vec<u8>) = connection.query_row(
+        "SELECT workspaceId, recency, checkpointAt FROM composerHeaders WHERE composerId='child'", [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("preserved native columns");
+    assert_eq!(extra.0, "workspace");
+    assert_eq!(extra.1.to_bits(), 1.25_f64.to_bits());
+    assert_eq!(extra.2, [0, 255]);
+    let restored =
+        SessionCatalog::scan_provider(temp.path(), Some(&AgentKind::Cursor), true, false)
+            .expect("restored catalog including drafts");
+    assert!(
+        restored
+            .resolve(Some("cursor"), "child")
+            .expect("restored child")
+            .is_subagent,
+        "restoring must preserve isSubagent even when it is stored only in the native column"
+    );
+}
+
+#[test]
+fn codex_native_fork_points_exist_only_at_completed_turn_ends() {
+    use serde_json::json;
+    let temp = tempdir().expect("home");
+    let path = temp.path().join(".codex/sessions/source.jsonl");
+    let records = [
+        json!({"type":"session_meta","payload":{"id":"source"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"first-turn"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":"completed response"}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"first-turn"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"unfinished-turn"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":"unfinished response"}}),
+    ];
+    write(
+        &path,
+        &records
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let catalog = SessionCatalog::scan(temp.path()).expect("catalog");
+    let session = catalog.resolve(Some("codex"), "source").expect("source");
+    let detail = catalog.detail(session).expect("messages");
+    let completed = detail
+        .messages
+        .iter()
+        .find(|message| message.content == "completed response")
+        .expect("completed message");
+    let unfinished = detail
+        .messages
+        .iter()
+        .find(|message| message.content == "unfinished response")
+        .expect("unfinished message");
+    assert_eq!(completed.fork_point.as_deref(), Some("first-turn"));
+    assert_eq!(unfinished.fork_point, None);
+}
+
+#[test]
+fn transcript_search_yields_between_blocks_and_matches_across_the_boundary() {
+    use super::{TranscriptSearch, TranscriptSearchStep};
+    let temp = tempdir().expect("directory");
+    let path = temp.path().join("large.jsonl");
+    let mut bytes = vec![b'a'; 64 * 1024 - 3];
+    bytes.extend_from_slice(b"boundary-needle");
+    fs::write(&path, bytes).expect("transcript");
+    let mut search = TranscriptSearch::open(&path, "boundary-needle").expect("search");
+    assert_eq!(
+        search.step().expect("first block"),
+        TranscriptSearchStep::Pending
+    );
+    let TranscriptSearchStep::Complete(Some(snippet)) = search.step().expect("second block") else {
+        panic!("missing match");
+    };
+    assert!(snippet.contains("boundary-needle"));
+}
+
+#[test]
+fn cursor_restore_conflict_keeps_current_data_and_the_trash_entry() {
+    let temp = tempdir().expect("home");
+    let dir = temp.path().join(".config/Cursor/User/globalStorage");
+    fs::create_dir_all(&dir).expect("storage");
+    let database = dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&database).expect("database");
+    connection.execute_batch("CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, createdAt INTEGER, lastUpdatedAt INTEGER, isArchived INTEGER, value TEXT); INSERT INTO composerHeaders VALUES ('child',1,1,0,'{\"name\":\"Original\"}');").expect("schema");
+    drop(connection);
+    let catalog = SessionCatalog::scan(temp.path()).expect("catalog");
+    catalog
+        .delete_session(catalog.resolve(Some("cursor"), "child").expect("child"))
+        .expect("trash");
+    let connection = rusqlite::Connection::open(&database).expect("database");
+    connection
+        .execute(
+            "INSERT INTO composerHeaders VALUES ('child',2,2,0,?1)",
+            ["newer data"],
+        )
+        .expect("conflicting row");
+    assert!(super::restore_session(temp.path(), "cursor:child").is_err());
+    let value: String = connection
+        .query_row(
+            "SELECT value FROM composerHeaders WHERE composerId='child'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current data");
+    assert_eq!(value, "newer data");
+    assert!(
+        fs::read_dir(temp.path().join(".config/mena/trash/sessions"))
+            .expect("trash retained")
+            .any(|entry| entry.expect("entry").path().join("session.json").is_file())
+    );
 }

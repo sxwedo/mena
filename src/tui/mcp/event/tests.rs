@@ -139,3 +139,37 @@ fn source_and_delete_keys_target_only_the_selected_registration() {
     );
     assert!(matches!(confirm, super::McpAction::Delete { index: 1 }));
 }
+
+#[test]
+fn regression_probe_confirmation_keeps_its_original_target_after_mouse_scroll() {
+    use crossterm::event::{Event, MouseEvent, MouseEventKind};
+    let mut app = McpApp::new(vec![
+        registration("confirmed-server"),
+        registration("other-server"),
+    ]);
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    );
+    super::handle_event(
+        &mut app,
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert_eq!(app.pending_probe, Some(0));
+    app.select_next(); // Execution still consumes the saved target if selection changes.
+    let super::McpAction::Probe { index: actual } = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+    ) else {
+        panic!("expected probe action");
+    };
+    assert_eq!(
+        actual, 0,
+        "must probe the registration shown in the confirmation"
+    );
+}

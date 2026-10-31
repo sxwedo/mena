@@ -54,7 +54,9 @@ when that variable is set). Deleting a session also removes its overlay entry.
 
 The browser reads detail lazily, so opening a large catalog does not parse every
 transcript up front. `--list` prints the plain table without opening the full-
-screen browser.
+screen browser. Search, selection, grouping, expanded directories, pane focus,
+and SubAgent visibility survive `1`–`4` navigation for the current run. Pressing
+the current surface's number keeps its state. Nothing is persisted to disk.
 
 | Key | Action |
 |---|---|
@@ -91,7 +93,10 @@ The list shows compact targets (`provider:first-8-id-characters`) to leave
 room for titles; the detail view, delete confirmations, exports, clipboard
 content, and `--json` output always carry the full `provider:session-id`. A
 transcript-search hit renders as a muted second line under the title instead of
-rewriting it. In project-grouped rows, each group header spans the row width
+rewriting it. Full-text search advances in 64 KiB blocks, so Esc can cancel
+between blocks. A file exceeding 64 MiB is counted as a load failure, and the
+scan continues. Field filters accept the full `provider:session-id` target and
+match every whitespace-separated query term. In project-grouped rows, each group header spans the row width
 and shows the full project path.
 
 Inside the detail view:
@@ -101,6 +106,8 @@ Inside the detail view:
 | `↑` / `↓`, `j` / `k` | Scroll without moving the outer selection |
 | `PgUp` / `PgDn`, `Home` / `End` | Page or jump within the transcript |
 | `Shift+↑` / `Shift+↓` | Jump between user and assistant messages |
+| `Tab` / `Shift+Tab` | Select and highlight the next / previous visible message |
+| `f` / `F` | Fork from the selection / force a context fork; lowercase `y` confirms |
 | `s` / `S` | Show conversation-only / complete transcript |
 | `/` | Search the transcript; `Enter` keeps, `Esc` cancels |
 | `n` / `N` | Jump to the next / previous match after a search |
@@ -112,6 +119,35 @@ Inside the detail view:
 
 Conversation-only exports end in `-conv.md`; complete exports end in
 `-full.md`. Metadata and per-model usage remain present in both scopes.
+
+## Fork from a message
+
+Select a visible message with `Tab` / `Shift+Tab`; the entire selected message
+is highlighted. `f` opens a confirmation naming the boundary and method.
+Lowercase `y` creates the fork; `Esc` cancels. `F` forces a context fork.
+Message selection is separate from scrolling and does not modify the transcript.
+
+- **Native fork:** available at a completed Codex assistant turn boundary. mena
+  calls [Codex `thread/fork`](https://learn.chatgpt.com/docs/app-server) with
+  `lastTurnId`, retaining that completed turn and its native metadata while
+  excluding later turns, then opens the new ID with `codex resume`. The installed
+  protocol schema must explicitly support `lastTurnId`; older versions fail
+  closed and offer `Shift+F`. The request is bounded to 15 seconds and does not
+  ask Codex to generate a turn. Native attachments follow Codex's own fork semantics.
+- **Context fork:** available from any loaded message. mena hands off only the
+  history prefix through that message, including preceding tool/system records,
+  to a fresh Claude, Codex, or OMP chat. It prefers the original provider when
+  that provider is one of those targets and installed; otherwise a target picker
+  opens. It does not use OMP's whole-session importer. Full-session token/cost
+  totals are omitted from the prefix. This transfers context rather than native
+  conversation structure.
+
+Both methods create an independent conversation and leave the source transcript
+unchanged. They do not rewind workspace files or revive historical tool/process
+state. Context handoff files are private and removed when the target exits.
+Codex forks keep their own first `session_meta` identity, even when they contain
+inherited parent metadata; they appear as separate rows and delete independently.
+The detail view shows their native parent session ID when present.
 
 ## Continue with another agent
 
@@ -169,7 +205,7 @@ provider did not persist one.
 provider-native title or first-message preview. The command does not claim
 fields that are absent from the catalog record.
 `is_subagent` reports whether native metadata identifies a SubAgent;
-`parent_session_id` is its native parent ID when available, otherwise `null`.
+`parent_session_id` is its native SubAgent or fork parent ID when available, otherwise `null`.
 
 ## Safety and live-session association
 
@@ -201,7 +237,10 @@ catalog for live-session association and deletion protection.
 Deletion moves native files into `trash/sessions` under the mena config
 directory and writes a `session.json` manifest. `mena ss restore` puts one
 entry back and refuses to overwrite a path that already exists. Cursor index
-rows are copied into that manifest before they are removed.
+rows are copied into that manifest before they are removed. New manifests preserve
+all native row columns and SQLite value types, including `isSubagent`. Restoring
+refuses a conflicting row and retains the trash entry; it never silently ignores
+or overwrites a conflict. Older manifests retain only the fields they recorded.
 
 `mena ss relocate` moves a Claude Code project store after its directory was
 renamed. A preview prints a confirmation token. Committing copies the store

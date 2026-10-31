@@ -10,13 +10,13 @@ use crate::mcp::McpRegistration;
 use crate::tui::common::{ManagedTerminal, Surface, is_key_press, surface_for_digit};
 
 pub(crate) fn run_mcp_browser(
-    registrations: Vec<McpRegistration>,
+    app: &mut McpApp,
     mut probe: impl FnMut(&McpRegistration) -> Result<crate::mcp::McpDetail> + Send + 'static,
     mut locate: impl FnMut(&McpRegistration) -> Result<usize>,
     mut refresh: impl FnMut() -> Result<Vec<McpRegistration>>,
     mut delete: impl FnMut(&McpRegistration) -> Result<()>,
 ) -> Result<Option<Surface>> {
-    let mut app = McpApp::new(registrations);
+    app.exit_after_probe = false;
     let (request_tx, request_rx) = mpsc::sync_channel::<(usize, McpRegistration)>(1);
     let (result_tx, result_rx) = mpsc::channel();
     let mut worker = Some(
@@ -61,12 +61,12 @@ pub(crate) fn run_mcp_browser(
                 .as_mut()
                 .expect("MCP terminal is active")
                 .terminal
-                .draw(|frame| super::render::draw_mcp(frame, &mut app))
+                .draw(|frame| super::render::draw_mcp(frame, app))
                 .context("failed to draw MCP browser")?;
 
             if event::poll(Duration::from_millis(90)).context("failed to poll terminal input")? {
                 let input = event::read().context("failed to read terminal input")?;
-                match handle_event(&mut app, &input) {
+                match handle_event(app, &input) {
                     McpAction::Continue => {}
                     McpAction::Quit if app.probe_in_progress.is_some() => {
                         app.exit_after_probe = true;
@@ -143,6 +143,9 @@ pub(crate) fn run_mcp_browser(
                 .map_err(|_| anyhow!("MCP probe worker panicked"))
         },
     );
+    while let Ok((index, result)) = result_rx.try_recv() {
+        app.finish_probe(index, result);
+    }
     loop_result.and_then(|jump| worker_result.map(|()| jump))
 }
 
@@ -159,7 +162,9 @@ pub(crate) enum McpAction {
 pub(crate) fn handle_event(app: &mut McpApp, input: &Event) -> McpAction {
     match input {
         Event::Key(key) if is_key_press(key) => handle_key(app, *key),
-        Event::Mouse(_) if app.pending_delete.is_some() => McpAction::Continue,
+        Event::Mouse(_) if app.pending_delete.is_some() || app.pending_probe.is_some() => {
+            McpAction::Continue
+        }
         Event::Mouse(mouse) => {
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
@@ -192,11 +197,11 @@ pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
         app.show_help = false;
         return McpAction::Continue;
     }
-    if app.pending_probe.is_some() {
+    if let Some(index) = app.pending_probe {
         return match key.code {
             KeyCode::Char('y') => {
                 app.pending_probe = None;
-                app.begin_probe()
+                app.begin_probe(index)
                     .map_or(McpAction::Continue, |index| McpAction::Probe { index })
             }
             KeyCode::Char('n') | KeyCode::Esc => {
@@ -267,9 +272,9 @@ pub(crate) fn handle_key(app: &mut McpApp, key: KeyEvent) -> McpAction {
             app.show_help = true;
             McpAction::Continue
         }
-        KeyCode::Char(digit @ '1'..='4') => {
-            surface_for_digit(digit).map_or(McpAction::Continue, McpAction::Jump)
-        }
+        KeyCode::Char(digit @ '1'..='4') => surface_for_digit(digit)
+            .filter(|surface| *surface != Surface::Mcp)
+            .map_or(McpAction::Continue, McpAction::Jump),
         KeyCode::Char('o') => app
             .selected_catalog_index()
             .map_or(McpAction::Continue, |index| McpAction::Open { index }),

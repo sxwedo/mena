@@ -10,6 +10,7 @@ use crate::{AgentKind, ProcessSnapshot};
 use anyhow::{Result, bail};
 
 mod detail;
+mod fork;
 mod storage;
 
 use crate::process::open_file_paths;
@@ -281,6 +282,16 @@ impl ProviderAdapter {
             Self::OhMyPi => vec![home.join(".omp/agent/sessions")],
             Self::Cursor => cursor_global_storage_dirs(home),
             Self::Grok => vec![grok_sessions_root(home)],
+        }
+    }
+
+    pub(super) fn fork_native(self, id: &str, point: &str) -> Result<NativeResumeCommand> {
+        match self {
+            Self::Codex => fork::codex(id, point),
+            _ => bail!(
+                "{} has no native message-level fork route",
+                self.kind().slug()
+            ),
         }
     }
 

@@ -67,7 +67,7 @@ fn continuation_launch_spec(
             _ => bail!("{} does not support mena handoff launch", target.slug()),
         };
         let prompt = format!(
-            "Continue the work from the {} session using the handoff at {}. Read it first, verify the current repository state, and continue from its pending work without assuming persisted tool state is still valid.",
+            "Continue the work from the {} session using the handoff at {}. Read it first, verify the current repository state, and continue from its pending work without assuming persisted tool state is still valid. Only use the supplied history prefix; later source messages are intentionally excluded. Do not resume the original session or restore earlier workspace files.",
             source.slug(),
             handoff_path.display()
         );
@@ -107,58 +107,77 @@ pub fn prepare_continuation(
             command: continuation_launch_spec(&session.kind, &target.kind, None)?,
             handoff: None,
         }),
-        ContinuationMethod::Handoff => {
-            let project = session.project.as_deref().with_context(|| {
-                format!(
-                    "cannot create a handoff for {} without a project",
-                    session.target()
-                )
-            })?;
-            if !project.is_dir() {
-                bail!(
-                    "cannot create a handoff for {} because its project directory no longer exists: {}",
-                    session.target(),
-                    project.display()
-                );
-            }
-            let detail =
-                load_detail().context("failed to load the selected session for handoff")?;
-            let transcript =
-                crate::export::render_session_detail_markdown(&detail, DetailScope::All);
-            let markdown = format!(
-                "# Mena Cross-Agent Handoff\n\n- Source: `{}`\n- Target: `{}`\n- Transfer: handoff to a fresh session\n\n## Continuation Contract\n\nRead the persisted context below, then verify the current repository state before acting. Treat tool results, process state, permissions, hooks, and uncommitted files as historical evidence rather than guaranteed current state.\n\n## Persisted Session Context\n\n{transcript}",
-                session.target(),
-                target.kind.slug()
-            );
-            let mut builder = tempfile::Builder::new();
-            builder.prefix(".mena-handoff-").suffix(".md");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-
-                builder.permissions(std::fs::Permissions::from_mode(0o600));
-            }
-            let mut handoff = builder.tempfile_in(project).with_context(|| {
-                format!(
-                    "failed to create a temporary handoff in {}",
-                    project.display()
-                )
-            })?;
-            handoff
-                .write_all(markdown.as_bytes())
-                .context("failed to write the temporary handoff")?;
-            handoff
-                .as_file_mut()
-                .sync_all()
-                .context("failed to sync the temporary handoff")?;
-            let command =
-                continuation_launch_spec(&session.kind, &target.kind, Some(handoff.path()))?;
-            Ok(PreparedContinuation {
-                command,
-                handoff: Some(handoff),
-            })
-        }
+        ContinuationMethod::Handoff => prepare_handoff(session, &target.kind, load_detail),
     }
+}
+
+/// Start a fresh conversation with exactly the selected history prefix.
+pub fn prepare_message_fork(
+    detail: &SessionDetail,
+    message: usize,
+    target: &AgentKind,
+) -> Result<PreparedContinuation> {
+    if message >= detail.messages.len() {
+        bail!("selected message no longer exists");
+    }
+    let mut prefix = detail.clone();
+    prefix.messages.truncate(message + 1);
+    prefix.session.tokens = None;
+    prefix.session.cost_usd = None;
+    prepare_handoff(&prefix.session.clone(), target, || Ok(prefix))
+}
+
+fn prepare_handoff(
+    session: &AgentSession,
+    target: &AgentKind,
+    load_detail: impl FnOnce() -> Result<SessionDetail>,
+) -> Result<PreparedContinuation> {
+    let project = session.project.as_deref().with_context(|| {
+        format!(
+            "cannot create a handoff for {} without a project",
+            session.target()
+        )
+    })?;
+    if !project.is_dir() {
+        bail!(
+            "cannot create a handoff for {} because its project directory no longer exists: {}",
+            session.target(),
+            project.display()
+        );
+    }
+    let detail = load_detail().context("failed to load the selected session for handoff")?;
+    let transcript = crate::export::render_session_detail_markdown(&detail, DetailScope::All);
+    let markdown = format!(
+        "# Mena Cross-Agent Handoff\n\n- Source: `{}`\n- Target: `{}`\n- Transfer: handoff to a fresh session\n\n## Continuation Contract\n\nRead the persisted context below, then verify the current repository state before acting. Treat tool results, process state, permissions, hooks, and uncommitted files as historical evidence rather than guaranteed current state.\n\n## Persisted Session Context\n\n{transcript}",
+        session.target(),
+        target.slug()
+    );
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".mena-handoff-").suffix(".md");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let mut handoff = builder.tempfile_in(project).with_context(|| {
+        format!(
+            "failed to create a temporary handoff in {}",
+            project.display()
+        )
+    })?;
+    handoff
+        .write_all(markdown.as_bytes())
+        .context("failed to write the temporary handoff")?;
+    handoff
+        .as_file_mut()
+        .sync_all()
+        .context("failed to sync the temporary handoff")?;
+    let command = continuation_launch_spec(&session.kind, target, Some(handoff.path()))?;
+    Ok(PreparedContinuation {
+        command,
+        handoff: Some(handoff),
+    })
 }
 
 #[cfg(test)]

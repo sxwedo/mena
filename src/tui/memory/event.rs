@@ -6,15 +6,21 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 
 use super::app::*;
 use super::render::draw_memories;
+#[cfg(test)]
 use crate::memory::MemoryFile;
 use crate::tui::common::{ManagedTerminal, Surface, is_key_press, surface_for_digit};
 
 pub(crate) fn run_memory_browser(
-    files: Vec<MemoryFile>,
+    app: &mut MemoriesApp,
     mut read: impl FnMut(&Path) -> Result<String>,
     mut delete: impl FnMut(&Path) -> Result<PathBuf>,
 ) -> Result<Option<Surface>> {
-    let mut app = MemoriesApp::new(files);
+    if let Some(path) = app.selected_file().map(|file| file.path.clone()) {
+        app.preview = Some((
+            path.clone(),
+            read(&path).map_err(|error| format!("{error:#}")),
+        ));
+    }
     let mut terminal = Some(ManagedTerminal::enter_with_native_selection()?);
     let mut jump: Option<Surface> = None;
 
@@ -33,7 +39,7 @@ pub(crate) fn run_memory_browser(
             .as_mut()
             .expect("memory terminal is active")
             .terminal
-            .draw(|frame| draw_memories(frame, &mut app))
+            .draw(|frame| draw_memories(frame, app))
             .context("failed to draw memory browser")?;
 
         if !event::poll(Duration::from_millis(90)).context("failed to poll terminal input")? {
@@ -41,6 +47,7 @@ pub(crate) fn run_memory_browser(
         }
         let input = event::read().context("failed to read terminal input")?;
         match input {
+            Event::Mouse(_) if app.pending_delete.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollDown => {
                     if app.focus == MemoryFocus::List {
@@ -59,7 +66,7 @@ pub(crate) fn run_memory_browser(
                 _ => {}
             },
             Event::Key(key) if is_key_press(&key) => {
-                match handle_key(&mut app, &mut terminal, key, &mut delete)? {
+                match handle_key(app, &mut terminal, key, &mut delete)? {
                     Some(MemoryExit::Quit) => break,
                     Some(MemoryExit::Jump(surface)) => {
                         jump = Some(surface);
@@ -97,7 +104,12 @@ fn handle_key(
     if app.pending_delete.is_some() {
         match key.code {
             KeyCode::Char('y') => {
-                let Some(file) = app.selected_file().cloned() else {
+                let Some(file) = app
+                    .pending_delete
+                    .and_then(|index| app.visible.get(index))
+                    .and_then(|index| app.files.get(*index))
+                    .cloned()
+                else {
                     app.pending_delete = None;
                     return Ok(None);
                 };
@@ -183,7 +195,9 @@ fn handle_key(
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            if let Some(surface) = surface_for_digit(digit) {
+            if let Some(surface) =
+                surface_for_digit(digit).filter(|surface| *surface != Surface::Memories)
+            {
                 return Ok(Some(MemoryExit::Jump(surface)));
             }
         }
@@ -206,4 +220,44 @@ fn handle_key(
         _ => {}
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod regression_checks {
+    use super::*;
+    #[test]
+    fn regression_delete_confirmation_keeps_its_original_target_after_scroll() {
+        let files: Vec<_> = ["confirmed.md", "other.md"]
+            .into_iter()
+            .map(|name| MemoryFile {
+                name: name.to_owned(),
+                provider: "codex".to_owned(),
+                scope: "user".to_owned(),
+                path: PathBuf::from(name),
+                location: "user".to_owned(),
+                size_bytes: 1,
+            })
+            .collect();
+        let mut app = MemoriesApp::new(files);
+        app.begin_delete();
+        app.select_next(); // The real mouse-wheel event routes directly here.
+        assert_eq!(app.pending_delete, Some(0));
+        let mut received = None;
+        let mut delete = |path: &Path| {
+            received = Some(path.to_path_buf());
+            anyhow::bail!("test callback: no file was deleted")
+        };
+        handle_key(
+            &mut app,
+            &mut None,
+            crossterm::event::KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut delete,
+        )
+        .expect("handle confirmation");
+        assert_eq!(
+            received,
+            Some(PathBuf::from("confirmed.md")),
+            "must delete the file shown in the confirmation"
+        );
+    }
 }

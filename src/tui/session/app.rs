@@ -41,6 +41,7 @@ pub(crate) enum BrowserMode {
     /// `n`/`N` step through matches after Enter commits.
     DetailSearch,
     ConfirmDelete,
+    ConfirmFork,
 }
 
 /// An in-detail text search over rendered transcript lines. `match_lines`
@@ -103,6 +104,11 @@ pub(crate) enum DetailAction {
 pub(crate) enum SessionBrowserResult {
     Resume(AgentSession),
     ContinueWith(AgentSession),
+    Fork {
+        detail: SessionDetail,
+        message: usize,
+        native: bool,
+    },
     /// The user pressed a digit key to switch to another mena surface.
     Jump(Surface),
 }
@@ -132,6 +138,7 @@ pub(crate) struct InProgressSearch {
     pub(crate) errors: u32,
     /// Index (into `SessionsApp::sessions`) of the next session to scan.
     pub(crate) cursor: usize,
+    pub(crate) transcript: Option<crate::session::TranscriptSearch>,
     /// When the search started, used to animate the spinner between ticks.
     pub(crate) started: Instant,
 }
@@ -151,6 +158,8 @@ pub(crate) struct SessionsApp {
     pub(crate) detail_theme: SessionDetailTheme,
     pub(crate) detail: Option<SessionDetail>,
     pub(crate) detail_scroll: usize,
+    pub(crate) selected_message: Option<usize>,
+    pub(crate) native_fork: bool,
     pub(crate) detail_max_scroll: usize,
     pub(crate) detail_primary_offsets: Vec<usize>,
     pub(crate) detail_layout: Option<DetailLayoutCache>,
@@ -220,6 +229,8 @@ impl SessionsApp {
             detail_theme,
             detail: None,
             detail_scroll: 0,
+            selected_message: None,
+            native_fork: false,
             detail_max_scroll: 0,
             detail_primary_offsets: Vec::new(),
             detail_layout: None,
@@ -244,6 +255,35 @@ impl SessionsApp {
         };
         app.recompute_filter();
         app
+    }
+
+    pub(crate) fn refresh_catalog(
+        &mut self,
+        sessions: Vec<AgentSession>,
+        protection: crate::session::SessionProtection,
+    ) {
+        let selected = self.selected_session().map(AgentSession::target);
+        let hits = self.message_search.as_ref().map(|hits| {
+            hits.iter()
+                .filter_map(|index| self.sessions.get(*index))
+                .map(AgentSession::target)
+                .collect::<BTreeSet<_>>()
+        });
+        self.sessions = sessions;
+        self.active_targets = protection.exact_active_targets;
+        self.protected_targets = protection.protected_targets;
+        self.message_search = hits.map(|hits| {
+            self.sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, session)| hits.contains(&session.target()))
+                .map(|(index, _)| index)
+                .collect()
+        });
+        self.recompute_filter();
+        if let Some(row) = selected.and_then(|target| self.display_rows().iter().position(|row| {
+            matches!(row, DisplayRow::Session { session_index } if self.sessions[*session_index].target() == target)
+        })) { self.table_state.select(Some(row)); }
     }
 
     pub(crate) fn recompute_filter(&mut self) {
@@ -293,32 +333,31 @@ impl SessionsApp {
                 .map(|&session_index| DisplayRow::Session { session_index })
                 .collect(),
             Grouping::Project => {
-                let mut seen: Vec<String> = Vec::new();
+                let mut project_indices = BTreeMap::new();
+                let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
                 for &session_index in &self.filtered {
                     let key = session_project_label(&self.sessions[session_index]);
-                    if !seen.contains(&key) {
-                        seen.push(key);
+                    let next = groups.len();
+                    let group = *project_indices.entry(key.clone()).or_insert(next);
+                    if group == next {
+                        groups.push((key, Vec::new()));
                     }
+                    groups[group].1.push(session_index);
                 }
                 let mut rows = Vec::new();
-                for key in seen {
-                    let count = self
-                        .filtered
-                        .iter()
-                        .filter(|&&idx| session_project_label(&self.sessions[idx]) == key)
-                        .count();
-                    let collapsed = self.collapsed_projects.contains(&key);
+                for (project, indices) in groups {
+                    let collapsed = self.collapsed_projects.contains(&project);
                     rows.push(DisplayRow::GroupHeader {
-                        project: key.clone(),
-                        count,
+                        project,
+                        count: indices.len(),
                         collapsed,
                     });
                     if !collapsed {
-                        for &session_index in &self.filtered {
-                            if session_project_label(&self.sessions[session_index]) == key {
-                                rows.push(DisplayRow::Session { session_index });
-                            }
-                        }
+                        rows.extend(
+                            indices
+                                .into_iter()
+                                .map(|session_index| DisplayRow::Session { session_index }),
+                        );
                     }
                 }
                 rows
@@ -471,6 +510,7 @@ impl SessionsApp {
 
     pub(crate) fn open_detail(&mut self, detail: SessionDetail) {
         self.detail = Some(detail);
+        self.selected_message = None;
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
         self.detail_primary_offsets.clear();
@@ -482,6 +522,58 @@ impl SessionsApp {
         self.mode = BrowserMode::Detail;
     }
 
+    pub(crate) fn select_detail_message(&mut self, forward: bool) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        let messages = detail
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| self.preview_scope.keeps(message.kind))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if messages.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_message
+            .and_then(|selected| messages.iter().position(|index| *index == selected));
+        let position = current.map_or_else(
+            || if forward { 0 } else { messages.len() - 1 },
+            |current| {
+                if forward {
+                    (current + 1).min(messages.len() - 1)
+                } else {
+                    current.saturating_sub(1)
+                }
+            },
+        );
+        self.selected_message = Some(messages[position]);
+        if let Some(layout) = &self.detail_layout
+            && let Some((_, line)) = layout
+                .message_starts
+                .iter()
+                .find(|(index, _)| *index == messages[position])
+        {
+            self.detail_scroll = layout.line_offsets[*line].min(self.detail_max_scroll);
+        }
+    }
+
+    pub(crate) fn request_fork(&mut self, force_context: bool) {
+        let Some(message) = self
+            .selected_message
+            .and_then(|index| self.detail.as_ref()?.messages.get(index))
+        else {
+            self.detail_status = Some(StatusMessage::error(
+                "Select a message with Tab / Shift+Tab first".to_owned(),
+            ));
+            return;
+        };
+        self.native_fork = !force_context && message.fork_point.is_some();
+        self.mode = BrowserMode::ConfirmFork;
+    }
+
     /// Switch the detail preview scope. Invalidates the cached layout so the
     /// next redraw reflows for the new message set, and clamps scroll.
     pub(crate) fn set_preview_scope(&mut self, scope: DetailScope) {
@@ -489,6 +581,13 @@ impl SessionsApp {
             return;
         }
         self.preview_scope = scope;
+        if self
+            .selected_message
+            .and_then(|index| self.detail.as_ref()?.messages.get(index))
+            .is_some_and(|message| !scope.keeps(message.kind))
+        {
+            self.selected_message = None;
+        }
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
         self.detail_primary_offsets.clear();
@@ -816,6 +915,7 @@ impl StatusMessage {
 pub(crate) struct SessionDetailContent {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) primary_line_indices: Vec<usize>,
+    pub(crate) message_starts: Vec<(usize, usize)>,
 }
 
 #[derive(Debug)]
@@ -824,6 +924,7 @@ pub(crate) struct DetailLayoutCache {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) line_offsets: Vec<usize>,
     pub(crate) primary_offsets: Vec<usize>,
+    pub(crate) message_starts: Vec<(usize, usize)>,
 }
 
 impl DetailLayoutCache {
@@ -838,8 +939,17 @@ impl DetailLayoutCache {
         let mut lines = Vec::with_capacity(content.lines.len());
         let mut primary_line_indices = Vec::with_capacity(content.primary_line_indices.len());
         let mut primary_indices = content.primary_line_indices.into_iter().peekable();
+        let mut message_indices = content.message_starts.into_iter().peekable();
+        let mut message_starts = Vec::new();
 
         for (index, line) in content.lines.into_iter().enumerate() {
+            if message_indices
+                .peek()
+                .is_some_and(|(_, start)| *start == index)
+            {
+                let (message, _) = message_indices.next().expect("message start");
+                message_starts.push((message, lines.len()));
+            }
             while primary_indices
                 .peek()
                 .is_some_and(|primary| *primary == index)
@@ -874,6 +984,7 @@ impl DetailLayoutCache {
             lines,
             line_offsets,
             primary_offsets,
+            message_starts,
         }
     }
 

@@ -202,6 +202,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &MemoriesApp) {
                 ("/", "filter"),
                 ("o", "edit"),
                 ("d", "delete"),
+                ("?", "keys"),
                 ("q", "quit"),
             ],
         ),

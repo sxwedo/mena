@@ -64,36 +64,39 @@ mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 |---|---|
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
 | `mena ps` | 列出运行中的编码 Agent 进程 |
-| `mena sessions` / `mena ss` | 搜索、检查、重命名、恢复、换 Agent 继续、导出和删除 Session |
+| `mena sessions` / `mena ss` | 搜索、检查、从消息分叉、重命名、恢复、换 Agent 继续、导出和删除 Session |
 | `mena skills` / `mena sk` | 列出、筛选、检查和浏览 Agent Skill |
 | `mena mcp` | 分组浏览注册，打开/编辑/删除配置，并显式探测元数据 |
 | `mena memories` / `mena ms` | 浏览、读取、编辑和删除 Agent 记忆文件 |
 | `mena config init` | 创建 `~/.config/mena/config.toml` |
 
 所有交互浏览器共享同一套按键：`/` 过滤、`?` 展开完整键位、`1`–`4` 在
-Sessions、Skills、MCP 和 Memories 之间直接切换；`p` 是唯一可能启动进程或访问
-网络的按键，且始终需要显式确认。各命令均支持 `--list`，不打开浏览器直接输出
+Sessions、Skills、MCP 和 Memories 之间直接切换。MCP 页面中，`p` 请求实时探测，
+必须显式确认后才会启动已配置的服务器或联系其端点。各命令均支持 `--list`，不打开浏览器直接输出
 纯表格。
 
 ## Provider 支持
 
-| Provider | 启动 | Session | 换 Agent 继续 | MCP 配置 |
-|---|:---:|:---:|---|:---:|
-| Claude Code | ✓ | ✓ | 导入 OMP；handoff 到 Codex | ✓ |
-| Codex | ✓ | ✓² | 导入 OMP；handoff 到 Claude | ✓ |
-| Gemini CLI | ✓ | ✓ | handoff 到 Claude/Codex/OMP | ✓ |
-| OpenCode | ✓ | ✓² | handoff 到 Claude/Codex/OMP | ✓ |
-| Pi | ✓ | ✓ | handoff 到 Claude/Codex/OMP | adapter¹ |
-| Oh My Pi | ✓ | ✓ | handoff 到 Claude/Codex | ✓ |
-| Cursor Agent | ✓ | ✓² | handoff 到 Claude/Codex/OMP | ✓ |
-| Grok | ✓ | ✓ | handoff 到 Claude/Codex/OMP | — |
-| Goose | ✓ | — | — | ✓ |
-| 自定义配置 | ✓ | — | — | — |
+| Provider | 启动 | Session | 换 Agent 继续 | 消息分叉 | MCP 配置 |
+|---|:---:|:---:|---|---|:---:|
+| Claude Code | ✓ | ✓ | 导入 OMP；handoff 到 Codex | 上下文³ | ✓ |
+| Codex | ✓ | ✓² | 导入 OMP；handoff 到 Claude | 原生 / 上下文³ | ✓ |
+| Gemini CLI | ✓ | ✓ | handoff 到 Claude/Codex/OMP | 上下文³ | ✓ |
+| OpenCode | ✓ | ✓² | handoff 到 Claude/Codex/OMP | 上下文³ | ✓ |
+| Pi | ✓ | ✓ | handoff 到 Claude/Codex/OMP | 上下文³ | adapter¹ |
+| Oh My Pi | ✓ | ✓ | handoff 到 Claude/Codex | 上下文³ | ✓ |
+| Cursor Agent | ✓ | ✓² | handoff 到 Claude/Codex/OMP | 上下文³ | ✓ |
+| Grok | ✓ | ✓ | handoff 到 Claude/Codex/OMP | 上下文³ | — |
+| Goose | ✓ | — | — | — | ✓ |
+| 自定义配置 | ✓ | — | — | — | — |
 
 ¹ 仅在安装 `pi-mcp-adapter` 后发现 Pi 条目。
 
 ² 根据原生标记识别 SubAgent，默认隐藏；通过 `--include-subagents` 或在列表内
 按 `a` 切换显示。
+
+³ 详情中按 `Tab` 选中并高亮消息，`f` 分叉，`F` 强制上下文方式。上下文分叉新建
+Claude/Codex/OMP 对话；Codex 已完成的 turn 可原生分叉。
 
 自定义 Agent 和 Goose 没有通用 Session 目录。`mena` 会明确返回不支持，而不会
 猜测 Provider 自己的存储路径。

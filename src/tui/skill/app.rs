@@ -52,6 +52,7 @@ pub(crate) struct SkillsApp {
     pub(crate) show_symlinks: bool,
     /// Whether the `?` keymap overlay is visible.
     pub(crate) show_help: bool,
+    pub(crate) status: Option<String>,
 }
 
 impl SkillsApp {
@@ -83,14 +84,39 @@ impl SkillsApp {
             marquee_offset: 0,
             show_symlinks: false,
             show_help: false,
+            status: None,
         };
         app.rebuild_rows();
         app
     }
 
+    pub(crate) fn refresh_catalog(&mut self, skills: Vec<AgentSkill>) {
+        let selected = self.selected_preview_path();
+        for skill in &skills {
+            if let Some(directory) = skill.path.parent() {
+                self.directory_children
+                    .insert(directory.to_path_buf(), skill.children.clone());
+            }
+        }
+        self.skills = skills;
+        self.rebuild_rows();
+        if let Some(index) = selected.and_then(|path| {
+            self.visible_rows.iter().position(|row| match row {
+                SkillRow::Skill { skill_idx, .. } => self.skills[*skill_idx].path == path,
+                SkillRow::Item { full_path, .. } => *full_path == path,
+            })
+        }) {
+            self.selected_index = index;
+        }
+    }
+
     /// Rebuild `visible_rows` from skills, filter, and expansion state.
     pub(crate) fn rebuild_rows(&mut self) {
-        let q = self.search_query.to_lowercase();
+        let terms = self
+            .search_query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
         self.visible_rows.clear();
 
         for (skill_idx, skill) in self.skills.iter().enumerate() {
@@ -98,21 +124,18 @@ impl SkillsApp {
                 continue;
             }
 
-            if !q.is_empty() {
-                let hit = skill.name.to_lowercase().contains(&q)
-                    || skill.provider.to_lowercase().contains(&q)
-                    || skill.scope.to_lowercase().contains(&q)
-                    || skill.location.to_lowercase().contains(&q)
-                    || skill.triggers.iter().any(|t| t.to_lowercase().contains(&q))
-                    || skill
-                        .description
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&q);
-                if !hit {
-                    continue;
-                }
+            let text = format!(
+                "{} {} {} {} {} {}",
+                skill.name,
+                skill.provider,
+                skill.scope,
+                skill.location,
+                skill.triggers.join(" "),
+                skill.description.as_deref().unwrap_or_default()
+            )
+            .to_lowercase();
+            if !terms.iter().all(|term| text.contains(term)) {
+                continue;
             }
 
             let skill_dir = skill.path.parent().map(PathBuf::from);

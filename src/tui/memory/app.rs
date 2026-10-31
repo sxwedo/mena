@@ -50,8 +50,8 @@ impl MemoriesApp {
     pub(crate) fn recompute_filter(&mut self) {
         let terms = self
             .query
-            .split_ascii_whitespace()
-            .map(str::to_ascii_lowercase)
+            .split_whitespace()
+            .map(str::to_lowercase)
             .collect::<Vec<_>>();
         self.visible = self
             .files
@@ -62,7 +62,7 @@ impl MemoriesApp {
                     "{} {} {} {}",
                     file.name, file.provider, file.scope, file.location
                 )
-                .to_ascii_lowercase();
+                .to_lowercase();
                 terms.iter().all(|term| haystack.contains(term))
             })
             .map(|(index, _)| index)

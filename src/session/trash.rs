@@ -6,6 +6,7 @@
 //! are removed. A failed deletion still writes the manifest for whatever
 //! already moved.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -38,6 +39,8 @@ pub(super) struct CursorRow {
     pub table: String,
     pub key: String,
     pub value_hex: String,
+    #[serde(default)]
+    pub columns: BTreeMap<String, SqliteValue>,
     #[serde(default)]
     pub created_at: Option<i64>,
     #[serde(default)]
@@ -255,48 +258,107 @@ fn read_manifest(path: &Path) -> Result<Manifest> {
     serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) enum SqliteValue {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(String),
+    Blob(String),
+}
+
+impl SqliteValue {
+    pub(super) fn capture(value: rusqlite::types::ValueRef<'_>) -> Result<Self> {
+        use rusqlite::types::ValueRef;
+        Ok(match value {
+            ValueRef::Null => Self::Null,
+            ValueRef::Integer(value) => Self::Integer(value),
+            ValueRef::Real(value) => Self::Real(value.to_bits()),
+            ValueRef::Text(value) => Self::Text(std::str::from_utf8(value)?.to_owned()),
+            ValueRef::Blob(value) => Self::Blob(encode_hex(value)),
+        })
+    }
+
+    fn restore(&self) -> Result<rusqlite::types::Value> {
+        use rusqlite::types::Value;
+        Ok(match self {
+            Self::Null => Value::Null,
+            Self::Integer(value) => Value::Integer(*value),
+            Self::Real(value) => Value::Real(f64::from_bits(*value)),
+            Self::Text(value) => Value::Text(value.clone()),
+            Self::Blob(value) => Value::Blob(decode_hex(value)?),
+        })
+    }
+}
+
 fn restore_cursor_rows(rows: &[CursorRow]) -> Result<()> {
-    use rusqlite::{Connection, OpenFlags, params};
+    use rusqlite::{Connection, OpenFlags, types::Value};
+    let mut databases = BTreeMap::<&Path, Vec<&CursorRow>>::new();
     for row in rows {
-        if !row.database.is_file() {
-            bail!(
-                "cannot restore Cursor row; database is gone: {}",
-                row.database.display()
-            );
-        }
-        let connection = Connection::open_with_flags(
-            &row.database,
+        databases.entry(&row.database).or_default().push(row);
+    }
+    for (database, rows) in databases {
+        let mut connection = Connection::open_with_flags(
+            database,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .with_context(|| format!("failed to open {}", row.database.display()))?;
-        let bytes = decode_hex(&row.value_hex)
-            .with_context(|| format!("trashed Cursor value for {} is not hex", row.key))?;
-        match row.table.as_str() {
-            "composerHeaders" => {
-                connection
-                    .execute(
-                        "INSERT OR IGNORE INTO composerHeaders (composerId, createdAt, lastUpdatedAt, isArchived, value) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![row.key, row.created_at, row.updated_at, row.is_archived, bytes],
+        .with_context(|| format!("failed to open {}", database.display()))?;
+        let transaction = connection.transaction()?;
+        for row in rows {
+            if !matches!(
+                row.table.as_str(),
+                "composerHeaders" | "cursorDiskKV" | "ItemTable"
+            ) {
+                bail!("refusing to restore unknown Cursor table {}", row.table);
+            }
+            let mut columns = row
+                .columns
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), value.restore()?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            if columns.is_empty() {
+                // Backward compatibility with manifests written before typed row snapshots.
+                let bytes = decode_hex(&row.value_hex)?;
+                let (key_column, value) = if row.table == "composerHeaders" {
+                    columns.insert(
+                        "createdAt".to_owned(),
+                        row.created_at.map_or(Value::Null, Value::Integer),
+                    );
+                    columns.insert(
+                        "lastUpdatedAt".to_owned(),
+                        row.updated_at.map_or(Value::Null, Value::Integer),
+                    );
+                    columns.insert(
+                        "isArchived".to_owned(),
+                        row.is_archived.map_or(Value::Null, Value::Integer),
+                    );
+                    ("composerId", Value::Text(String::from_utf8(bytes)?))
+                } else {
+                    ("key", Value::Blob(bytes))
+                };
+                columns.insert(key_column.to_owned(), Value::Text(row.key.clone()));
+                columns.insert("value".to_owned(), value);
+            }
+            let names = columns
+                .keys()
+                .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = vec!["?"; columns.len()].join(", ");
+            let sql = format!(
+                "INSERT INTO {} ({names}) VALUES ({placeholders})",
+                row.table
+            );
+            transaction
+                .execute(&sql, rusqlite::params_from_iter(columns.values()))
+                .with_context(|| {
+                    format!(
+                        "cannot restore {}:{}; an existing row is never overwritten",
+                        row.table, row.key
                     )
-                    .with_context(|| format!("failed to restore composerHeaders in {}", row.database.display()))?;
-            }
-            "cursorDiskKV" | "ItemTable" => {
-                let sql = format!(
-                    "INSERT OR IGNORE INTO {} (key, value) VALUES (?1, ?2)",
-                    row.table
-                );
-                connection
-                    .execute(&sql, params![row.key, bytes])
-                    .with_context(|| {
-                        format!(
-                            "failed to restore {} in {}",
-                            row.table,
-                            row.database.display()
-                        )
-                    })?;
-            }
-            other => bail!("refusing to restore unknown Cursor table {other}"),
+                })?;
         }
+        transaction.commit()?;
     }
     Ok(())
 }

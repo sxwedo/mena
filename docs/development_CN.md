@@ -120,3 +120,8 @@ mise run build
 
 `mise run verify` 包括格式检查、类型检查、全部测试、warnings denied 的 pedantic / 
 nursery Clippy，以及 warnings denied 的 rustdoc。
+
+消息分叉通过 `session/adapter/fork.rs` 发起显式、限时的 Codex 原生请求，
+先检查本机 schema 是否支持 `lastTurnId`；其他消息通过 `continuation.rs` 的历史前缀
+handoff 新建对话。TUI 只选择规范化消息，不解析或改写原生 transcript。
+`BrowseState` 在当前运行中保存四个页面的浏览状态，不持久化到磁盘。

@@ -12,7 +12,14 @@ use crate::tui::common::Surface;
 
 pub fn manage_skills(
     skills: Vec<AgentSkill>,
+    saved: &mut Option<app::SkillsApp>,
     mut load_entry: impl FnMut(&AgentSkill, &Path) -> Result<SkillEntry>,
 ) -> Result<Option<Surface>> {
-    run_skill_browser(skills, &mut load_entry)
+    let app = saved.get_or_insert_with(|| app::SkillsApp::new(skills.clone()));
+    if app.skills != skills {
+        app.refresh_catalog(skills);
+    }
+    app.current_detail = None;
+    app.preview_error = None;
+    run_skill_browser(app, &mut load_entry)
 }

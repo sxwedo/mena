@@ -82,8 +82,8 @@ impl McpApp {
         let previously_selected = self.selected_catalog_index();
         let terms = self
             .query
-            .split_ascii_whitespace()
-            .map(str::to_ascii_lowercase)
+            .split_whitespace()
+            .map(str::to_lowercase)
             .collect::<Vec<_>>();
         self.visible = self
             .search_index
@@ -179,11 +179,11 @@ impl McpApp {
         self.pending_probe = None;
     }
 
-    pub(crate) fn begin_probe(&mut self) -> Option<usize> {
+    pub(crate) fn begin_probe(&mut self, index: usize) -> Option<usize> {
         if self.probe_in_progress.is_some() {
             return None;
         }
-        let index = self.selected_catalog_index()?;
+        self.registrations.get(index)?;
         self.probe_in_progress = Some(index);
         self.notice = None;
         self.exit_after_probe = false;
@@ -292,7 +292,11 @@ impl McpApp {
         });
     }
 
-    fn replace_registrations(&mut self, registrations: Vec<McpRegistration>, old_index: usize) {
+    pub(crate) fn replace_registrations(
+        &mut self,
+        registrations: Vec<McpRegistration>,
+        old_index: usize,
+    ) {
         let selected_identity = self
             .registrations
             .get(old_index)

@@ -114,6 +114,12 @@ pub(crate) fn draw_skills(frame: &mut Frame, app: &SkillsApp) {
         ],
     ));
     frame.render_widget(footer, chunks[2]);
+    if let Some(status) = &app.status {
+        frame.render_widget(
+            Paragraph::new(status.as_str()).style(Style::default().fg(UI.danger)),
+            chunks[2],
+        );
+    }
     if app.show_help {
         render_keymap_popup(frame, "Skills", SKILL_HELP_KEYS);
     }

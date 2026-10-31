@@ -169,6 +169,7 @@ pub(crate) fn start_message_search(app: &mut SessionsApp, has_loader: bool) -> b
         snippets: BTreeMap::new(),
         errors: 0,
         cursor: 0,
+        transcript: None,
         started: Instant::now(),
     });
     true
@@ -190,7 +191,6 @@ where
     // frame or two but large ones don't spend forever idling between draws.
     while progress.cursor < total {
         let index = progress.cursor;
-        progress.cursor += 1;
         let session = &app.sessions[index];
         let target = session.target();
         let path = session.path.clone();
@@ -205,17 +205,32 @@ where
         // Scalar matches count as hits without paying for a transcript load.
         if session_matches(session, &query) {
             progress.hits.insert(index);
+            progress.cursor += 1;
             continue;
         }
         if file_backed {
-            match crate::session::first_transcript_hit(&path, &query) {
-                Ok(Some(snippet)) => {
+            let result = (|| {
+                if progress.transcript.is_none() {
+                    progress.transcript =
+                        Some(crate::session::TranscriptSearch::open(&path, &query)?);
+                }
+                progress
+                    .transcript
+                    .as_mut()
+                    .expect("opened transcript")
+                    .step()
+            })();
+            match result {
+                Ok(crate::session::TranscriptSearchStep::Pending) => return false,
+                Ok(crate::session::TranscriptSearchStep::Complete(Some(snippet))) => {
                     progress.snippets.insert(target, snippet);
                     progress.hits.insert(index);
                 }
-                Ok(None) => {}
+                Ok(crate::session::TranscriptSearchStep::Complete(None)) => {}
                 Err(_) => progress.errors += 1,
             }
+            progress.transcript = None;
+            progress.cursor += 1;
             return false;
         }
         match load_detail(session) {
@@ -238,6 +253,7 @@ where
             }
             Err(_) => progress.errors += 1,
         }
+        progress.cursor += 1;
         // Did real I/O this iteration — yield back to the loop for a redraw.
         return false;
     }
@@ -348,6 +364,7 @@ pub(crate) fn handle_detail_key(
         // Vim-style in-detail search: `/` opens an incremental query, and a
         // committed search navigates with `n`/`N`. Esc clears the search
         // before it ever closes the popup.
+        KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('/') => app.begin_detail_search(),
         KeyCode::Char('n') if app.detail_search.is_some() => {
             app.step_detail_match(true);
@@ -397,6 +414,13 @@ pub(crate) fn handle_detail_key(
                 });
             }
         }
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.select_detail_message(false);
+        }
+        KeyCode::Tab => app.select_detail_message(true),
+        KeyCode::BackTab => app.select_detail_message(false),
+        KeyCode::Char('f') => app.request_fork(false),
+        KeyCode::Char('F') => app.request_fork(true),
         KeyCode::Char('s') => app.set_preview_scope(DetailScope::Conversation),
         KeyCode::Char('S') => app.set_preview_scope(DetailScope::All),
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -422,6 +446,12 @@ pub(crate) fn handle_detail_event(
     export: Option<ExportCallback<'_>>,
     copy: Option<CopyCallback<'_>>,
 ) -> DetailAction {
+    if app.show_help {
+        if matches!(input, Event::Key(key) if is_key_press(key)) {
+            app.show_help = false;
+        }
+        return DetailAction::Continue;
+    }
     match input {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             handle_detail_key(app, *key, export, copy)
@@ -501,21 +531,19 @@ fn detail_scroll_direction(input: &Event) -> Option<bool> {
 }
 
 pub(crate) fn session_matches(session: &AgentSession, query: &str) -> bool {
-    query.is_empty()
-        || session.id.to_ascii_lowercase().contains(query)
-        || session
-            .kind
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(query)
-        || session
-            .title
+    let text = format!(
+        "{} {} {} {}",
+        session.target(),
+        session.kind,
+        session.title.as_deref().unwrap_or_default(),
+        session
+            .project
             .as_deref()
-            .is_some_and(|title| title.to_ascii_lowercase().contains(query))
-        || session.project.as_ref().is_some_and(|project| {
-            project
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .contains(query)
-        })
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .display()
+    )
+    .to_lowercase();
+    query
+        .split_whitespace()
+        .all(|term| text.contains(&term.to_lowercase()))
 }

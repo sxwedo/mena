@@ -55,40 +55,67 @@ pub const fn updated_within_days(updated_at: u64, days: u64, now: u64) -> bool {
     days == 0 || updated_at >= now.saturating_sub(days.saturating_mul(86_400))
 }
 
-/// Scan a transcript until the first case-insensitive `query` hit.
-///
-/// Reads in fixed windows and stops. The returned text is a short slice
-/// around that hit, prefixed with a role when one is visible just before it.
-pub fn first_transcript_hit(path: &Path, query: &str) -> Result<Option<String>> {
-    if query.is_empty() || !path.is_file() {
-        return Ok(None);
+/// A bounded transcript scan advanced one 64 KiB block at a time.
+#[derive(Debug)]
+pub struct TranscriptSearch {
+    file: File,
+    query: String,
+    carry: Vec<u8>,
+    scanned: u64,
+    buffer: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TranscriptSearchStep {
+    Pending,
+    Complete(Option<String>),
+}
+
+impl TranscriptSearch {
+    pub(crate) fn open(path: &Path, query: &str) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            bail!("transcript is not a regular file");
+        }
+        Ok(Self {
+            file,
+            query: query.to_owned(),
+            carry: Vec::new(),
+            scanned: 0,
+            buffer: vec![0; 64 * 1024],
+        })
     }
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to read agent session {}", path.display()))?;
-    let mut carry = Vec::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to read agent session {}", path.display()));
+
+    /// Advance by at most one block, reporting pending work or a completed scan.
+    pub(crate) fn step(&mut self) -> Result<TranscriptSearchStep> {
+        let read = match self.file.read(&mut self.buffer) {
+            Ok(0) => return Ok(TranscriptSearchStep::Complete(None)),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                return Ok(TranscriptSearchStep::Pending);
             }
+            Err(error) => return Err(error.into()),
         };
-        carry.extend_from_slice(&buffer[..read]);
-        let text = String::from_utf8_lossy(&carry);
-        let lower = text.to_ascii_lowercase();
-        if let Some(at) = lower.find(query) {
-            return Ok(Some(transcript_snippet(&text, at, query.len())));
+        self.scanned += read as u64;
+        if self.scanned > MAX_JSON_BYTES {
+            bail!("transcript search exceeded the 64 MiB read limit");
         }
-        let keep = query.len().saturating_add(240).max(256);
-        if carry.len() > keep {
-            carry.drain(..carry.len() - keep);
+        self.carry.extend_from_slice(&self.buffer[..read]);
+        let text = String::from_utf8_lossy(&self.carry);
+        if let Some(at) = text.to_ascii_lowercase().find(&self.query) {
+            return Ok(TranscriptSearchStep::Complete(Some(transcript_snippet(
+                &text,
+                at,
+                self.query.len(),
+            ))));
         }
+        let keep = self.query.len().saturating_add(240).max(256);
+        if self.carry.len() > keep {
+            self.carry.drain(..self.carry.len() - keep);
+        }
+        Ok(TranscriptSearchStep::Pending)
     }
-    Ok(None)
 }
 
 fn transcript_snippet(text: &str, at: usize, needle: usize) -> String {
@@ -235,6 +262,8 @@ impl SessionMessageKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionMessage {
+    /// A completed native turn whose end is exactly this message.
+    pub fork_point: Option<String>,
     pub kind: SessionMessageKind,
     pub timestamp: Option<String>,
     pub model: Option<String>,
@@ -710,6 +739,31 @@ impl SessionCatalog {
             )
         })?;
         Ok(summary)
+    }
+
+    pub(crate) fn fork_native(
+        &self,
+        detail: &SessionDetail,
+        message: usize,
+    ) -> Result<NativeResumeCommand> {
+        let current = self.resolve(Some(detail.session.kind.slug()), &detail.session.id)?;
+        let point = detail
+            .messages
+            .get(message)
+            .and_then(|message| message.fork_point.as_deref())
+            .context("selected message has no native fork boundary")?;
+        let loaded = self.detail(current)?;
+        if loaded
+            .messages
+            .get(message)
+            .and_then(|message| message.fork_point.as_deref())
+            != Some(point)
+        {
+            bail!("session changed; reopen details before forking");
+        }
+        adapter::ProviderAdapter::from_kind(&current.kind)
+            .context("provider does not support native forks")?
+            .fork_native(&current.id, point)
     }
 
     /// Set a mena-owned display title for one cataloged session.

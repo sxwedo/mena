@@ -136,3 +136,9 @@ mise run build
 
 `mise run verify` runs formatting checks, type checking, all tests, pedantic and
 nursery Clippy with warnings denied, and rustdoc with warnings denied.
+
+Message forks use `session/adapter/fork.rs` for explicit, bounded native Codex
+requests after checking installed `lastTurnId` schema support. Other message
+boundaries use a prefix handoff in `continuation.rs`. TUI code selects normalized
+messages and never parses or rewrites native transcripts. `BrowseState` retains
+four browser states in memory for the current run only.

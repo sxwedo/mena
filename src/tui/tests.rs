@@ -264,6 +264,7 @@ fn detail_navigation_scrolls_without_changing_the_selected_session() {
     app.open_detail(SessionDetail {
         session: first,
         messages: vec![SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::User,
             timestamp: None,
             model: None,
@@ -353,6 +354,7 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
         session,
         messages: vec![
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: Some("2026-08-01T01:02:04Z".to_owned()),
                 model: None,
@@ -360,6 +362,7 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
                 content: "complete first question".to_owned(),
             },
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::Assistant,
                 timestamp: Some("2026-08-01T01:02:05Z".to_owned()),
                 model: Some("gpt-5.5".to_owned()),
@@ -367,6 +370,7 @@ fn detail_mode_renders_complete_metadata_and_chat_in_a_popup() {
                 content: "complete first answer".to_owned(),
             },
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::Assistant,
                 timestamp: Some("2026-08-01T01:02:06Z".to_owned()),
                 model: Some("gpt-5.6".to_owned()),
@@ -446,6 +450,7 @@ fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
     let session = fixture_session();
     let messages = vec![
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::User,
             timestamp: None,
             model: None,
@@ -453,6 +458,7 @@ fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
             content: "visible user question".to_owned(),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::ToolCall,
             timestamp: None,
             model: None,
@@ -460,6 +466,7 @@ fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
             content: "hidden tool call body".to_owned(),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::ToolResult,
             timestamp: None,
             model: None,
@@ -467,6 +474,7 @@ fn detail_preview_defaults_to_conversation_only_and_hides_tool_messages() {
             content: "hidden tool result body".to_owned(),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::Assistant,
             timestamp: None,
             model: Some("gpt-5.5".to_owned()),
@@ -505,6 +513,7 @@ fn detail_search_finds_lines_and_navigates_with_n_and_n() {
         session,
         messages: vec![
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
@@ -512,6 +521,7 @@ fn detail_search_finds_lines_and_navigates_with_n_and_n() {
                 content: "alpha needle one".to_owned(),
             },
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::Assistant,
                 timestamp: None,
                 model: None,
@@ -519,6 +529,7 @@ fn detail_search_finds_lines_and_navigates_with_n_and_n() {
                 content: "beta plain".to_owned(),
             },
             SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
@@ -579,6 +590,7 @@ fn detail_search_renders_query_and_match_count_in_the_footer() {
     app.open_detail(SessionDetail {
         session,
         messages: vec![SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::User,
             timestamp: None,
             model: None,
@@ -609,6 +621,7 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
     let session = fixture_session();
     let messages = vec![
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::User,
             timestamp: None,
             model: None,
@@ -616,6 +629,7 @@ fn shift_p_reveals_all_messages_and_p_returns_to_conversation_only() {
             content: "conv user content".to_owned(),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::ToolCall,
             timestamp: None,
             model: None,
@@ -707,6 +721,7 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
         .iter()
         .enumerate()
         .map(|(index, (kind, _, _))| SessionMessage {
+            fork_point: None,
             kind: *kind,
             timestamp: None,
             model: None,
@@ -717,7 +732,7 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
     let mut app = SessionsApp::new(vec![session.clone()], BTreeSet::default());
     app.open_detail(SessionDetail { session, messages });
     app.preview_scope = DetailScope::All;
-    let mut terminal = Terminal::new(TestBackend::new(100, 42)).expect("test terminal");
+    let mut terminal = Terminal::new(TestBackend::new(100, 45)).expect("test terminal");
 
     terminal
         .draw(|frame| draw_sessions(frame, &mut app, 0))
@@ -725,7 +740,7 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
 
     let buffer = terminal.backend().buffer();
     for (index, (kind, expected_header, expected_body)) in kinds.iter().enumerate() {
-        let header_position = find_text(buffer, 100, 42, kind.label()).expect("message header");
+        let header_position = find_text(buffer, 100, 45, kind.label()).expect("message header");
         let header = buffer.cell(header_position).expect("header cell");
         assert_eq!(header.fg, *expected_header, "{} header color", kind.label());
         assert!(
@@ -735,7 +750,7 @@ fn detail_messages_color_headers_and_bodies_by_primary_or_supporting_kind() {
         );
 
         let body = format!("plain-body-{index}");
-        let body_position = find_text(buffer, 100, 42, &body).expect("message body");
+        let body_position = find_text(buffer, 100, 45, &body).expect("message body");
         let body_cell = buffer.cell(body_position).expect("body cell");
         assert_eq!(body_cell.fg, *expected_body, "{body} foreground");
         assert!(!body_cell.modifier.contains(Modifier::BOLD), "{body} bold");
@@ -767,6 +782,7 @@ fn detail_theme_can_customize_every_text_surface_independently() {
     app.open_detail(SessionDetail {
         session,
         messages: vec![SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::User,
             timestamp: None,
             model: None,
@@ -832,6 +848,7 @@ fn detail_mode_can_scroll_to_the_last_chat_message() {
     let session = fixture_session();
     let messages = (0..40)
         .map(|index| SessionMessage {
+            fork_point: None,
             kind: if index % 2 == 0 {
                 SessionMessageKind::User
             } else {
@@ -872,6 +889,7 @@ fn detail_end_reaches_content_after_word_wrapped_lines() {
     let session = fixture_session();
     let wrapped = "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc\n".repeat(20);
     let messages = vec![SessionMessage {
+        fork_point: None,
         kind: SessionMessageKind::Assistant,
         timestamp: None,
         model: Some("gpt-5.6".to_owned()),
@@ -907,6 +925,7 @@ fn detail_reflows_and_keeps_the_end_reachable_after_terminal_resize() {
     let session = fixture_session();
     let wrapped = "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc\n".repeat(20);
     let messages = vec![SessionMessage {
+        fork_point: None,
         kind: SessionMessageKind::Assistant,
         timestamp: None,
         model: Some("gpt-5.6".to_owned()),
@@ -946,6 +965,7 @@ fn detail_scrolling_reaches_content_beyond_u16_scroll_range() {
     let mut content = "complete detail line\n".repeat(66_000);
     content.push_str("ABSOLUTE FINAL DETAIL LINE");
     let messages = vec![SessionMessage {
+        fork_point: None,
         kind: SessionMessageKind::Assistant,
         timestamp: None,
         model: Some("gpt-5.6".to_owned()),
@@ -985,6 +1005,7 @@ fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
     let session = fixture_session();
     let messages = vec![
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::User,
             timestamp: None,
             model: None,
@@ -992,6 +1013,7 @@ fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
             content: "first user message".to_owned(),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::ToolCall,
             timestamp: None,
             model: None,
@@ -999,6 +1021,7 @@ fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
             content: "tool detail\n".repeat(15),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::ToolResult,
             timestamp: None,
             model: None,
@@ -1006,6 +1029,7 @@ fn shift_arrows_jump_between_user_and_assistant_messages_skipping_tools() {
             content: "tool result\n".repeat(15),
         },
         SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::Assistant,
             timestamp: None,
             model: Some("gpt-5.5".to_owned()),
@@ -1148,6 +1172,7 @@ fn copying_from_detail_copies_the_complete_session_and_keeps_context() {
     app.open_detail(SessionDetail {
         session,
         messages: vec![SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::Assistant,
             timestamp: None,
             model: Some("gpt-5.6".to_owned()),
@@ -1801,6 +1826,7 @@ fn message_search_includes_sessions_whose_transcripts_match() {
         Ok(SessionDetail {
             session: session.clone(),
             messages: vec![SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
@@ -1828,6 +1854,7 @@ fn editing_the_query_clears_committed_message_search() {
         Ok(SessionDetail {
             session: session.clone(),
             messages: vec![SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
@@ -1864,6 +1891,7 @@ fn message_search_without_load_detail_is_a_noop() {
 #[test]
 fn search_progress_text_reports_scanned_and_hit_counts() {
     let progress = InProgressSearch {
+        transcript: None,
         query: "rewrite".to_owned(),
         hits: [1usize, 4].into_iter().collect(),
         snippets: BTreeMap::new(),
@@ -1891,6 +1919,7 @@ fn abort_message_search_discards_partial_results() {
         Ok(SessionDetail {
             session: session.clone(),
             messages: vec![SessionMessage {
+                fork_point: None,
                 kind: SessionMessageKind::User,
                 timestamp: None,
                 model: None,
@@ -2322,4 +2351,136 @@ fn digit_keys_map_to_the_shared_surface_set() {
     assert_eq!(surface_for_digit('0'), None);
     assert_eq!(surface_for_digit('5'), None);
     assert_eq!(surface_for_digit('q'), None);
+}
+
+#[test]
+fn regression_session_footer_keeps_help_and_quit_visible_at_compact_boundary() {
+    for width in [96, 100] {
+        let mut app = SessionsApp::new(vec![fixture_session()], BTreeSet::new());
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+        terminal
+            .draw(|frame| draw_sessions(frame, &mut app, 0))
+            .expect("draw");
+        let screen = buffer_text(terminal.backend().buffer(), width, 24);
+        assert!(
+            screen.contains("[?] keys"),
+            "help is clipped at width {width}"
+        );
+        assert!(
+            screen.contains("[q] quit"),
+            "quit is clipped at width {width}"
+        );
+    }
+}
+
+#[test]
+fn regression_session_filter_accepts_the_displayed_target() {
+    let session = fixture_session();
+    let query = session.target();
+    let mut app = SessionsApp::new(vec![session], BTreeSet::new());
+    app.query = query;
+    app.recompute_filter();
+    assert_eq!(
+        app.filtered.len(),
+        1,
+        "the full provider:session-id target should match its own row"
+    );
+}
+
+#[test]
+fn selected_messages_are_highlighted_and_fork_confirmation_names_the_method() {
+    let session = fixture_session();
+    let messages = [
+        (SessionMessageKind::User, "FIRST-MESSAGE"),
+        (SessionMessageKind::ToolResult, "HIDDEN-TOOL"),
+        (SessionMessageKind::Assistant, "SELECTED-MESSAGE"),
+        (SessionMessageKind::User, "LATER-MESSAGE"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (kind, content))| SessionMessage {
+        fork_point: (index == 2).then(|| "completed-turn".to_owned()),
+        kind,
+        timestamp: None,
+        model: None,
+        metrics: SessionMessageMetrics::default(),
+        content: content.to_owned(),
+    })
+    .collect();
+    let detail = SessionDetail {
+        session: session.clone(),
+        messages,
+    };
+    let mut app = SessionsApp::new(vec![session], BTreeSet::new());
+    app.open_detail(detail.clone());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("layout");
+    handle_detail_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        None,
+        None,
+    );
+    handle_detail_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        None,
+        None,
+    );
+    assert_eq!(app.selected_message, Some(2));
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("highlight");
+    let position =
+        find_text(terminal.backend().buffer(), 100, 30, "SELECTED-MESSAGE").expect("selected text");
+    assert_eq!(
+        terminal.backend().buffer().cell(position).expect("cell").bg,
+        UI.selection
+    );
+    handle_detail_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+        None,
+        None,
+    );
+    assert_eq!(app.mode, BrowserMode::ConfirmFork);
+    assert!(app.native_fork);
+    terminal
+        .draw(|frame| draw_sessions(frame, &mut app, 0))
+        .expect("confirmation");
+    let screen = buffer_text(terminal.backend().buffer(), 100, 30);
+    assert!(screen.contains("Native fork"));
+    assert!(screen.contains("later turns are excluded"));
+    app.mode = BrowserMode::Detail;
+    handle_detail_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE),
+        None,
+        None,
+    );
+    assert!(!app.native_fork);
+    assert_eq!(app.detail.as_ref(), Some(&detail));
+}
+
+#[test]
+fn returning_to_sessions_retains_state_and_rebinds_search_hits_by_target() {
+    let first = transcript_session("first", "First", "/tmp/first.jsonl");
+    let second = transcript_session("second", "Second", "/tmp/second.jsonl");
+    let mut app = SessionsApp::new(vec![first.clone(), second.clone()], BTreeSet::new());
+    app.query = "transcript-only-match".to_owned();
+    app.message_search = Some(BTreeSet::from([1]));
+    app.include_subagents = true;
+    app.recompute_filter();
+    assert_eq!(app.selected_session().expect("selected").id, "second");
+    let added = transcript_session("added", "Added", "/tmp/added.jsonl");
+    app.refresh_catalog(
+        vec![added, first, second],
+        crate::session::SessionProtection::default(),
+    );
+    assert_eq!(app.query, "transcript-only-match");
+    assert!(app.include_subagents);
+    assert_eq!(app.filtered, [2]);
+    assert_eq!(app.selected_session().expect("same selection").id, "second");
 }

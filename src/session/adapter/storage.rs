@@ -30,22 +30,19 @@ pub(super) fn scan_codex(
         let mut title = None;
         let mut project = None;
         let mut started_at = None;
-        let mut forked = false;
         let mut is_subagent = false;
         let mut parent_session_id = None;
         visit_bounded_lines_limit(&path, Some(128), |line| {
             let Ok(record) = serde_json::from_slice::<Value>(line) else {
                 return true;
             };
-            if record.get("type").and_then(Value::as_str) == Some("session_meta") {
+            if id.is_none() && record.get("type").and_then(Value::as_str) == Some("session_meta") {
                 id = string_at(&record, "/payload/id");
                 project = string_at(&record, "/payload/cwd").map(PathBuf::from);
                 started_at = string_at(&record, "/payload/timestamp")
                     .or_else(|| string_at(&record, "/timestamp"));
-                // A forked or resumed rollout re-states the parent session's
-                // meta after its own, and the later record owns the session
-                // identity. Keep reading so that later meta can still win.
-                forked = string_at(&record, "/payload/forked_from_id").is_some();
+                // The first metadata record owns this rollout. A fork then
+                // replays its parent's metadata as historical context.
                 let source = record.pointer("/payload/source");
                 is_subagent = source.is_some_and(|source| {
                     source.get("subagent").is_some() || source.as_str() == Some("subagent")
@@ -53,7 +50,8 @@ pub(super) fn scan_codex(
                 parent_session_id = string_at(
                     &record,
                     "/payload/source/subagent/thread_spawn/parent_thread_id",
-                );
+                )
+                .or_else(|| string_at(&record, "/payload/forked_from_id"));
             }
             if title.is_none()
                 && record.pointer("/payload/type").and_then(Value::as_str) == Some("message")
@@ -61,18 +59,13 @@ pub(super) fn scan_codex(
             {
                 title = record.pointer("/payload/content").and_then(content_preview);
             }
-            // A plain rollout carries one session_meta preamble; once it and a
-            // title are in hand, later lines can only repeat known values. A
-            // forked or resumed rollout must keep reading because a later
-            // session_meta owns the session identity.
-            forked
-                || !(id.is_some()
-                    && project.is_some()
-                    && started_at.is_some()
-                    && (title.is_some()
-                        || id
-                            .as_deref()
-                            .is_some_and(|id| indexed_titles.contains_key(id))))
+            !(id.is_some()
+                && project.is_some()
+                && started_at.is_some()
+                && (title.is_some()
+                    || id
+                        .as_deref()
+                        .is_some_and(|id| indexed_titles.contains_key(id))))
         })?;
         if let Some(id) = id {
             let title = indexed_titles.get(&id).cloned().or(title);
@@ -1162,57 +1155,87 @@ pub(super) fn delete_cursor_index_records(
             }
         }
 
-        let _ = transaction.commit();
+        transaction
+            .commit()
+            .context("failed to commit Cursor session deletion")?;
     }
     Ok(removed)
 }
 
 fn keep_cursor_headers(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     database: &Path,
     session_id: &str,
     trash: &mut super::super::trash::TrashBatch,
 ) -> Result<()> {
-    let mut statement = connection.prepare(
-        "SELECT composerId, createdAt, lastUpdatedAt, isArchived, CAST(value AS BLOB) FROM composerHeaders WHERE composerId = ?1",
-    )?;
-    let mut rows = statement.query(params![session_id])?;
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let value: Vec<u8> = row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default();
-        trash.push_cursor_row(super::super::trash::CursorRow {
-            database: database.to_path_buf(),
-            table: "composerHeaders".to_owned(),
-            key,
-            value_hex: super::super::trash::encode_hex(&value),
-            created_at: row.get(1)?,
-            updated_at: row.get(2)?,
-            is_archived: row.get(3)?,
-        });
-    }
-    Ok(())
+    keep_cursor_rows(
+        connection,
+        database,
+        "composerHeaders",
+        "composerId",
+        session_id,
+        None,
+        trash,
+    )
 }
 
 fn keep_cursor_kv(
-    connection: &rusqlite::Connection,
+    connection: &Connection,
     database: &Path,
     table: &str,
     key: &str,
     pattern: &str,
     trash: &mut super::super::trash::TrashBatch,
 ) -> Result<()> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT key, CAST(value AS BLOB) FROM {table} WHERE key = ?1 OR key LIKE ?2"
-    ))?;
-    let mut rows = statement.query(params![key, pattern])?;
+    keep_cursor_rows(
+        connection,
+        database,
+        table,
+        "key",
+        key,
+        Some(pattern),
+        trash,
+    )
+}
+
+fn keep_cursor_rows(
+    connection: &Connection,
+    database: &Path,
+    table: &str,
+    key_column: &str,
+    key: &str,
+    pattern: Option<&str>,
+    trash: &mut super::super::trash::TrashBatch,
+) -> Result<()> {
+    let condition = pattern.map_or_else(
+        || format!("{key_column} = ?1"),
+        |_| format!("{key_column} = ?1 OR {key_column} LIKE ?2"),
+    );
+    let mut statement = connection.prepare(&format!("SELECT * FROM {table} WHERE {condition}"))?;
+    let names = statement
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let parameters = std::iter::once(key).chain(pattern);
+    let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
     while let Some(row) = rows.next()? {
-        let stored_key: String = row.get(0)?;
-        let value: Vec<u8> = row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default();
+        let columns = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Ok((
+                    name.clone(),
+                    super::super::trash::SqliteValue::capture(row.get_ref(index)?)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
         trash.push_cursor_row(super::super::trash::CursorRow {
             database: database.to_path_buf(),
             table: table.to_owned(),
-            key: stored_key,
-            value_hex: super::super::trash::encode_hex(&value),
+            key: row.get(key_column)?,
+            columns,
+            value_hex: String::new(),
             created_at: None,
             updated_at: None,
             is_archived: None,

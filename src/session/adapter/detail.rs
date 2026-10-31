@@ -159,6 +159,7 @@ pub(super) fn codex_detail(path: &Path) -> Result<LoadedSession> {
     let mut usage = JsonlUsage::new(&AgentKind::Codex);
     let mut messages: Vec<SessionMessage> = Vec::new();
     let mut current_model = None;
+    let mut current_turn = None;
     let mut pending_assistant: Option<usize> = None;
     let mut turn_last_assistant: Option<usize> = None;
     let mut tool_targets = BTreeMap::<String, usize>::new();
@@ -172,11 +173,20 @@ pub(super) fn codex_detail(path: &Path) -> Result<LoadedSession> {
         };
         if record.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = model_id(payload);
+            current_turn = string_at(payload, "/turn_id");
             return;
         }
         let Some(payload_type) = payload.get("type").and_then(Value::as_str) else {
             return;
         };
+        if payload_type == "task_started" {
+            current_turn = string_at(payload, "/turn_id").or_else(|| current_turn.take());
+        }
+        if payload_type == "task_complete"
+            && let Some(message) = turn_last_assistant.and_then(|index| messages.get_mut(index))
+        {
+            message.fork_point = string_at(payload, "/turn_id").or_else(|| current_turn.clone());
+        }
         update_codex_metrics(
             payload_type,
             payload,
@@ -364,6 +374,7 @@ fn codex_event_message(
     content_text_full(payload)
         .map(|content| {
             vec![SessionMessage {
+                fork_point: None,
                 kind,
                 timestamp,
                 model: None,
@@ -621,6 +632,7 @@ fn gemini_messages(session: &Value) -> Vec<SessionMessage> {
                 }
                 if let Some(content) = content_text_full(&call_content) {
                     parsed.push(SessionMessage {
+                        fork_point: None,
                         kind: tool_call_kind(call),
                         timestamp: string_at(call, "/timestamp")
                             .or_else(|| string_at(message, "/timestamp")),
@@ -636,6 +648,7 @@ fn gemini_messages(session: &Value) -> Vec<SessionMessage> {
                     && let Some(content) = content_text_full(result)
                 {
                     parsed.push(SessionMessage {
+                        fork_point: None,
                         kind: SessionMessageKind::ToolResult,
                         timestamp: string_at(call, "/timestamp")
                             .or_else(|| string_at(message, "/timestamp")),
@@ -876,6 +889,7 @@ fn parsed_messages_from_content(
                             .map_or_else(|| rendered_content.clone(), str::to_owned),
                     }),
                 message: SessionMessage {
+                    fork_point: None,
                     kind,
                     timestamp,
                     model: (kind == SessionMessageKind::Assistant)
@@ -939,6 +953,7 @@ fn opencode_part_messages(
         );
         if let Some(content) = content_text_full(&Value::Object(object)) {
             messages.push(SessionMessage {
+                fork_point: None,
                 kind,
                 timestamp: timestamp.clone(),
                 model: None,
@@ -956,6 +971,7 @@ fn opencode_part_messages(
         && let Some(content) = content_text_full(part)
     {
         messages.push(SessionMessage {
+            fork_point: None,
             kind: tool_call_kind(part),
             timestamp,
             model: None,
@@ -1224,6 +1240,7 @@ fn grok_apply_tool_call(state: &mut GrokDetailState, update: &Value, timestamp: 
     };
     let index = state.messages.len();
     state.messages.push(SessionMessage {
+        fork_point: None,
         kind: tool_call_kind(update),
         timestamp,
         model: None,
@@ -1250,6 +1267,7 @@ fn grok_apply_tool_update(state: &mut GrokDetailState, update: &Value, timestamp
     }
     if let Some(content) = update.get("content").and_then(content_text_full) {
         state.messages.push(SessionMessage {
+            fork_point: None,
             kind: SessionMessageKind::ToolResult,
             timestamp,
             model: None,
@@ -1307,6 +1325,7 @@ fn grok_append_chunk(
     }
     let index = messages.len();
     messages.push(SessionMessage {
+        fork_point: None,
         kind,
         timestamp,
         model,
@@ -1409,6 +1428,7 @@ pub(super) fn cursor_detail(db_path: &Path, session_id: &str) -> Result<LoadedSe
                     let content = extract_cursor_message_content(item);
                     if !content.trim().is_empty() {
                         messages.push(SessionMessage {
+                            fork_point: None,
                             kind: SessionMessageKind::from_provider_role(role),
                             timestamp: string_at(item, "/createdAt"),
                             model: string_at(item, "/model"),
@@ -1437,6 +1457,7 @@ pub(super) fn cursor_detail(db_path: &Path, session_id: &str) -> Result<LoadedSe
                                 let model = string_at(&bubble_val, "/model");
                                 if !content.trim().is_empty() {
                                     messages.push(SessionMessage {
+                                        fork_point: None,
                                         kind: SessionMessageKind::from_provider_role(role),
                                         timestamp,
                                         model,
