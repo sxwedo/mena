@@ -1,0 +1,4 @@
+[crates.mena.bindings.swift]
+module_name = "MenaCore"
+ffi_module_name = "MenaFFI"
+generate_module_map = true

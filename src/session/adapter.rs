@@ -285,7 +285,7 @@ impl ProviderAdapter {
         }
     }
 
-    pub(super) fn fork_native(self, id: &str, point: &str) -> Result<NativeResumeCommand> {
+    pub(super) fn fork_native(self, id: &str, point: &str) -> Result<NativeSessionFork> {
         match self {
             Self::Codex => fork::codex(id, point),
             _ => bail!(
@@ -450,6 +450,13 @@ fn flag_values(arguments: &[String], flag: &str) -> Vec<String> {
 pub struct NativeResumeCommand {
     pub program: String,
     pub args: Vec<String>,
+}
+
+/// A newly created native session and its shell-free resume command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSessionFork {
+    pub session_id: String,
+    pub command: NativeResumeCommand,
 }
 
 #[cfg(test)]

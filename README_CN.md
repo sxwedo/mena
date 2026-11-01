@@ -17,6 +17,9 @@
 `mena` 是一个本地优先的 CLI，用来启动编码 Agent、浏览原生 Session、检查
 Agent Skill，以及审计 MCP 注册。无需守护进程、账号或远程数据存储。
 
+也提供原生 macOS 应用：在 macOS 14 及以上、安装 Xcode 26 / Swift 6.2 或更新版本后，
+运行 `mise run gui`。支持原生 Agent 新对话、Markdown 阅读、消息分叉和会话导出，详见 [桌面版指南](docs/desktop_CN.md)。
+
 ## 安装
 
 ### 快速安装 (macOS 与 Linux)
@@ -62,6 +65,7 @@ mena ms inspect CLAUDE.md     # 读取唯一命名的记忆文件
 
 | 命令 | 用途 |
 |---|---|
+| `mena gui` | 打开已安装或本地构建的原生 macOS 应用 |
 | `mena agent` / `mena ag` | 启动 Agent，支持新建或恢复原生 Session |
 | `mena ps` | 列出运行中的编码 Agent 进程 |
 | `mena sessions` / `mena ss` | 搜索、检查、从消息分叉、重命名、恢复、换 Agent 继续、导出和删除 Session |
@@ -105,6 +109,7 @@ Agent。导入与 handoff 的具体语义见 Session 文档。
 
 ## 文档
 
+- [原生 macOS 桌面应用](docs/desktop_CN.md)
 - [Calm Console 终端界面与响应式行为](docs/interface_CN.md)
 - [Session 浏览、指标、导出与删除](docs/sessions_CN.md)
 - [Agent Skill 发现与浏览](docs/skills_CN.md)
@@ -137,6 +142,8 @@ Agent。导入与 handoff 的具体语义见 Session 文档。
 ```sh
 mise run verify  # 格式、检查、测试、严格 Clippy 与 rustdoc
 mise run build   # 优化后的 release 二进制
+mise run gui     # 构建并打开原生 macOS 应用
+mise run gui-verify # CLI 验证 + 桌面桥接 + Swift 测试与格式检查
 ```
 
 仓库架构与扩展入口见 [docs/development_CN.md](docs/development_CN.md)，面向编码 Agent 的

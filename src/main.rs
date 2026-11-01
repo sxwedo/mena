@@ -62,6 +62,7 @@ mod tests {
             vec!["mena", "ag", "omp", "--resume"],
             vec!["mena", "ag", "codex", "--session", "session-123"],
             vec!["mena", "ps"],
+            vec!["mena", "gui"],
             vec!["mena", "ps", "--json"],
             vec!["mena", "sessions"],
             vec!["mena", "ss"],

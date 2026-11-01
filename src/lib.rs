@@ -3,9 +3,12 @@
 mod clipboard;
 mod continuation;
 mod controller;
+#[cfg(feature = "desktop")]
+pub mod desktop;
 mod editor;
 mod export;
 mod fs;
+mod gui;
 mod mcp;
 mod memory;
 mod process;
@@ -15,6 +18,9 @@ mod skill;
 mod tui;
 pub mod ui;
 mod view;
+
+#[cfg(feature = "desktop")]
+uniffi::setup_scaffolding!();
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -41,6 +47,8 @@ pub struct AgentArgs {
 /// Local developer-agent process and session operations.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
+    /// Open the native macOS desktop app (installed or locally built)
+    Gui,
     /// Select and launch a developer agent process in the current directory
     #[command(visible_alias = "ag")]
     Agent(AgentLaunchArgs),
@@ -277,6 +285,7 @@ pub fn run(args: AgentArgs, settings: &Settings) -> Result<()> {
         process::validate_custom_agents(&settings.agent.custom)?;
     }
     match args.command {
+        AgentCommand::Gui => gui::open(),
         AgentCommand::Config { command } => match command {
             ConfigCommand::Init => {
                 let path = settings::ensure_default_config()?;

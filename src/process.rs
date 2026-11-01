@@ -627,6 +627,60 @@ fn grok_managed_binary() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Locate a program without invoking a login shell. Finder's sparse PATH is
+/// supplemented by standard user and package-manager binary directories.
+pub fn find_executable(program: &str) -> Option<PathBuf> {
+    if program.contains('/') || program.contains('\\') {
+        if !executable_file(Path::new(program)) {
+            return None;
+        }
+        return std::path::absolute(program).ok();
+    }
+    let mut directories = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if let Some(home) = dirs::home_dir() {
+        directories.extend([
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            home.join(".bun/bin"),
+            home.join(".npm-global/bin"),
+        ]);
+    }
+    directories.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+    directories.into_iter().find_map(|directory| {
+        let candidate = directory.join(program);
+        if executable_file(&candidate) {
+            return std::path::absolute(candidate).ok();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let candidate = directory.join(format!("{program}.exe"));
+            if executable_file(&candidate) {
+                return std::path::absolute(candidate).ok();
+            }
+        }
+        None
+    })
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    true
+}
+
 fn is_executable_in_path(program: &str) -> bool {
     if program.contains('/') || program.contains('\\') {
         return Path::new(program).is_file();
@@ -634,17 +688,7 @@ fn is_executable_in_path(program: &str) -> bool {
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join(program);
-            if candidate.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = candidate.metadata()
-                        && meta.permissions().mode() & 0o111 != 0
-                    {
-                        return true;
-                    }
-                }
-                #[cfg(not(unix))]
+            if executable_file(&candidate) {
                 return true;
             }
             #[cfg(target_os = "windows")]

@@ -8,9 +8,11 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 
-use super::super::{NativeResumeCommand, read_json_file, validate_storage_identifier};
+use super::super::{
+    NativeResumeCommand, NativeSessionFork, read_json_file, validate_storage_identifier,
+};
 
-pub(super) fn codex(id: &str, point: &str) -> Result<NativeResumeCommand> {
+pub(super) fn codex(id: &str, point: &str) -> Result<NativeSessionFork> {
     validate_storage_identifier(id, "session ID")?;
     validate_storage_identifier(point, "turn ID")?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -23,11 +25,13 @@ pub(super) fn codex(id: &str, point: &str) -> Result<NativeResumeCommand> {
     })
 }
 
-async fn codex_async(id: &str, point: &str) -> Result<NativeResumeCommand> {
+async fn codex_async(id: &str, point: &str) -> Result<NativeSessionFork> {
     // Older servers may ignore unknown fields. Check the installed protocol
     // before sending lastTurnId, so an old binary cannot copy later turns.
     let directory = tempfile::tempdir()?;
-    let status = Command::new("codex")
+    let executable = crate::process::find_executable("codex")
+        .context("Codex is not installed or cannot be located")?;
+    let status = Command::new(&executable)
         .args(["app-server", "generate-json-schema", "--out"])
         .arg(directory.path())
         .stdout(Stdio::null())
@@ -43,9 +47,9 @@ async fn codex_async(id: &str, point: &str) -> Result<NativeResumeCommand> {
             .and_then(|value| value.pointer("/properties/lastTurnId"))
             .is_none()
     {
-        bail!("installed Codex cannot fork at a selected turn; use Shift+F for a context fork");
+        bail!("installed Codex cannot fork at a selected turn; create a context fork instead");
     }
-    let mut child = Command::new("codex")
+    let mut child = Command::new(&executable)
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -81,9 +85,12 @@ async fn codex_async(id: &str, point: &str) -> Result<NativeResumeCommand> {
         if fork == id {
             bail!("Codex did not create an independent fork");
         }
-        Ok(NativeResumeCommand {
-            program: "codex".to_owned(),
-            args: vec!["resume".to_owned(), fork.to_owned()],
+        Ok(NativeSessionFork {
+            session_id: fork.to_owned(),
+            command: NativeResumeCommand {
+                program: executable.to_string_lossy().into_owned(),
+                args: vec!["resume".to_owned(), fork.to_owned()],
+            },
         })
     }
     .await;
@@ -117,7 +124,7 @@ async fn reply<R: tokio::io::AsyncBufRead + Unpin>(output: &mut R, id: u64) -> R
             continue;
         }
         if value.get("error").is_some() {
-            bail!("Codex rejected the native fork; use Shift+F for a context fork");
+            bail!("Codex rejected the native fork; create a context fork instead");
         }
         return value
             .get("result")

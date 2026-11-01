@@ -17,7 +17,7 @@ mod trash;
 pub use relocate::{commit_claude_relocation, preview_claude_relocation};
 pub use trash::restore_session;
 
-pub use adapter::NativeResumeCommand;
+pub use adapter::{NativeResumeCommand, NativeSessionFork};
 
 const MAX_SESSION_FILES: usize = 50_000;
 const MAX_JSON_BYTES: u64 = 64 * 1_024 * 1_024;
@@ -661,6 +661,15 @@ impl SessionCatalog {
         Ok(protection)
     }
 
+    /// Read-only views need exact association without computing deletion sets.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn active_target(&self, agent: &LiveAgent) -> Result<Option<String>> {
+        Ok(match self.association_for_process(agent)? {
+            AssociationDecision::Exact { session, .. } => Some(session.target()),
+            _ => None,
+        })
+    }
+
     fn association_for_process<'a>(&'a self, agent: &LiveAgent) -> Result<AssociationDecision<'a>> {
         let Some(adapter) = adapter::ProviderAdapter::from_kind(&agent.kind) else {
             return Ok(AssociationDecision::Unsupported);
@@ -745,7 +754,9 @@ impl SessionCatalog {
         &self,
         detail: &SessionDetail,
         message: usize,
-    ) -> Result<NativeResumeCommand> {
+        title: Option<&str>,
+    ) -> Result<NativeSessionFork> {
+        let title = title.map(titles::normalize).transpose()?.flatten();
         let current = self.resolve(Some(detail.session.kind.slug()), &detail.session.id)?;
         let point = detail
             .messages
@@ -761,9 +772,16 @@ impl SessionCatalog {
         {
             bail!("session changed; reopen details before forking");
         }
-        adapter::ProviderAdapter::from_kind(&current.kind)
+        let fork = adapter::ProviderAdapter::from_kind(&current.kind)
             .context("provider does not support native forks")?
-            .fork_native(&current.id, point)
+            .fork_native(&current.id, point)?;
+        if let Some(title) = title {
+            let target = format!("{}:{}", current.kind.slug(), fork.session_id);
+            titles::put(&self.overlay_path, &target, Some(title)).with_context(|| {
+                format!("created native fork {target}, but could not save its display title; refresh the session list")
+            })?;
+        }
+        Ok(fork)
     }
 
     /// Set a mena-owned display title for one cataloged session.

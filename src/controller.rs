@@ -569,11 +569,14 @@ fn fork_from_message(
     settings: &Settings,
 ) -> Result<()> {
     if native {
-        let command = catalog.fork_native(detail, message)?;
-        ui::success("created a native fork through the selected completed turn");
-        execute_continuation(&command, &detail.session, &detail.session.kind)?;
+        let fork = catalog.fork_native(detail, message, None)?;
+        ui::success(format!(
+            "created native fork {} through the selected completed turn",
+            fork.session_id
+        ));
+        execute_continuation(&fork.command, &detail.session, &detail.session.kind)?;
     } else {
-        let supported = [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::OhMyPi];
+        let supported = crate::continuation::MESSAGE_FORK_PROVIDERS;
         let targets = supported
             .into_iter()
             .filter(|kind| kind.is_installed(&settings.agent.custom))

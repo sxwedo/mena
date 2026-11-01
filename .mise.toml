@@ -25,6 +25,39 @@ run = "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked"
 description = "Build the release binary"
 run = "cargo build --release --locked"
 
+[tasks.gui-build]
+description = "Build the native macOS app"
+run = "bash scripts/build-macos.sh"
+
+[tasks.gui-release]
+description = "Build the optimized native macOS app"
+run = "bash scripts/build-macos.sh release"
+
+[tasks.gui]
+description = "Build and open the native macOS app"
+run = """
+bash scripts/build-macos.sh
+open target/macos/Mena.app
+"""
+
+[tasks.gui-test]
+description = "Test desktop catalogs and the native UI model"
+run = """
+cargo test --locked --features desktop
+bash scripts/build-macos.sh
+swift test --package-path macos
+"""
+
+[tasks.gui-verify]
+description = "Verify CLI, desktop bridge, Swift formatting, native tests, and release build"
+run = """
+mise run verify
+cargo clippy --all-targets --all-features --locked -- -D warnings -D clippy::pedantic -D clippy::nursery
+swift format lint --strict --recursive macos/Sources macos/Tests macos/Tools macos/Package.swift
+mise run gui-test
+mise run gui-release
+"""
+
 [tasks.verify]
 description = "Run all local verification gates"
 run = """

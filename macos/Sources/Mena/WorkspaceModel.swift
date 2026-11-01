@@ -1,0 +1,629 @@
+import AppKit
+import MenaCore
+import Observation
+
+enum WorkspaceSection: String, CaseIterable, Identifiable {
+    case sessions, processes, skills, mcp, memories
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .sessions: "全部会话"
+        case .processes: "运行中"
+        case .skills: "Skills"
+        case .mcp: "MCP 服务"
+        case .memories: "Memories"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .sessions: "bubble.left.and.bubble.right"
+        case .processes: "waveform.path.ecg"
+        case .skills: "sparkle"
+        case .mcp: "server.rack"
+        case .memories: "book"
+        }
+    }
+    var resourceKind: DesktopResourceKind? {
+        switch self {
+        case .skills: .skills
+        case .mcp: .mcp
+        case .memories: .memories
+        default: nil
+        }
+    }
+}
+
+struct ForkDraft: Identifiable {
+    let id = UUID()
+    let session: DesktopSession
+    let revision: String
+    let message: DesktopMessage
+    let totalMessages: Int
+}
+
+/// UniFFI objects are Sendable: their Rust implementation owns synchronization.
+/// This wrapper schedules synchronous native calls away from the main actor.
+final class CatalogBridge: Sendable {
+    let client: DesktopClient
+
+    init(home: String) throws {
+        client = try DesktopClient(homePath: home)
+    }
+
+    func run<Value: Sendable>(
+        _ operation: @escaping @Sendable (DesktopClient) throws -> Value
+    ) async throws -> Value {
+        let client = client
+        return try await Task.detached(priority: .userInitiated) {
+            try operation(client)
+        }.value
+    }
+}
+
+@MainActor
+@Observable
+final class WorkspaceModel {
+    var section: WorkspaceSection = .sessions
+    var project: String?
+    var provider = ""
+    var query = "" {
+        didSet {
+            scheduleSearch()
+            alignSelection()
+        }
+    }
+    var showSubagents: Bool {
+        didSet {
+            preferences.set(showSubagents, forKey: "showSubagents")
+            if !showSubagents, selectedSession?.isSubagent == true {
+                selectSession(selectedSession?.parentTarget)
+            }
+            scheduleSearch()
+        }
+    }
+    var appearance: String {
+        didSet { preferences.set(appearance, forKey: "appearance") }
+    }
+    var readerFontSize: Double {
+        didSet { preferences.set(readerFontSize, forKey: "readerFontSize") }
+    }
+    var showRawMarkdown = false
+    var sessions: [DesktopSession] = []
+    var processes: [DesktopProcess] = []
+    var resources: [DesktopResource] = []
+    var contextProviders: [String] = []
+    var launchProviders: [String] = []
+    var showNewChat = false
+    var warnings: [String] = []
+    var selectedTarget: String?
+    var selectedResourceID: String?
+    var detail: DesktopSessionDetail?
+    var resourceDetail: DesktopResourceDetail?
+    var selectedMessageID: String?
+    var showAllMessages = false {
+        didSet {
+            if !visibleMessages.contains(where: { $0.id == selectedMessageID }) {
+                selectedMessageID =
+                    visibleMessages.first(where: { $0.role == "ASSISTANT" })?.id
+                    ?? visibleMessages.first?.id
+            }
+        }
+    }
+    var showFind = false
+    var findText = ""
+    var showInspector = false
+    var loadingSnapshot = false
+    var loadingResources = false
+    var loadingCatalog: Bool { section.resourceKind == nil ? loadingSnapshot : loadingResources }
+    var loadingDetail = false
+    var searchingContent = false
+    var operationInProgress = false
+    var catalogError: String?
+    var detailError: String?
+    var operationError: String?
+    var notice: String?
+    var noticeURL: URL?
+    var forkDraft: ForkDraft?
+    var renameTarget: DesktopSession?
+    var listSearchRequest = 0
+    var contentHits: [String: String] = [:]
+    var probing: Set<String> = []
+
+    @ObservationIgnored private var bridge: CatalogBridge?
+    @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private var detailTask: Task<Void, Never>?
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var resourceTask: Task<Void, Never>?
+    @ObservationIgnored private var probeResults: [String: DesktopResourceDetail] = [:]
+    @ObservationIgnored private var probeGenerations: [String: UUID] = [:]
+    @ObservationIgnored private var catalogGeneration = UUID()
+    @ObservationIgnored private var detailGeneration = UUID()
+    @ObservationIgnored private var resourceGeneration = UUID()
+    @ObservationIgnored private var noticeGeneration = UUID()
+
+    init(
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        preferences: UserDefaults = .standard
+    ) {
+        self.preferences = preferences
+        showSubagents = preferences.bool(forKey: "showSubagents")
+        appearance = preferences.string(forKey: "appearance") ?? "system"
+        let savedSize = preferences.double(forKey: "readerFontSize")
+        readerFontSize = (12...20).contains(savedSize) ? savedSize : 15
+        do { bridge = try CatalogBridge(home: home) } catch { catalogError = describe(error) }
+    }
+
+    var selectedSession: DesktopSession? { sessions.first { $0.target == selectedTarget } }
+    var selectedMessage: DesktopMessage? { detail?.messages.first { $0.id == selectedMessageID } }
+    var selectedResource: DesktopResource? { resources.first { $0.id == selectedResourceID } }
+    var projects: [String] {
+        var seen: Set<String> = []
+        return sessions.compactMap(\.project).filter { seen.insert($0).inserted }
+    }
+    var providers: [String] { Array(Set(sessions.map(\.provider))).sorted() }
+    var title: String { section == .sessions ? (project.map(projectName) ?? "会话") : section.title }
+    var visibleMessages: [DesktopMessage] {
+        detail?.messages.filter { showAllMessages || ["USER", "ASSISTANT"].contains($0.role) } ?? []
+    }
+    var scopedSessions: [DesktopSession] {
+        sessions.filter {
+            (showSubagents || !$0.isSubagent)
+                && (project == nil || $0.project == project)
+                && (provider.isEmpty || $0.provider == provider)
+        }
+    }
+    var filteredSessions: [DesktopSession] {
+        scopedSessions.filter {
+            matches([$0.title, $0.target, $0.provider, $0.project ?? ""].joined(separator: " "))
+                || contentHits[$0.target] != nil
+        }
+    }
+    var filteredResources: [DesktopResource] {
+        resources.filter {
+            matches([$0.name, $0.provider, $0.scope, $0.description, $0.path].joined(separator: " "))
+        }
+    }
+
+    func resourceStatus(_ resource: DesktopResource) -> String {
+        if probing.contains(resource.id) { return "探测中…" }
+        return probeResults[resource.id]?.probeStatus.map(probeStatusName) ?? resource.status
+    }
+    var filteredProcesses: [DesktopProcess] {
+        processes.filter { matches([$0.provider, $0.project ?? "", String($0.pid)].joined(separator: " ")) }
+    }
+    var hiddenSubagentCount: Int {
+        sessions.filter {
+            $0.isSubagent && (project == nil || $0.project == project)
+                && (provider.isEmpty || $0.provider == provider)
+        }.count
+    }
+    var catalogCount: Int {
+        switch section {
+        case .sessions: filteredSessions.count
+        case .processes: filteredProcesses.count
+        default: filteredResources.count
+        }
+    }
+
+    func matches(_ text: String) -> Bool {
+        query.split(whereSeparator: \.isWhitespace).allSatisfy { text.localizedStandardContains($0) }
+    }
+
+    func refresh() async {
+        guard let bridge else { return }
+        if section.resourceKind != nil {
+            probeResults = [:]
+            probeGenerations = [:]
+            loadResources()
+            return
+        }
+        let generation = UUID()
+        catalogGeneration = generation
+        loadingSnapshot = true
+        catalogError = nil
+        do {
+            let snapshot = try await bridge.run { try $0.refresh() }
+            guard catalogGeneration == generation else { return }
+            sessions = snapshot.sessions
+            processes = snapshot.processes
+            contextProviders = snapshot.contextProviders
+            launchProviders = snapshot.launchProviders
+            warnings = snapshot.warnings
+            if let target = selectedTarget, !sessions.contains(where: { $0.target == target }) {
+                selectedTarget = nil
+                detail = nil
+            }
+            if section == .sessions {
+                selectSession(selectedTarget ?? filteredSessions.first?.target)
+                scheduleSearch()
+            }
+        } catch {
+            guard catalogGeneration == generation else { return }
+            catalogError = describe(error)
+        }
+        if catalogGeneration == generation { loadingSnapshot = false }
+    }
+
+    func navigate(_ section: WorkspaceSection, project: String? = nil) {
+        detailTask?.cancel()
+        resourceTask?.cancel()
+        resourceGeneration = UUID()
+        detailGeneration = UUID()
+        loadingDetail = false
+        catalogError = nil
+        bridge?.client.cancelSearch()
+        self.section = section
+        self.project = project
+        query = ""
+        provider = ""
+        findText = ""
+        showFind = false
+        showInspector = false
+        detailError = nil
+        if section == .sessions {
+            let target =
+                scopedSessions.contains { $0.target == selectedTarget }
+                ? selectedTarget : scopedSessions.first?.target
+            selectSession(target)
+        } else if section == .processes {
+            selectedResourceID = processes.first.map { String($0.pid) }
+        } else if section.resourceKind != nil {
+            loadResources()
+        }
+    }
+
+    func selectProvider(_ value: String) {
+        provider = value
+        if !scopedSessions.contains(where: { $0.target == selectedTarget }) {
+            selectSession(filteredSessions.first?.target)
+        }
+        scheduleSearch()
+    }
+
+    func selectSession(_ target: String?) {
+        detailTask?.cancel()
+        let changed = target != selectedTarget
+        selectedTarget = target
+        if changed {
+            detail = nil
+            selectedMessageID = nil
+            findText = ""
+        }
+        detailError = nil
+        guard let target, let bridge else {
+            loadingDetail = false
+            return
+        }
+        let generation = UUID()
+        detailGeneration = generation
+        loadingDetail = true
+        detailTask = Task { [weak self] in
+            do {
+                let loaded = try await bridge.run { try $0.sessionDetail(target: target) }
+                guard !Task.isCancelled, let self, self.detailGeneration == generation,
+                    self.section == .sessions, self.selectedTarget == target
+                else { return }
+                self.detail = loaded
+                if !loaded.messages.contains(where: { $0.id == self.selectedMessageID }) {
+                    self.selectedMessageID =
+                        self.visibleMessages.first(where: { $0.role == "ASSISTANT" })?.id
+                        ?? self.visibleMessages.first?.id
+                }
+                self.loadingDetail = false
+            } catch {
+                guard !Task.isCancelled, let self, self.detailGeneration == generation else { return }
+                self.detailError = describe(error)
+                self.loadingDetail = false
+            }
+        }
+    }
+
+    func moveMessage(by offset: Int) {
+        let messages = visibleMessages
+        guard !messages.isEmpty else { return }
+        let current = messages.firstIndex { $0.id == selectedMessageID } ?? 0
+        selectedMessageID = messages[max(0, min(messages.count - 1, current + offset))].id
+    }
+
+    func beginFork(message: DesktopMessage? = nil) {
+        guard let session = selectedSession, let detail, let message = message ?? selectedMessage else {
+            return
+        }
+        selectedMessageID = message.id
+        forkDraft = ForkDraft(
+            session: session, revision: detail.revision, message: message,
+            totalMessages: detail.messages.count)
+    }
+
+    func createFork(_ draft: ForkDraft, method: DesktopForkMethod, provider: String, title: String) async {
+        guard let bridge, !operationInProgress else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            let prepared = try await bridge.run {
+                try $0.prepareFork(
+                    request: DesktopForkRequest(
+                        target: draft.session.target, revision: draft.revision,
+                        messageId: draft.message.id, method: method, provider: provider, title: title))
+            }
+            forkDraft = nil
+            TerminalWindows.shared.open(prepared)
+            await refresh()
+            if let target = prepared.launch().target {
+                project = nil
+                providerReset()
+                selectSession(target)
+            }
+            showNotice(method == .native ? "已创建原生分支" : "已在独立终端中携带上下文新建")
+        } catch { operationError = describe(error) }
+    }
+
+    func resume(target: String? = nil) async {
+        guard section == .sessions, let bridge, let target = target ?? selectedTarget, !operationInProgress
+        else {
+            return
+        }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            let prepared = try await bridge.run { try $0.prepareResume(target: target) }
+            TerminalWindows.shared.open(prepared)
+        } catch { operationError = describe(error) }
+    }
+
+    func startNewChat(provider: String, directory: String) async {
+        guard let bridge, !operationInProgress else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            let prepared = try await bridge.run {
+                try $0.prepareAgent(provider: provider, directory: directory)
+            }
+            showNewChat = false
+            TerminalWindows.shared.open(prepared)
+            showNotice("已打开 \(providerName(provider))，新会话将在 Agent 中保存")
+        } catch { operationError = describe(error) }
+    }
+
+    func rename(_ session: DesktopSession, title: String) async {
+        guard let bridge, !operationInProgress else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            try await bridge.run { try $0.renameSession(target: session.target, title: title) }
+            renameTarget = nil
+            await refresh()
+            showNotice("会话名称已更新")
+        } catch { operationError = describe(error) }
+    }
+
+    func exportSession(target: String? = nil) async {
+        guard section == .sessions, let target = target ?? selectedTarget, let bridge, !operationInProgress
+        else {
+            return
+        }
+        let allMessages = showAllMessages
+        let panel = NSOpenPanel()
+        panel.title = "导出会话为 Markdown"
+        panel.message = allMessages ? "导出完整记录，包含工具与系统消息。" : "导出用户和助手消息，不包含工具与系统记录。"
+        panel.prompt = "导出到此文件夹"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let directory = panel.url?.path else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            let path = try await bridge.run {
+                try $0.exportSession(target: target, directory: directory, allMessages: allMessages)
+            }
+            showNotice("Markdown 已导出", file: URL(fileURLWithPath: path))
+        } catch { operationError = describe(error) }
+    }
+
+    func jumpToParent() {
+        guard let parent = selectedSession?.parentTarget,
+            let session = sessions.first(where: { $0.target == parent })
+        else { return }
+        if session.isSubagent { showSubagents = true }
+        navigate(.sessions)
+        selectSession(parent)
+    }
+
+    func selectResource(_ id: String?) {
+        selectedResourceID = id
+        detailError = nil
+        resourceDetail = nil
+        resourceTask?.cancel()
+        guard let id, let kind = section.resourceKind, let bridge else {
+            loadingDetail = false
+            return
+        }
+        let workspace = project
+        let generation = UUID()
+        detailGeneration = generation
+        loadingDetail = true
+        if let cached = probeResults[id] {
+            resourceDetail = cached
+            loadingDetail = false
+            return
+        }
+        resourceTask = Task { [weak self] in
+            do {
+                let loaded = try await bridge.run {
+                    try $0.resourceDetail(kind: kind, id: id, workspace: workspace)
+                }
+                guard !Task.isCancelled, let self, self.detailGeneration == generation,
+                    self.section.resourceKind == kind, self.project == workspace,
+                    self.selectedResourceID == id
+                else { return }
+                self.resourceDetail = loaded
+                self.loadingDetail = false
+            } catch {
+                guard !Task.isCancelled, let self, self.detailGeneration == generation else { return }
+                self.detailError = describe(error)
+                self.loadingDetail = false
+            }
+        }
+    }
+
+    func probe() async {
+        guard section == .mcp, let id = selectedResourceID, let bridge, !probing.contains(id) else { return }
+        let workspace = project
+        let generation = UUID()
+        probeGenerations[id] = generation
+        probing.insert(id)
+        defer { probing.remove(id) }
+        do {
+            let result = try await bridge.run { try $0.probeMcp(id: id, workspace: workspace) }
+            guard probeGenerations[id] == generation else { return }
+            probeResults[id] = result
+            if section == .mcp, selectedResourceID == id, project == workspace { resourceDetail = result }
+            showNotice("MCP 探测完成：\(result.resource.name)")
+        } catch { operationError = describe(error) }
+    }
+
+    func chooseProject() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "选择项目"
+        guard panel.runModal() == .OK, let path = panel.url?.path else { return }
+        navigate(section, project: path)
+    }
+
+    func openResource(reveal: Bool) async {
+        guard let kind = section.resourceKind, let id = selectedResourceID, let bridge else { return }
+        let workspace = project
+        do {
+            let fresh = try await bridge.run {
+                try $0.resourceDetail(kind: kind, id: id, workspace: workspace)
+            }
+            let url = URL(fileURLWithPath: fresh.resource.path)
+            if reveal {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else if !NSWorkspace.shared.open(url) {
+                operationError = "无法打开文件，请检查默认编辑器设置。"
+            }
+        } catch { operationError = describe(error) }
+    }
+
+    func showNotice(_ message: String, file: URL? = nil) {
+        notice = message
+        noticeURL = file
+        let generation = UUID()
+        noticeGeneration = generation
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(file == nil ? 4 : 10))
+            if self?.noticeGeneration == generation { self?.notice = nil }
+        }
+    }
+
+    private func providerReset() {
+        provider = ""
+        query = ""
+    }
+
+    private func loadResources() {
+        guard let kind = section.resourceKind, let bridge else { return }
+        let workspace = project
+        let generation = UUID()
+        resourceGeneration = generation
+        loadingResources = true
+        catalogError = nil
+        resources = []
+        resourceDetail = nil
+        Task { [weak self] in
+            do {
+                let loaded = try await bridge.run { try $0.resources(kind: kind, workspace: workspace) }
+                guard let self, self.resourceGeneration == generation, self.section.resourceKind == kind,
+                    self.project == workspace
+                else { return }
+                self.resources = loaded
+                self.loadingResources = false
+                self.selectResource(
+                    loaded.contains(where: { $0.id == self.selectedResourceID })
+                        ? self.selectedResourceID : loaded.first?.id)
+                self.alignSelection()
+            } catch {
+                guard let self, self.resourceGeneration == generation, self.section.resourceKind == kind,
+                    self.project == workspace
+                else { return }
+                self.loadingResources = false
+                self.catalogError = describe(error)
+            }
+        }
+    }
+
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        contentHits = [:]
+        searchingContent = false
+        guard let bridge else { return }
+        let generation = bridge.client.beginSearch()
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard section == .sessions, !query.isEmpty else { return }
+        let targets = scopedSessions.filter {
+            !matches([$0.title, $0.target, $0.provider, $0.project ?? ""].joined(separator: " "))
+        }.map(\.target)
+        guard !targets.isEmpty else { return }
+        searchingContent = true
+        searchTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+                let hits = try await bridge.run {
+                    try $0.searchSessions(query: query, targets: targets, generation: generation)
+                }
+                guard !Task.isCancelled, let self, self.section == .sessions,
+                    self.query.trimmingCharacters(in: .whitespacesAndNewlines) == query
+                else { return }
+                self.contentHits = Dictionary(
+                    hits.map { ($0.target, $0.snippet) }, uniquingKeysWith: { first, _ in first })
+                self.searchingContent = false
+                self.alignSelection()
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.searchingContent = false
+                if !(error is CancellationError) { self.showNotice("部分会话内容无法搜索：\(describe(error))") }
+            }
+        }
+    }
+
+    private func alignSelection() {
+        if section == .sessions {
+            if !filteredSessions.contains(where: { $0.target == selectedTarget }) {
+                selectSession(filteredSessions.first?.target)
+            }
+        } else if section.resourceKind != nil {
+            if !filteredResources.contains(where: { $0.id == selectedResourceID }) {
+                selectResource(filteredResources.first?.id)
+            }
+        } else if !filteredProcesses.contains(where: { String($0.pid) == selectedResourceID }) {
+            selectedResourceID = filteredProcesses.first.map { String($0.pid) }
+        }
+    }
+}
+
+func projectName(_ path: String) -> String { URL(fileURLWithPath: path).lastPathComponent }
+func providerName(_ provider: String) -> String {
+    switch provider {
+    case "codex": "Codex"
+    case "claude": "Claude"
+    case "cursor": "Cursor"
+    case "omp": "Oh My Pi"
+    case "pi": "Pi"
+    case "gemini": "Gemini"
+    case "opencode": "OpenCode"
+    case "goose": "Goose"
+    case "grok": "Grok"
+    default: provider
+    }
+}
+func describe(_ error: Error) -> String {
+    if case DesktopError.Failed(let message) = error { return message }
+    return error.localizedDescription
+}

@@ -7,6 +7,9 @@ use tempfile::NamedTempFile;
 use crate::AgentKind;
 use crate::session::{AgentSession, DetailScope, NativeResumeCommand, SessionDetail};
 
+pub const MESSAGE_FORK_PROVIDERS: [AgentKind; 3] =
+    [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::OhMyPi];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContinuationMethod {
     NativeImport,

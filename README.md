@@ -18,6 +18,10 @@
 sessions, inspecting Agent Skills, and auditing MCP registrations. It runs
 without a daemon, account, or remote data store.
 
+A native macOS app is also available from source: run `mise run gui` on macOS
+14 or later with Xcode 26 / Swift 6.2 or newer. Start native Agent chats, browse
+rendered Markdown, fork from messages, and export sessions. See [the desktop guide](docs/desktop.md).
+
 ## Install
 
 ### Quick install (macOS & Linux)
@@ -63,6 +67,7 @@ mena ms inspect CLAUDE.md     # read one uniquely identified memory file
 
 | Command | Purpose |
 |---|---|
+| `mena gui` | Open the installed or locally built native macOS app |
 | `mena agent` / `mena ag` | Launch an agent, fresh or from a native session |
 | `mena ps` | List running coding-agent processes |
 | `mena sessions` / `mena ss` | Search, inspect, fork from messages, rename, resume, hand off, export, trash, and restore sessions |
@@ -108,6 +113,7 @@ semantics.
 
 ## Documentation
 
+- [Native macOS desktop app](docs/desktop.md)
 - [Calm Console interface and responsive behavior](docs/interface.md)
 - [Session browser, metrics, export, and deletion](docs/sessions.md)
 - [Agent Skill discovery and browser](docs/skills.md)
@@ -144,6 +150,8 @@ for the complete contract.
 ```sh
 mise run verify  # fmt + check + tests + strict Clippy + rustdoc
 mise run build   # optimized release binary
+mise run gui     # build and open the native macOS app
+mise run gui-verify # CLI gates + desktop bridge + Swift tests and formatting
 ```
 
 Repository architecture and extension points are documented in
