@@ -20,7 +20,7 @@ struct SessionDetailView: View {
                     } else if model.visibleMessages.isEmpty {
                         PaneEmptyState(
                             symbol: "text.bubble", title: "暂无消息",
-                            description: "可以在更多操作中显示工具与系统记录。")
+                            description: model.simplifiedView ? "当前会话暂无问答记录，可切换为完整视图。" : "可以在更多操作中显示工具与系统记录。")
                     } else {
                         transcript(session)
                     }
@@ -38,9 +38,14 @@ struct SessionDetailView: View {
         }
         .onChange(of: model.showFind) { _, show in if show { findFocused = true } }
         .onExitCommand {
-            model.showFind = false
-            model.findText = ""
-            model.showInspector = false
+            if model.showFind {
+                model.showFind = false
+                model.findText = ""
+            } else if model.showInspector {
+                model.showInspector = false
+            } else if model.chatFullScreen {
+                model.chatFullScreen = false
+            }
         }
     }
 
@@ -59,18 +64,53 @@ struct SessionDetailView: View {
                     SmallBadge(text: "分支", color: palette.accent, symbol: "arrow.triangle.branch")
                 }
                 Spacer(minLength: 8)
+                IconButton(
+                    symbol: model.simplifiedView
+                        ? "sparkles.rectangle.stack.fill" : "sparkles.rectangle.stack",
+                    label: model.simplifiedView ? "退出简化视图（显示完整对话）" : "简化会话（仅原生问题与最终回答）"
+                ) {
+                    model.simplifiedView.toggle()
+                    if model.simplifiedView { model.showAllMessages = false }
+                }
                 IconButton(symbol: "magnifyingglass", label: "搜索消息 ⌘F") { model.showFind.toggle() }
                 IconButton(symbol: "square.and.arrow.up", label: "导出 Markdown ⌘⇧E") {
                     Task { await model.exportSession() }
                 }
                 .disabled(model.operationInProgress)
                 IconButton(symbol: "sidebar.right", label: "会话信息") { model.showInspector.toggle() }
+                IconButton(
+                    symbol: model.chatFullScreen
+                        ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    label: model.chatFullScreen ? "退出全屏（展开侧边栏）⌘⇧L" : "全屏展示聊天窗口（折叠侧边栏）⌘⇧L"
+                ) {
+                    model.chatFullScreen.toggle()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
                 Menu {
                     Button("重命名会话…", systemImage: "pencil") { model.renameTarget = session }
                     Button("删除会话…", systemImage: "trash", role: .destructive) { model.requestDelete(session) }
                         .disabled(session.active || model.operationInProgress)
+                    Divider()
+                    Toggle("全屏展示聊天窗口", isOn: $model.chatFullScreen)
+                    Toggle(
+                        "简化会话（仅原生问题与最终回答）",
+                        isOn: Binding(
+                            get: { model.simplifiedView },
+                            set: {
+                                model.simplifiedView = $0
+                                if $0 { model.showAllMessages = false }
+                            }
+                        ))
                     Toggle("显示 Markdown 源码", isOn: $model.showRawMarkdown)
-                    Toggle("显示工具与系统记录", isOn: $model.showAllMessages)
+                    Toggle(
+                        "显示工具与系统记录",
+                        isOn: Binding(
+                            get: { model.showAllMessages },
+                            set: {
+                                model.showAllMessages = $0
+                                if $0 { model.simplifiedView = false }
+                            }
+                        ))
                     Picker("阅读字号", selection: $model.readerFontSize) {
                         ForEach(12...20, id: \.self) { Text("\($0) pt").tag(Double($0)) }
                     }
@@ -95,6 +135,9 @@ struct SessionDetailView: View {
                     Text("·").foregroundStyle(palette.faint)
                 }
                 Text("\(model.visibleMessages.count) 条消息").fixedSize()
+                if model.simplifiedView {
+                    SmallBadge(text: "简化问答", color: palette.accent, symbol: "sparkles")
+                }
                 if session.active {
                     Circle().fill(palette.accent).frame(width: 5, height: 5)
                     Text("运行中").foregroundStyle(palette.accent)

@@ -121,6 +121,105 @@ final class WorkspaceModelTests: XCTestCase {
             "cd '/tmp/project with spaces' && " + CommandDisplay.command(launch))
     }
 
+    func testSimplifiedViewKeepsOnlyUserQuestionAndFinalAssistantAnswer() {
+        let rawMessages = [
+            DesktopMessage(
+                id: "1", index: 0, role: "USER", content: "请帮我实现快速排序", timestamp: "10:00", model: nil,
+                nativeFork: true),
+            DesktopMessage(
+                id: "2", index: 1, role: "ASSISTANT", content: "我先查看项目结构...", timestamp: "10:01",
+                model: "claude-3-7", nativeFork: false),
+            DesktopMessage(
+                id: "3", index: 2, role: "SKILL", content: "Skill frontend-design", timestamp: "10:01",
+                model: nil,
+                nativeFork: false),
+            DesktopMessage(
+                id: "4", index: 3, role: "TOOL CALL", content: "read src/sort.rs", timestamp: "10:01",
+                model: nil,
+                nativeFork: false),
+            DesktopMessage(
+                id: "5", index: 4, role: "TOOL RESULT", content: "// sort file content", timestamp: "10:02",
+                model: nil,
+                nativeFork: false),
+            DesktopMessage(
+                id: "6", index: 5, role: "SYSTEM / META", content: "{\"thinking\": \"analyzing sort logic\"}",
+                timestamp: "10:02", model: nil, nativeFork: false),
+            DesktopMessage(
+                id: "7", index: 6, role: "ASSISTANT",
+                content:
+                    "<thinking>We need an in-place partition.</thinking>\n\n这是快速排序的实现代码：\n```rust\nfn quicksort() {}\n```",
+                timestamp: "10:03", model: "claude-3-7", nativeFork: true),
+        ]
+
+        let simplified = WorkspaceModel.simplifyMessages(rawMessages)
+        XCTAssertEqual(simplified.count, 2)
+        XCTAssertEqual(simplified[0].role, "USER")
+        XCTAssertEqual(simplified[0].content, "请帮我实现快速排序")
+        XCTAssertEqual(simplified[1].role, "ASSISTANT")
+        XCTAssertEqual(simplified[1].id, "7")
+        XCTAssertFalse(simplified[1].content.contains("<thinking>"))
+        XCTAssertFalse(simplified[1].content.contains("partition"))
+        XCTAssertTrue(simplified[1].content.contains("这是快速排序的实现代码："))
+    }
+
+    func testSimplifiedViewWithMultiTurnConversationAndThinkingTags() {
+        let rawMessages = [
+            // Turn 1
+            DesktopMessage(
+                id: "1", index: 0, role: "USER", content: "问题一", timestamp: "10:00", model: nil,
+                nativeFork: true),
+            DesktopMessage(
+                id: "2", index: 1, role: "ASSISTANT",
+                content: "<thought>Checking turn 1</thought>", timestamp: "10:01",
+                model: "claude", nativeFork: false),
+            DesktopMessage(
+                id: "3", index: 2, role: "TOOL CALL", content: "exec command", timestamp: "10:01", model: nil,
+                nativeFork: false),
+            DesktopMessage(
+                id: "4", index: 3, role: "ASSISTANT",
+                content: "<reasoning>Done turn 1</reasoning>回答一", timestamp: "10:02",
+                model: "claude", nativeFork: true),
+            // Turn 2
+            DesktopMessage(
+                id: "5", index: 4, role: "USER", content: "问题二", timestamp: "10:03", model: nil,
+                nativeFork: true),
+            DesktopMessage(
+                id: "6", index: 5, role: "SKILL", content: "use skill", timestamp: "10:03", model: nil,
+                nativeFork: false),
+            DesktopMessage(
+                id: "7", index: 6, role: "ASSISTANT",
+                content: "<thinking>\nStep 1\nStep 2\n</thinking>\n\n回答二", timestamp: "10:04",
+                model: "claude", nativeFork: true),
+        ]
+
+        let simplified = WorkspaceModel.simplifyMessages(rawMessages)
+        XCTAssertEqual(simplified.count, 4)
+        XCTAssertEqual(simplified.map(\.role), ["USER", "ASSISTANT", "USER", "ASSISTANT"])
+        XCTAssertEqual(simplified[0].content, "问题一")
+        XCTAssertEqual(simplified[1].content, "回答一")
+        XCTAssertEqual(simplified[2].content, "问题二")
+        XCTAssertEqual(simplified[3].content, "回答二")
+    }
+
+    func testChatFullScreenAndSimplifiedViewToggles() throws {
+        let fixture = try CatalogFixture()
+        defer { fixture.remove() }
+        let model = fixture.model()
+
+        XCTAssertFalse(model.chatFullScreen)
+        model.chatFullScreen = true
+        XCTAssertTrue(model.chatFullScreen)
+        model.chatFullScreen = false
+        XCTAssertFalse(model.chatFullScreen)
+
+        XCTAssertFalse(model.simplifiedView)
+        model.simplifiedView = true
+        XCTAssertTrue(model.simplifiedView)
+
+        let reloaded = fixture.model()
+        XCTAssertTrue(reloaded.simplifiedView)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(8)
         while !condition() {

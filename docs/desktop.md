@@ -39,8 +39,11 @@ The library's install name is set at link time.
   the selection. Search hits use a separate yellow highlight.
   USER bubbles align right and Agent bubbles align left. Only user and assistant
   messages can start a fork; tool, skill, system, and error records cannot.
-- Session details initially show user and assistant messages. The menu can
-  reveal tool and system records. Titles are mena-owned overlays; renaming
+- Session details initially show user and assistant messages. The header action bar
+  and menu provide a **simplified conversation** toggle (keeping only the user's
+  raw question and the AI's final answer while filtering out SKILL calls, tool
+  calls/results, system/meta records, and thinking/reasoning blocks). The menu can
+  also reveal full tool and system records. Titles are mena-owned overlays; renaming
   never changes provider transcripts.
 - Session messages and Markdown resource previews render headings, nested
   lists, task lists, quotes, tables, inline formatting, and fenced code with
@@ -66,10 +69,11 @@ The library's install name is set at link time.
 The sidebar and Settings support system, light, and dark appearance. Refresh
 the list with `⌘R`; returning to the workspace also refreshes its catalog.
 `⌘K` focuses catalog search, `⌘F` searches messages, `⌘⇧F` opens message fork,
-and `⌘Return` continues the selected session. `⌘⇧L` toggles focused reading,
-hiding the two navigation columns. The app icon and sidebar use the
-README artwork; the bundled PNG is its static first frame. Icon framing focuses
-on the head and shoulders so the portrait fills the available space.
+and `⌘Return` continues the selected session. `⌘⇧L` toggles full-screen chat display
+(collapsing the navigation sidebar and catalog columns to show only the chat window;
+the chat header also provides a full-screen toggle button, and `Esc` exits full screen).
+The app icon and sidebar use the README artwork; the bundled PNG is its static first frame.
+Icon framing focuses on the head and shoulders so the portrait fills the available space.
 
 Settings offers Mint, Ocean, Violet, Amber, and Graphite themes. Import a local
 PNG, JPEG, HEIC, or TIFF background, then adjust image strength, blur, and panel

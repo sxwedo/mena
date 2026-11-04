@@ -5,12 +5,11 @@ struct WorkspaceView: View {
     @Environment(\.menaPalette) private var palette
     @Bindable var model: WorkspaceModel
     @Environment(\.scenePhase) private var scenePhase
-    @State private var focusedReading = false
     @State private var showWarnings = false
 
     var body: some View {
         Group {
-            if focusedReading {
+            if model.chatFullScreen {
                 detailPane
             } else {
                 HSplitView {
@@ -33,7 +32,7 @@ struct WorkspaceView: View {
             ToolbarItem(placement: .navigation) {
                 IconButton(symbol: "sidebar.left", label: model.sidebarCollapsed ? "展开侧边栏 ⌘⌥S" : "收起侧边栏 ⌘⌥S")
                 {
-                    focusedReading = false
+                    model.chatFullScreen = false
                     model.sidebarCollapsed.toggle()
                 }.keyboardShortcut("s", modifiers: [.command, .option])
             }
@@ -45,11 +44,11 @@ struct WorkspaceView: View {
             }
             ToolbarItem(placement: .automatic) {
                 IconButton(
-                    symbol: focusedReading
+                    symbol: model.chatFullScreen
                         ? "rectangle.lefthalf.inset.filled" : "rectangle.inset.filled",
-                    label: focusedReading ? "退出专注阅读 ⌘⇧L" : "专注阅读 ⌘⇧L"
+                    label: model.chatFullScreen ? "退出全屏（展开侧边栏）⌘⇧L" : "全屏展示（折叠侧边栏）⌘⇧L"
                 ) {
-                    focusedReading.toggle()
+                    model.chatFullScreen.toggle()
                 }.keyboardShortcut("l", modifiers: [.command, .shift])
             }
             ToolbarItem(placement: .automatic) {
@@ -109,7 +108,7 @@ struct WorkspaceView: View {
         } message: {
             Text(model.operationError ?? "")
         }
-        .onChange(of: model.listSearchRequest) { _, _ in focusedReading = false }
+        .onChange(of: model.listSearchRequest) { _, _ in model.chatFullScreen = false }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, !model.loadingCatalog { Task { await model.refresh() } }
         }

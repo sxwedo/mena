@@ -151,6 +151,17 @@ final class WorkspaceModel {
     var showFind = false
     var findText = ""
     var showInspector = false
+    var chatFullScreen = false
+    var simplifiedView: Bool {
+        didSet {
+            preferences.set(simplifiedView, forKey: "simplifiedView")
+            if !visibleMessages.contains(where: { $0.id == selectedMessageID }) {
+                selectedMessageID =
+                    visibleMessages.first(where: { $0.role == "ASSISTANT" })?.id
+                    ?? visibleMessages.first?.id
+            }
+        }
+    }
     var loadingSnapshot = false
     var loadingResources = false
     var loadingCatalog: Bool { section.resourceKind == nil ? loadingSnapshot : loadingResources }
@@ -205,6 +216,7 @@ final class WorkspaceModel {
         defaultTerminal = preferences.string(forKey: "defaultTerminal") ?? "builtin"
         showSubagents = preferences.bool(forKey: "showSubagents")
         appearance = preferences.string(forKey: "appearance") ?? "system"
+        simplifiedView = preferences.bool(forKey: "simplifiedView")
         let savedSize = preferences.double(forKey: "readerFontSize")
         readerFontSize = (12...20).contains(savedSize) ? savedSize : 15
         do { bridge = try CatalogBridge(home: home) } catch { catalogError = describe(error) }
@@ -232,7 +244,11 @@ final class WorkspaceModel {
     var providers: [String] { Array(Set(sessions.map(\.provider))).sorted() }
     var title: String { section == .sessions ? (project.map(projectName) ?? "会话") : section.title }
     var visibleMessages: [DesktopMessage] {
-        detail?.messages.filter { showAllMessages || ["USER", "ASSISTANT"].contains($0.role) } ?? []
+        guard let messages = detail?.messages else { return [] }
+        if simplifiedView {
+            return Self.simplifyMessages(messages)
+        }
+        return messages.filter { showAllMessages || ["USER", "ASSISTANT"].contains($0.role) }
     }
     var scopedSessions: [DesktopSession] {
         sessions.filter {
@@ -335,6 +351,7 @@ final class WorkspaceModel {
         findText = ""
         showFind = false
         showInspector = false
+        chatFullScreen = false
         detailError = nil
         if section == .sessions {
             let target =
@@ -818,6 +835,89 @@ final class WorkspaceModel {
         } else if !filteredProcesses.contains(where: { String($0.pid) == selectedResourceID }) {
             selectedResourceID = filteredProcesses.first.map { String($0.pid) }
         }
+    }
+
+    /// In simplified view, keep only the user's raw question(s) and the AI's final answer per turn,
+    /// discarding SKILL calls, tool calls/results, system/meta records, intermediate assistant messages,
+    /// and thinking/reasoning blocks.
+    static func simplifyMessages(_ messages: [DesktopMessage]) -> [DesktopMessage] {
+        var result: [DesktopMessage] = []
+        var i = 0
+        let count = messages.count
+
+        while i < count {
+            let msg = messages[i]
+            if msg.role == "USER" {
+                result.append(msg)
+                i += 1
+
+                var turnMessages: [DesktopMessage] = []
+                while i < count && messages[i].role != "USER" {
+                    turnMessages.append(messages[i])
+                    i += 1
+                }
+
+                // Find the last ASSISTANT message in this turn with non-empty answer content
+                if let lastAssistant = turnMessages.reversed().first(where: { m in
+                    guard m.role == "ASSISTANT" else { return false }
+                    let cleaned = cleanAssistantAnswer(m.content)
+                    return !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }) {
+                    let cleanedContent = cleanAssistantAnswer(lastAssistant.content)
+                    let finalAnswer = DesktopMessage(
+                        id: lastAssistant.id,
+                        index: lastAssistant.index,
+                        role: lastAssistant.role,
+                        content: cleanedContent,
+                        timestamp: lastAssistant.timestamp,
+                        model: lastAssistant.model,
+                        nativeFork: lastAssistant.nativeFork
+                    )
+                    result.append(finalAnswer)
+                }
+            } else {
+                if msg.role == "ASSISTANT" {
+                    let cleaned = cleanAssistantAnswer(msg.content)
+                    if !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let greeting = DesktopMessage(
+                            id: msg.id,
+                            index: msg.index,
+                            role: msg.role,
+                            content: cleaned,
+                            timestamp: msg.timestamp,
+                            model: msg.model,
+                            nativeFork: msg.nativeFork
+                        )
+                        result.append(greeting)
+                    }
+                }
+                i += 1
+            }
+        }
+        return result
+    }
+
+    /// Strip thinking / reasoning traces from assistant text.
+    static func cleanAssistantAnswer(_ content: String) -> String {
+        var text = content
+        let patterns = [
+            "(?is)<thinking>.*?</thinking>",
+            "(?is)<thought>.*?</thought>",
+            "(?is)<reasoning>.*?</reasoning>",
+            "(?is)<thinking>.*$",
+            "(?is)<thought>.*$",
+            "(?is)<reasoning>.*$",
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                text = regex.stringByReplacingMatches(
+                    in: text,
+                    range: NSRange(text.startIndex..., in: text),
+                    withTemplate: ""
+                )
+            }
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
