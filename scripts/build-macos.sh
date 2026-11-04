@@ -18,6 +18,7 @@ cd "$repo_dir"
 cargo rustc --locked --lib --features desktop --crate-type cdylib "${cargo_flags[@]}" -- \
   -C link-arg=-Wl,-install_name,@rpath/libmena.dylib
 core_dir="$repo_dir/target/$profile"
+cargo build --locked --features desktop --bin mena-terminal-launch "${cargo_flags[@]}"
 
 generated_dir="$repo_dir/macos/Generated"
 mkdir -p "$generated_dir/MenaCore" "$generated_dir/MenaFFI"
@@ -37,6 +38,7 @@ trap 'rm -rf "$build_dir"' EXIT
 app_dir="$build_dir/Mena.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Frameworks" "$app_dir/Contents/Resources"
 cp "$swift_bin_dir/Mena" "$app_dir/Contents/MacOS/Mena"
+cp "$core_dir/mena-terminal-launch" "$app_dir/Contents/MacOS/mena-terminal-launch"
 cp "$core_dir/libmena.dylib" "$app_dir/Contents/Frameworks/"
 cp macos/Info.plist "$app_dir/Contents/Info.plist"
 cp -R "$swift_bin_dir/MenaDesktop_Mena.bundle" "$app_dir/Contents/Resources/"
@@ -44,6 +46,7 @@ swift macos/Tools/AppIcon.swift macos/Sources/Mena/Resources/MenaLogo.png "$app_
 install_name_tool -delete_rpath "$core_dir" "$app_dir/Contents/MacOS/Mena"
 install_name_tool -add_rpath @executable_path/../Frameworks "$app_dir/Contents/MacOS/Mena"
 codesign --force --sign - "$app_dir/Contents/Frameworks/libmena.dylib"
+codesign --force --sign - "$app_dir/Contents/MacOS/mena-terminal-launch"
 codesign --force --sign - "$app_dir"
 # Replace the bundle without modifying a running app's mapped, signed binary.
 destination_app="$repo_dir/target/macos/Mena.app"

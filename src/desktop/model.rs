@@ -65,6 +65,25 @@ pub struct DesktopSnapshot {
     pub warnings: Vec<String>,
     pub context_providers: Vec<String>,
     pub launch_providers: Vec<String>,
+    pub agents: Vec<DesktopAgent>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DesktopAgent {
+    pub provider: String,
+    pub name: String,
+    pub executable: Option<String>,
+    pub homepage: String,
+    pub custom: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DesktopTrashSession {
+    pub key: String,
+    pub target: String,
+    pub provider: String,
+    pub title: String,
+    pub deleted_at: u64,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -204,4 +223,10 @@ pub struct DesktopLaunch {
     pub directory: String,
     pub title: String,
     pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DesktopResumePreview {
+    pub launch: DesktopLaunch,
+    pub unavailable_reason: Option<String>,
 }

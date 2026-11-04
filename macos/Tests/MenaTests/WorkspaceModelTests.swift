@@ -26,6 +26,9 @@ final class WorkspaceModelTests: XCTestCase {
         model.showAllMessages = true
         let tool = try XCTUnwrap(model.visibleMessages.first { $0.role == "TOOL CALL" })
         model.selectedMessageID = tool.id
+        model.beginFork(message: tool)
+        XCTAssertNil(model.forkDraft)
+        XCTAssertFalse(tool.canFork)
         model.showAllMessages = false
         XCTAssertTrue(model.visibleMessages.contains { $0.id == model.selectedMessageID })
         XCTAssertNotEqual(model.selectedMessageID, tool.id)
@@ -73,6 +76,49 @@ final class WorkspaceModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(model.loadingCatalog)
         XCTAssertEqual(model.section, .processes)
+    }
+
+    func testAppearanceTerminalDeletionAndSidebarPreferencesPersistIndependently() throws {
+        let fixture = try CatalogFixture()
+        defer { fixture.remove() }
+        let model = fixture.model()
+        XCTAssertFalse(model.deletePermanently)
+        XCTAssertEqual(model.theme, .mint)
+        model.theme = .ocean
+        model.appearance = "dark"
+        model.surfaceOpacity = 0.62
+        model.backgroundImageOpacity = 0.48
+        model.backgroundBlur = 7
+        model.sidebarCollapsed = true
+        model.defaultTerminal = "ghostty"
+        model.deletePermanently = true
+        let reloaded = fixture.model()
+        XCTAssertEqual(reloaded.theme, .ocean)
+        XCTAssertEqual(reloaded.appearance, "dark")
+        XCTAssertEqual(reloaded.surfaceOpacity, 0.62)
+        XCTAssertEqual(reloaded.backgroundImageOpacity, 0.48)
+        XCTAssertEqual(reloaded.backgroundBlur, 7)
+        XCTAssertTrue(reloaded.sidebarCollapsed)
+        XCTAssertTrue(reloaded.deletePermanently)
+        XCTAssertEqual(reloaded.defaultTerminal, "ghostty")
+        model.requestDelete(
+            DesktopSession(
+                target: "codex:alpha", provider: "codex", title: "Alpha", project: nil, updatedAt: 0,
+                startedAt: nil, isSubagent: false, parentTarget: nil, active: false, tokens: nil, costUsd: nil
+            ))
+        model.deletePermanently = false
+        XCTAssertTrue(
+            model.deletionDraft?.permanent == true, "Confirmation freezes the displayed deletion policy")
+    }
+
+    func testCommandDisplayQuotesLiteralArgumentsAndProjectDirectory() {
+        let launch = DesktopLaunch(
+            executable: "/tmp/my agent", arguments: ["resume", "a'b", "$(touch nope)", ""],
+            directory: "/tmp/project with spaces", title: "Test", target: nil)
+        XCTAssertEqual(CommandDisplay.command(launch), "'/tmp/my agent' resume 'a'\\''b' '$(touch nope)' ''")
+        XCTAssertEqual(
+            CommandDisplay.copyable(launch),
+            "cd '/tmp/project with spaces' && " + CommandDisplay.command(launch))
     }
 
     private func waitUntil(_ condition: () -> Bool) async throws {

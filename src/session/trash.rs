@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +22,12 @@ struct Manifest {
     target: String,
     provider: String,
     id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    overlay_title: Option<String>,
+    #[serde(default)]
+    deleted_at: u64,
     moved: Vec<Moved>,
     #[serde(default)]
     cursor_rows: Vec<CursorRow>,
@@ -57,16 +63,26 @@ pub(super) struct TrashBatch {
     cursor_rows: Vec<CursorRow>,
     next: usize,
     written: bool,
+    title: Option<String>,
+    overlay_title: Option<String>,
+    deleted_at: u64,
 }
 
 impl TrashBatch {
-    pub(super) fn create(home: &Path, provider: &str, id: &str) -> Result<Self> {
+    pub(super) fn create(
+        home: &Path,
+        provider: &str,
+        id: &str,
+        title: Option<String>,
+    ) -> Result<Self> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_millis());
         let dir = state_dir(home)
             .join("trash/sessions")
             .join(format!("{stamp}-{provider}-{id}"));
+        let overlay_title =
+            titles::load(&titles::path_for(home))?.remove(&format!("{provider}:{id}"));
         if dir.exists() {
             bail!("trash entry already exists: {}", dir.display());
         }
@@ -80,6 +96,11 @@ impl TrashBatch {
             cursor_rows: Vec::new(),
             next: 0,
             written: false,
+            title,
+            overlay_title,
+            deleted_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |time| time.as_secs()),
         })
     }
 
@@ -120,13 +141,20 @@ impl TrashBatch {
         self.cursor_rows.push(row);
     }
 
-    fn finish(mut self) -> Result<()> {
+    fn finish(mut self, permanent: bool) -> Result<()> {
         if self.moved.is_empty() && self.cursor_rows.is_empty() {
             let _ = fs::remove_dir_all(&self.dir);
             self.written = true;
             return Ok(());
         }
-        self.write_manifest()
+        self.write_manifest()?;
+        if permanent {
+            // Purge only this validated operation's batch after native cleanup
+            // succeeds. Failures keep a recovery manifest instead of losing data.
+            fs::remove_dir_all(&self.dir)
+                .context("failed to permanently remove the deleted session")?;
+        }
+        Ok(())
     }
 
     fn write_manifest(&mut self) -> Result<()> {
@@ -137,6 +165,9 @@ impl TrashBatch {
             target: format!("{}:{}", self.provider, self.id),
             provider: self.provider.clone(),
             id: self.id.clone(),
+            title: self.title.clone(),
+            overlay_title: self.overlay_title.clone(),
+            deleted_at: self.deleted_at,
             moved: self.moved.clone(),
             cursor_rows: self.cursor_rows.clone(),
         };
@@ -164,8 +195,8 @@ impl Drop for TrashBatch {
     }
 }
 
-pub(super) fn finish(batch: TrashBatch) -> Result<()> {
-    batch.finish()
+pub(super) fn finish(batch: TrashBatch, permanent: bool) -> Result<()> {
+    batch.finish(permanent)
 }
 
 /// Put one trashed session back. `target` is `provider:session-id` or the
@@ -178,8 +209,9 @@ pub(super) fn finish(batch: TrashBatch) -> Result<()> {
 pub fn restore_session(home: &Path, target: &str) -> Result<String> {
     let entry = find_entry(home, target)?;
     let manifest = read_manifest(&entry.join("session.json"))?;
+    validate_restore(home, &entry, &manifest)?;
     for moved in &manifest.moved {
-        if moved.from.exists() {
+        if fs::symlink_metadata(&moved.from).is_ok() {
             bail!(
                 "refusing to restore {} over existing {}",
                 manifest.target,
@@ -202,9 +234,78 @@ pub fn restore_session(home: &Path, target: &str) -> Result<String> {
         })?;
     }
     restore_cursor_rows(&manifest.cursor_rows)?;
+    if let Some(title) = manifest.overlay_title {
+        titles::put(&titles::path_for(home), &manifest.target, Some(title))?;
+    }
     fs::remove_dir_all(&entry)
         .with_context(|| format!("failed to remove trash entry {}", entry.display()))?;
     Ok(manifest.target)
+}
+
+fn validate_restore(home: &Path, entry: &Path, manifest: &Manifest) -> Result<()> {
+    use super::adapter::ProviderAdapter;
+    use crate::process::AgentKind;
+    super::validate_storage_identifier(&manifest.id, "session ID")?;
+    if let Some(title) = &manifest.overlay_title {
+        titles::normalize(title)?;
+    }
+    anyhow::ensure!(
+        manifest.target == format!("{}:{}", manifest.provider, manifest.id),
+        "invalid trash identity"
+    );
+    let kind = AgentKind::from_slug(&manifest.provider).context("unknown trash provider")?;
+    let roots = ProviderAdapter::from_kind(&kind)
+        .context("unsupported trash provider")?
+        .storage_roots(home);
+    for moved in &manifest.moved {
+        let name = moved
+            .stored
+            .strip_prefix("files/")
+            .context("invalid stored artifact")?;
+        anyhow::ensure!(
+            !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()),
+            "invalid stored artifact"
+        );
+        let parent = entry.join("files").canonicalize()?;
+        anyhow::ensure!(
+            parent.starts_with(entry.canonicalize()?),
+            "trash artifact escaped its entry"
+        );
+        validate_restore_destination(&roots, &moved.from)?;
+    }
+    for row in &manifest.cursor_rows {
+        validate_restore_destination(&roots, &row.database)?;
+    }
+    Ok(())
+}
+
+fn validate_restore_destination(roots: &[PathBuf], path: &Path) -> Result<()> {
+    // Missing session directories are expected; resolve the nearest existing
+    // ancestor so a newly inserted symlink cannot redirect a restoration.
+    fn resolve_missing(path: &Path) -> Result<PathBuf> {
+        if fs::symlink_metadata(path).is_ok() {
+            return Ok(path.canonicalize()?);
+        }
+        let parent = path.parent().context("invalid restore path")?;
+        Ok(resolve_missing(parent)?.join(path.file_name().context("invalid restore name")?))
+    }
+    anyhow::ensure!(
+        path.is_absolute()
+            && path.components().count() <= 256
+            && !path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir)),
+        "unsafe restore destination"
+    );
+    let root = roots
+        .iter()
+        .find(|root| path.starts_with(root))
+        .context("restore destination outside provider store")?;
+    anyhow::ensure!(
+        resolve_missing(path)?.starts_with(resolve_missing(root)?),
+        "restore destination escaped provider store"
+    );
+    Ok(())
 }
 
 pub(super) fn state_dir(home: &Path) -> PathBuf {
@@ -229,7 +330,7 @@ fn find_entry(home: &Path, target: &str) -> Result<PathBuf> {
     for entry in entries {
         let entry = entry.with_context(|| format!("failed to read {}", root.display()))?;
         let path = entry.path();
-        if !path.is_dir() {
+        if !entry.file_type()?.is_dir() {
             continue;
         }
         let name = entry.file_name();
@@ -253,9 +354,61 @@ fn find_entry(home: &Path, target: &str) -> Result<PathBuf> {
 }
 
 fn read_manifest(path: &Path) -> Result<Manifest> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= LIMIT,
+        "invalid or oversized trash manifest"
+    );
+    let mut text = String::new();
+    fs::File::open(path)?
+        .take(LIMIT + 1)
+        .read_to_string(&mut text)?;
+    anyhow::ensure!(text.len() as u64 <= LIMIT, "oversized trash manifest");
     serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "desktop")]
+pub struct TrashedSession {
+    pub key: String,
+    pub target: String,
+    pub provider: String,
+    pub title: String,
+    pub deleted_at: u64,
+}
+
+/// List mena-owned recovery manifests without reading provider stores.
+///
+/// # Errors
+/// Returns an error when the trash directory cannot be read.
+#[cfg(feature = "desktop")]
+pub fn list_trashed_sessions(home: &Path) -> Result<Vec<TrashedSession>> {
+    let root = state_dir(home).join("trash/sessions");
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.take(20_000) {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Ok(manifest) = read_manifest(&entry.path().join("session.json")) else {
+            continue;
+        };
+        sessions.push(TrashedSession {
+            key: entry.file_name().to_string_lossy().into_owned(),
+            title: manifest.title.unwrap_or_else(|| manifest.target.clone()),
+            target: manifest.target,
+            provider: manifest.provider,
+            deleted_at: manifest.deleted_at,
+        });
+    }
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.deleted_at));
+    Ok(sessions)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

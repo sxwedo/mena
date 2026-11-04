@@ -570,6 +570,12 @@ impl SessionsApp {
             ));
             return;
         };
+        if !message.kind.can_fork() {
+            self.detail_status = Some(StatusMessage::error(
+                "Only USER and ASSISTANT messages can be forked".to_owned(),
+            ));
+            return;
+        }
         self.native_fork = !force_context && message.fork_point.is_some();
         self.mode = BrowserMode::ConfirmFork;
     }

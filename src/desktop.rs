@@ -130,6 +130,19 @@ impl DesktopClient {
             sessions,
             processes,
             warnings: catalog.warnings().to_vec(),
+            agents: AgentKind::all_kinds(&self.settings.agent.custom)
+                .iter()
+                .map(|kind| DesktopAgent {
+                    provider: kind.slug().to_owned(),
+                    name: kind.to_string(),
+                    executable: kind
+                        .executable_name(&self.settings.agent.custom)
+                        .and_then(find_executable)
+                        .map(|path| path.display().to_string()),
+                    homepage: kind.homepage_url().to_owned(),
+                    custom: matches!(kind, AgentKind::Custom(_)),
+                })
+                .collect(),
             launch_providers: AgentKind::all_kinds(&self.settings.agent.custom)
                 .iter()
                 .filter(|kind| {
@@ -231,6 +244,53 @@ impl DesktopClient {
         Ok(())
     }
 
+    /// Recheck exact live evidence and native containment immediately before deletion.
+    ///
+    /// # Errors
+    /// Refuses unconfirmed protection, invalid targets, and any confirmation other than `y`.
+    pub fn delete_session(
+        &self,
+        target: String,
+        permanent: bool,
+        confirmation: String,
+    ) -> Result<(), DesktopError> {
+        if confirmation != "y" {
+            return Err(anyhow::anyhow!("请输入小写 y 确认删除。").into());
+        }
+        let live = discover_live_agents(&self.settings.agent.custom)?;
+        self.delete_with_live_agents(&target, permanent, &live)?;
+        Ok(())
+    }
+
+    /// List recoverable sessions from mena's own trash.
+    ///
+    /// # Errors
+    /// Returns errors reading the private trash directory.
+    pub fn trash_sessions(&self) -> Result<Vec<DesktopTrashSession>, DesktopError> {
+        Ok(crate::session::list_trashed_sessions(&self.home)?
+            .into_iter()
+            .map(|entry| DesktopTrashSession {
+                key: entry.key,
+                target: entry.target,
+                provider: entry.provider,
+                title: entry.title,
+                deleted_at: entry.deleted_at,
+            })
+            .collect())
+    }
+
+    /// Restore a selected trash entry, refusing collisions and containment escapes.
+    ///
+    /// # Errors
+    /// Returns errors for missing entries, unsafe paths, or existing destinations.
+    pub fn restore_session(&self, key: String) -> Result<String, DesktopError> {
+        let entries = crate::session::list_trashed_sessions(&self.home)?;
+        if !entries.iter().any(|entry| entry.key == key) {
+            return Err(anyhow::anyhow!("垃圾站记录已不存在，请刷新。").into());
+        }
+        Ok(crate::session::restore_session(&self.home, &key)?)
+    }
+
     /// Export fresh normalized history using the same private, non-clobbering
     /// Markdown exporter as the CLI. The UI chooses the destination directory.
     ///
@@ -253,6 +313,42 @@ impl DesktopClient {
         };
         let path = crate::export::export_session_detail(&detail, directory, scope)?;
         Ok(path.display().to_string())
+    }
+
+    /// Preview the native command even when its executable or project is unavailable.
+    ///
+    /// # Errors
+    /// Returns target-resolution or unsupported native-resume failures.
+    pub fn resume_preview(&self, target: String) -> Result<DesktopResumePreview, DesktopError> {
+        let catalog = self.fresh_catalog()?;
+        let session = resolve(&catalog, &target)?;
+        let command = native_resume_command(&session.kind, &session.id)?;
+        let executable = find_executable(&command.program);
+        let directory = session
+            .project
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let unavailable_reason = if executable.is_none() {
+            Some(format!(
+                "尚未安装 {}；你仍可以复制原生恢复命令。",
+                session.kind
+            ))
+        } else if session.project.as_ref().is_none_or(|path| !path.is_dir()) {
+            Some("原项目目录已不存在；你仍可以复制恢复命令，在合适的目录中执行。".to_owned())
+        } else {
+            None
+        };
+        Ok(DesktopResumePreview {
+            launch: DesktopLaunch {
+                executable: executable.map_or(command.program, |path| path.display().to_string()),
+                arguments: command.args,
+                directory,
+                title: session.title.clone().unwrap_or_else(|| target.clone()),
+                target: Some(target),
+            },
+            unavailable_reason,
+        })
     }
 
     /// Prepare program and argv without starting a process.
@@ -322,6 +418,9 @@ impl DesktopClient {
         let session = resolve(&catalog, &target)?;
         let detail = catalog.detail(session)?;
         let index = checked_message(&detail, &revision, &message_id)?;
+        if !detail.messages[index].kind.can_fork() {
+            return Err(anyhow::anyhow!("只能从 USER 或 Agent 消息分叉。").into());
+        }
         // Resolve launch prerequisites before creating a native fork or a file.
         let directory = session.project.as_deref().context("会话没有项目目录。")?;
         validate_directory(directory)?;
@@ -405,6 +504,26 @@ impl DesktopClient {
 }
 
 impl DesktopClient {
+    fn delete_with_live_agents(
+        &self,
+        target: &str,
+        permanent: bool,
+        live: &[crate::process::LiveAgent],
+    ) -> Result<()> {
+        let catalog = self.fresh_catalog()?;
+        ensure!(
+            !catalog.protection(live)?.protected_targets.contains(target),
+            "会话正在运行，或当前运行关联尚未确认，不能删除。"
+        );
+        let session = resolve(&catalog, target)?;
+        if permanent {
+            catalog.delete_session_permanently(session)?;
+        } else {
+            catalog.delete_session(session)?;
+        }
+        Ok(())
+    }
+
     fn catalog(&self) -> Result<Arc<SessionCatalog>> {
         let cached = self
             .catalog

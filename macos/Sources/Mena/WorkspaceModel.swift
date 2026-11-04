@@ -1,15 +1,19 @@
 import AppKit
+import ImageIO
 import MenaCore
 import Observation
+import UniformTypeIdentifiers
 
 enum WorkspaceSection: String, CaseIterable, Identifiable {
-    case sessions, processes, skills, mcp, memories
+    case sessions, processes, agents, skills, mcp, memories, trash
 
     var id: String { rawValue }
     var title: String {
         switch self {
         case .sessions: "全部会话"
         case .processes: "运行中"
+        case .agents: "Agents"
+        case .trash: "垃圾站"
         case .skills: "Skills"
         case .mcp: "MCP 服务"
         case .memories: "Memories"
@@ -19,6 +23,8 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         switch self {
         case .sessions: "bubble.left.and.bubble.right"
         case .processes: "waveform.path.ecg"
+        case .agents: "cpu"
+        case .trash: "trash"
         case .skills: "sparkle"
         case .mcp: "server.rack"
         case .memories: "book"
@@ -40,6 +46,22 @@ struct ForkDraft: Identifiable {
     let revision: String
     let message: DesktopMessage
     let totalMessages: Int
+}
+
+struct ResumeDraft: Identifiable {
+    let id = UUID()
+    let session: DesktopSession
+    let preview: DesktopResumePreview
+}
+
+struct DeletionDraft: Identifiable {
+    let id = UUID()
+    let session: DesktopSession
+    let permanent: Bool
+}
+
+extension DesktopMessage {
+    var canFork: Bool { role == "USER" || role == "ASSISTANT" }
 }
 
 /// UniFFI objects are Sendable: their Rust implementation owns synchronization.
@@ -88,6 +110,22 @@ final class WorkspaceModel {
     var readerFontSize: Double {
         didSet { preferences.set(readerFontSize, forKey: "readerFontSize") }
     }
+    var theme: AppTheme { didSet { preferences.set(theme.rawValue, forKey: "theme") } }
+    var sidebarCollapsed: Bool { didSet { preferences.set(sidebarCollapsed, forKey: "sidebarCollapsed") } }
+    var surfaceOpacity: Double { didSet { preferences.set(surfaceOpacity, forKey: "surfaceOpacity") } }
+    var backgroundImageOpacity: Double {
+        didSet { preferences.set(backgroundImageOpacity, forKey: "backgroundImageOpacity") }
+    }
+    var backgroundBlur: Double { didSet { preferences.set(backgroundBlur, forKey: "backgroundBlur") } }
+    var backgroundImage: NSImage?
+    var backgroundPath: String { didSet { preferences.set(backgroundPath, forKey: "backgroundPath") } }
+    var deletePermanently: Bool { didSet { preferences.set(deletePermanently, forKey: "deletePermanently") } }
+    var defaultTerminal: String { didSet { preferences.set(defaultTerminal, forKey: "defaultTerminal") } }
+    var agents: [DesktopAgent] = []
+    var trashSessions: [DesktopTrashSession] = []
+    var newChatProvider: String?
+    var resumeDraft: ResumeDraft?
+    var deletionDraft: DeletionDraft?
     var showRawMarkdown = false
     var sessions: [DesktopSession] = []
     var processes: [DesktopProcess] = []
@@ -132,6 +170,7 @@ final class WorkspaceModel {
 
     @ObservationIgnored private var bridge: CatalogBridge?
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private let desktopDirectory: URL
     @ObservationIgnored private var detailTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var resourceTask: Task<Void, Never>?
@@ -140,6 +179,7 @@ final class WorkspaceModel {
     @ObservationIgnored private var catalogGeneration = UUID()
     @ObservationIgnored private var detailGeneration = UUID()
     @ObservationIgnored private var resourceGeneration = UUID()
+    @ObservationIgnored private var trashGeneration = UUID()
     @ObservationIgnored private var noticeGeneration = UUID()
 
     init(
@@ -147,6 +187,22 @@ final class WorkspaceModel {
         preferences: UserDefaults = .standard
     ) {
         self.preferences = preferences
+        desktopDirectory = URL(fileURLWithPath: home).appendingPathComponent(
+            ".config/mena/desktop", isDirectory: true)
+        theme = AppTheme(rawValue: preferences.string(forKey: "theme") ?? "") ?? .mint
+        sidebarCollapsed = preferences.bool(forKey: "sidebarCollapsed")
+        surfaceOpacity =
+            preferences.object(forKey: "surfaceOpacity") == nil
+            ? 1 : max(0.25, min(1, preferences.double(forKey: "surfaceOpacity")))
+        backgroundImageOpacity =
+            preferences.object(forKey: "backgroundImageOpacity") == nil
+            ? 0.7 : max(0, min(1, preferences.double(forKey: "backgroundImageOpacity")))
+        backgroundBlur = max(0, min(24, preferences.double(forKey: "backgroundBlur")))
+        let savedBackground = preferences.string(forKey: "backgroundPath") ?? ""
+        backgroundPath = savedBackground
+        backgroundImage = Self.loadBackground(savedBackground)
+        deletePermanently = preferences.bool(forKey: "deletePermanently")
+        defaultTerminal = preferences.string(forKey: "defaultTerminal") ?? "builtin"
         showSubagents = preferences.bool(forKey: "showSubagents")
         appearance = preferences.string(forKey: "appearance") ?? "system"
         let savedSize = preferences.double(forKey: "readerFontSize")
@@ -157,6 +213,18 @@ final class WorkspaceModel {
     var selectedSession: DesktopSession? { sessions.first { $0.target == selectedTarget } }
     var selectedMessage: DesktopMessage? { detail?.messages.first { $0.id == selectedMessageID } }
     var selectedResource: DesktopResource? { resources.first { $0.id == selectedResourceID } }
+    var selectedAgent: DesktopAgent? {
+        agents.first { $0.provider == selectedResourceID } ?? filteredAgents.first
+    }
+    var selectedTrash: DesktopTrashSession? {
+        trashSessions.first { $0.key == selectedResourceID } ?? filteredTrash.first
+    }
+    var filteredAgents: [DesktopAgent] {
+        agents.filter { matches([$0.name, $0.provider, $0.executable ?? ""].joined(separator: " ")) }
+    }
+    var filteredTrash: [DesktopTrashSession] {
+        trashSessions.filter { matches([$0.title, $0.target].joined(separator: " ")) }
+    }
     var projects: [String] {
         var seen: Set<String> = []
         return sessions.compactMap(\.project).filter { seen.insert($0).inserted }
@@ -202,6 +270,8 @@ final class WorkspaceModel {
         switch section {
         case .sessions: filteredSessions.count
         case .processes: filteredProcesses.count
+        case .agents: filteredAgents.count
+        case .trash: filteredTrash.count
         default: filteredResources.count
         }
     }
@@ -212,6 +282,10 @@ final class WorkspaceModel {
 
     func refresh() async {
         guard let bridge else { return }
+        if section == .trash {
+            await refreshTrash()
+            return
+        }
         if section.resourceKind != nil {
             probeResults = [:]
             probeGenerations = [:]
@@ -229,6 +303,7 @@ final class WorkspaceModel {
             processes = snapshot.processes
             contextProviders = snapshot.contextProviders
             launchProviders = snapshot.launchProviders
+            agents = snapshot.agents
             warnings = snapshot.warnings
             if let target = selectedTarget, !sessions.contains(where: { $0.target == target }) {
                 selectedTarget = nil
@@ -268,6 +343,11 @@ final class WorkspaceModel {
             selectSession(target)
         } else if section == .processes {
             selectedResourceID = processes.first.map { String($0.pid) }
+        } else if section == .agents {
+            selectedResourceID = filteredAgents.first?.provider
+        } else if section == .trash {
+            selectedResourceID = nil
+            Task { await refreshTrash() }
         } else if section.resourceKind != nil {
             loadResources()
         }
@@ -327,7 +407,9 @@ final class WorkspaceModel {
     }
 
     func beginFork(message: DesktopMessage? = nil) {
-        guard let session = selectedSession, let detail, let message = message ?? selectedMessage else {
+        guard let session = selectedSession, let detail, let message = message ?? selectedMessage,
+            message.canFork
+        else {
             return
         }
         selectedMessageID = message.id
@@ -367,9 +449,132 @@ final class WorkspaceModel {
         operationInProgress = true
         defer { operationInProgress = false }
         do {
-            let prepared = try await bridge.run { try $0.prepareResume(target: target) }
-            TerminalWindows.shared.open(prepared)
+            let preview = try await bridge.run { try $0.resumePreview(target: target) }
+            guard let session = sessions.first(where: { $0.target == target }) else { return }
+            resumeDraft = ResumeDraft(session: session, preview: preview)
         } catch { operationError = describe(error) }
+    }
+
+    func launchResume(_ draft: ResumeDraft, terminal: TerminalChoice, remember: Bool) async {
+        guard let bridge, !operationInProgress else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            let target = draft.session.target
+            let prepared = try await bridge.run { try $0.prepareResume(target: target) }
+            try await TerminalLauncher.open(prepared, in: terminal)
+            if remember { defaultTerminal = terminal.rawValue }
+            resumeDraft = nil
+            if terminal != .builtin { showNotice("恢复请求已发送到 \(terminal.name)，请在终端中继续") }
+        } catch { operationError = describe(error) }
+    }
+
+    func requestDelete(_ session: DesktopSession? = nil) {
+        guard let session = session ?? selectedSession else { return }
+        deletionDraft = DeletionDraft(session: session, permanent: deletePermanently)
+    }
+
+    func deleteSession(_ draft: DeletionDraft, confirmation: String) async {
+        guard let bridge, !operationInProgress, confirmation == "y" else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            try await bridge.run {
+                try $0.deleteSession(
+                    target: draft.session.target, permanent: draft.permanent, confirmation: confirmation)
+            }
+            deletionDraft = nil
+            if selectedTarget == draft.session.target { selectSession(nil) }
+            await refresh()
+            showNotice(draft.permanent ? "会话已彻底删除" : "已移入 mena 垃圾站，可在垃圾站中恢复")
+        } catch { operationError = describe(error) }
+    }
+
+    func refreshTrash() async {
+        guard let bridge else { return }
+        let generation = UUID()
+        trashGeneration = generation
+        loadingSnapshot = true
+        defer { if trashGeneration == generation { loadingSnapshot = false } }
+        do {
+            let entries = try await bridge.run { try $0.trashSessions() }
+            guard trashGeneration == generation else { return }
+            trashSessions = entries
+            if section == .trash && !filteredTrash.contains(where: { $0.key == selectedResourceID }) {
+                selectedResourceID = filteredTrash.first?.key
+            }
+        } catch { if trashGeneration == generation && section == .trash { catalogError = describe(error) } }
+    }
+
+    func restoreTrash(_ entry: DesktopTrashSession) async {
+        guard let bridge, !operationInProgress else { return }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            let target = try await bridge.run { try $0.restoreSession(key: entry.key) }
+            await refreshTrash()
+            // Refresh the session catalog as well, without moving away from the trash.
+            let snapshot = try await bridge.run { try $0.refresh() }
+            sessions = snapshot.sessions
+            showNotice("已恢复会话：\(entry.title)")
+            selectedTarget = target
+        } catch { operationError = describe(error) }
+    }
+
+    func beginNewChat(provider: String? = nil) {
+        newChatProvider = provider
+        showNewChat = true
+    }
+
+    func chooseBackground() {
+        let panel = NSOpenPanel()
+        panel.title = "选择背景图片"
+        panel.allowedContentTypes = [.png, .jpeg, .heic, .tiff]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let source = panel.url else { return }
+        do {
+            let data = try Self.backgroundData(source)
+            guard let image = Self.decodeBackground(data) else { throw CocoaError(.fileReadCorruptFile) }
+            try FileManager.default.createDirectory(at: desktopDirectory, withIntermediateDirectories: true)
+            let path = desktopDirectory.appendingPathComponent("background.image")
+            try data.write(to: path, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            backgroundPath = path.path
+            backgroundImage = image
+            if surfaceOpacity == 1 { surfaceOpacity = 0.78 }
+        } catch { operationError = "无法载入背景图片，请选择 20 MB 以内的有效图片。" }
+    }
+
+    func clearBackground() {
+        backgroundPath = ""
+        backgroundImage = nil
+        try? FileManager.default.removeItem(at: desktopDirectory.appendingPathComponent("background.image"))
+    }
+
+    private static func backgroundData(_ url: URL) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: 20 * 1024 * 1024 + 1) ?? Data()
+        guard data.count <= 20 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+        return data
+    }
+
+    private static func decodeBackground(_ data: Data) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let image = CGImageSourceCreateThumbnailAtIndex(
+                source, 0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 4096,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                ] as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: image, size: .zero)
+    }
+
+    private static func loadBackground(_ path: String) -> NSImage? {
+        guard !path.isEmpty, let data = try? backgroundData(URL(fileURLWithPath: path)) else { return nil }
+        return decodeBackground(data)
     }
 
     func startNewChat(provider: String, directory: String) async {
@@ -601,6 +806,14 @@ final class WorkspaceModel {
         } else if section.resourceKind != nil {
             if !filteredResources.contains(where: { $0.id == selectedResourceID }) {
                 selectResource(filteredResources.first?.id)
+            }
+        } else if section == .agents {
+            if !filteredAgents.contains(where: { $0.provider == selectedResourceID }) {
+                selectedResourceID = filteredAgents.first?.provider
+            }
+        } else if section == .trash {
+            if !filteredTrash.contains(where: { $0.key == selectedResourceID }) {
+                selectedResourceID = filteredTrash.first?.key
             }
         } else if !filteredProcesses.contains(where: { String($0.pid) == selectedResourceID }) {
             selectedResourceID = filteredProcesses.first.map { String($0.pid) }

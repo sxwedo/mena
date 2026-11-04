@@ -218,6 +218,7 @@ impl ProviderAdapter {
         home: &Path,
         selected: &AgentSession,
         mut files: BTreeSet<PathBuf>,
+        permanent: bool,
     ) -> Result<DeletionSummary> {
         validate_storage_identifier(&selected.id, "session ID")?;
         let mut directories = BTreeSet::new();
@@ -239,7 +240,12 @@ impl ProviderAdapter {
 
         let roots = self.storage_roots(home);
         validate_deletion_targets(&roots, &files, &directories)?;
-        let mut trash = super::trash::TrashBatch::create(home, selected.kind.slug(), &selected.id)?;
+        let mut trash = super::trash::TrashBatch::create(
+            home,
+            selected.kind.slug(),
+            &selected.id,
+            selected.title.clone(),
+        )?;
         let index_records = match self {
             Self::Codex => delete_codex_index_records(home, &selected.id)?,
             Self::ClaudeCode => delete_claude_index_records(home, &selected.id)?,
@@ -264,11 +270,11 @@ impl ProviderAdapter {
         for directory in directories {
             remove_tree_if_present(&directory, &mut summary, &mut trash)?;
         }
-        super::trash::finish(trash)?;
+        super::trash::finish(trash, permanent)?;
         Ok(summary)
     }
 
-    fn storage_roots(self, home: &Path) -> Vec<PathBuf> {
+    pub(super) fn storage_roots(self, home: &Path) -> Vec<PathBuf> {
         match self {
             Self::Codex => vec![
                 home.join(".codex/sessions"),

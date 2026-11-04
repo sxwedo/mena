@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct MessageBody: View {
+    @Environment(\.menaPalette) private var palette
     let content: String
     let query: String
     var raw = false
@@ -64,7 +65,7 @@ struct MessageBody: View {
             }
             switch block.kind {
             case .paragraph:
-                text(block.text).foregroundStyle(block.quoted ? Palette.muted : Palette.text)
+                text(block.text).foregroundStyle(block.quoted ? palette.muted : palette.text)
             case .heading(let level):
                 text(block.text).font(.system(size: headingSize(level), weight: .semibold))
                     .padding(.top, 6).accessibilityAddTraits(.isHeader)
@@ -100,7 +101,7 @@ struct MessageBody: View {
                     Label("复制", systemImage: "doc.on.doc")
                 }.buttonStyle(.plain).help("复制代码")
             }
-            .font(.system(size: 11)).foregroundStyle(Palette.muted)
+            .font(.system(size: 11)).foregroundStyle(palette.muted)
             .padding(.horizontal, 14).padding(.vertical, 9)
             Divider()
             ScrollView(.horizontal) {
@@ -113,8 +114,8 @@ struct MessageBody: View {
                 .textSelection(.enabled).padding(14)
             }
         }
-        .background(Palette.code, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.line))
+        .background(palette.code, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.line))
     }
 
     private func tableView(_ table: MarkdownTable) -> some View {
@@ -139,8 +140,8 @@ struct MessageBody: View {
                     .overlay(alignment: .bottom) { Divider() }
                 }
             }
-            .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Palette.line))
+            .background(palette.canvas, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(palette.line))
         }
     }
 

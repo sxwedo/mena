@@ -37,6 +37,8 @@ The library's install name is set at link time.
 - Select a message by clicking its card or using the arrow keys while the
   transcript is focused. A mint marker, outline, and fork-origin badge indicate
   the selection. Search hits use a separate yellow highlight.
+  USER bubbles align right and Agent bubbles align left. Only user and assistant
+  messages can start a fork; tool, skill, system, and error records cannot.
 - Session details initially show user and assistant messages. The menu can
   reveal tool and system records. Titles are mena-owned overlays; renaming
   never changes provider transcripts.
@@ -51,6 +53,8 @@ The library's install name is set at link time.
 - Resource pages prioritize readable content. Source details are expandable;
   Skill frontmatter stays available in source mode instead of becoming a heading.
   MCP pages show connection and probe summaries first; raw metadata is expandable.
+- Agents lists built-in and configured custom Agents with installation status,
+  executable location, official documentation, and actions to start or browse chats.
 - Skills, MCP registrations, and memories use the same catalogs and bounded
   reads as the CLI. Select a project to include its project-level resources.
   MCP discovery is static; only the explicit **Probe service** action can
@@ -66,6 +70,27 @@ and `⌘Return` continues the selected session. `⌘⇧L` toggles focused readin
 hiding the two navigation columns. The app icon and sidebar use the
 README artwork; the bundled PNG is its static first frame. Icon framing focuses
 on the head and shoulders so the portrait fills the available space.
+
+Settings offers Mint, Ocean, Violet, Amber, and Graphite themes. Import a local
+PNG, JPEG, HEIC, or TIFF background, then adjust image strength, blur, and panel
+opacity independently. Text stays opaque. Imports are limited to 20 MB,
+downsampled to 4096 pixels for display, and copied privately into mena's desktop
+state directory. `⌘⌥S` collapses/restores just the sidebar; its state is remembered.
+
+## Delete and restore
+
+Delete from a session row's context menu or the detail menu. Settings selects
+the default: move to **mena Trash** (initial default), or permanently remove
+native files and index records. The dialog freezes that choice and requires
+the exact lowercase `y` before enabling deletion. Current live evidence is
+rechecked before either mode; unconfirmed or ambiguous associations protect the
+provider's complete catalog.
+
+Trash lists recoverable sessions and restores their native artifacts and saved
+mena display titles. Restores refuse existing destinations and paths outside the
+provider store. Permanent deletion leaves no recoverable entry; failed native
+cleanup retains a recovery manifest for artifacts already moved. CLI deletion
+continues to use trash independently of the desktop preference.
 
 ## Export Markdown
 
@@ -83,12 +108,23 @@ Agent and a project directory. The app reuses the CLI's native fresh-launch
 argv and opens a terminal. The Agent creates its own session after launch;
 no placeholder conversation is added to the catalog.
 
-Continue opens a separate terminal window using SwiftTerm and the native
-Agent executable. The program, argv, and working directory are passed
+Continue first shows the exact native resume command and working directory,
+with a copy action and terminal picker. Choose mena's built-in terminal,
+Terminal, iTerm2, Ghostty, or WezTerm when installed, and optionally remember
+the choice. Settings can change the default resume terminal. Ghostty may ask
+for execution confirmation in its own window; mena does not bypass this prompt.
+External terminals own their launched processes after dispatch, so exiting mena
+does not stop them. New chats and forks use mena's built-in terminal.
+The command remains visible and copyable when an Agent or project directory is
+unavailable; direct launch stays disabled until its prerequisites are restored.
+
+The program, argv, and working directory are passed
 separately, without a shell command string. Standard user and Homebrew
 binary directories supplement Finder's sparse PATH. Closing a running
-terminal or quitting the app requires confirmation before stopping its
-owned processes.
+built-in terminal or quitting the app requires confirmation before stopping its
+owned processes. External resume uses a signed native helper with a private,
+single-use JSON ticket; the helper calls `exec` with the argument array and removes
+its ticket. Display/copy quoting is never used for execution.
 
 The fork sheet distinguishes two methods:
 
@@ -143,6 +179,6 @@ These checks exercise AppKit layout and progress indicators that model tests do
 not instantiate. Native controls use resolved tints to avoid dynamic-color
 constraint loops.
 
-This version supports browsing, renaming, resuming, message forks, and Markdown
-export. Trash/restore and configuration mutations remain available through
-the CLI/TUI.
+This version supports browsing, renaming, resuming, message forks, Markdown
+export, deletion, and trash restoration. Configuration mutations remain available
+through the CLI/TUI.

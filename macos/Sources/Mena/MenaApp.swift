@@ -19,6 +19,7 @@ struct MenaApp: App {
     var body: some Scene {
         Window("mena", id: "workspace") {
             WorkspaceView(model: model)
+                .modifier(AppearanceScope(theme: model.theme, surfaceOpacity: model.surfaceOpacity))
                 .preferredColorScheme(
                     model.appearance == "dark" ? .dark : model.appearance == "light" ? .light : nil
                 )
@@ -47,7 +48,7 @@ struct MenaApp: App {
                 Button("搜索消息") { model.showFind = true }.keyboardShortcut("f")
                     .disabled(model.section != .sessions || model.detail == nil)
                 Button("从选中消息分叉…") { model.beginFork() }.keyboardShortcut("f", modifiers: [.command, .shift])
-                    .disabled(model.section != .sessions || model.selectedMessage == nil)
+                    .disabled(model.section != .sessions || model.selectedMessage?.canFork != true)
                 Divider()
                 Button("继续对话") { Task { await model.resume() } }.keyboardShortcut(
                     .return, modifiers: .command
@@ -62,20 +63,9 @@ struct MenaApp: App {
             }
         }
         Settings {
-            Form {
-                Picker("外观", selection: $model.appearance) {
-                    Text("跟随系统").tag("system")
-                    Text("浅色").tag("light")
-                    Text("深色").tag("dark")
-                }
-                Toggle("显示 SubAgents", isOn: $model.showSubagents)
-                LabeledContent("阅读字号", value: "\(Int(model.readerFontSize)) pt")
-                Slider(value: $model.readerFontSize, in: 12...20, step: 1).accessibilityLabel("阅读字号")
-                Text("会话与资源保留在各 Agent 的原生存储中。")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            .formStyle(.grouped).frame(width: 400)
-            .padding()
+            SettingsView(model: model).modifier(AppearanceScope(theme: model.theme))
+                .preferredColorScheme(
+                    model.appearance == "dark" ? .dark : model.appearance == "light" ? .light : nil)
         }
     }
 }

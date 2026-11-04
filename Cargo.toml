@@ -17,6 +17,11 @@ desktop = ["dep:uniffi"]
 desktop-bindgen = ["desktop", "uniffi/cli"]
 
 [[bin]]
+name = "mena-terminal-launch"
+path = "macos/terminal-launch.rs"
+required-features = ["desktop"]
+
+[[bin]]
 name = "mena-uniffi-bindgen"
 path = "macos/bindgen.rs"
 required-features = ["desktop-bindgen"]

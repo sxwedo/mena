@@ -18,7 +18,8 @@
 Agent Skill，以及审计 MCP 注册。无需守护进程、账号或远程数据存储。
 
 也提供原生 macOS 应用：在 macOS 14 及以上、安装 Xcode 26 / Swift 6.2 或更新版本后，
-运行 `mise run gui`。支持原生 Agent 新对话、Markdown 阅读、消息分叉和会话导出，详见 [桌面版指南](docs/desktop_CN.md)。
+运行 `mise run gui`。支持 Agent 新对话、Markdown、消息分叉、恢复终端选择、主题背景及会话垃圾站，
+详见 [桌面版指南](docs/desktop_CN.md)。
 
 ## 安装
 

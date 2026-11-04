@@ -20,7 +20,8 @@ without a daemon, account, or remote data store.
 
 A native macOS app is also available from source: run `mise run gui` on macOS
 14 or later with Xcode 26 / Swift 6.2 or newer. Start native Agent chats, browse
-rendered Markdown, fork from messages, and export sessions. See [the desktop guide](docs/desktop.md).
+rendered Markdown, fork from messages, choose resume terminals, customize appearance,
+and manage session trash. See [the desktop guide](docs/desktop.md).
 
 ## Install
 

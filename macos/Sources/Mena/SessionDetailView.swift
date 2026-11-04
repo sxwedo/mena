@@ -3,6 +3,7 @@ import MenaCore
 import SwiftUI
 
 struct SessionDetailView: View {
+    @Environment(\.menaPalette) private var palette
     @Bindable var model: WorkspaceModel
     @FocusState private var findFocused: Bool
 
@@ -48,14 +49,14 @@ struct SessionDetailView: View {
             HStack(spacing: 8) {
                 ProviderMark(provider: session.provider, size: 23)
                 Text(providerName(session.provider)).font(.system(size: 11, weight: .medium))
-                Text("/").foregroundStyle(Palette.faint)
+                Text("/").foregroundStyle(palette.faint)
                 Text(session.project.map(projectName) ?? "无项目目录").font(.system(size: 11)).foregroundStyle(
-                    Palette.muted
+                    palette.muted
                 ).lineLimit(1)
                 if session.isSubagent {
-                    SmallBadge(text: "SubAgent", color: Palette.accent)
+                    SmallBadge(text: "SubAgent", color: palette.accent)
                 } else if session.parentTarget != nil {
-                    SmallBadge(text: "分支", color: Palette.accent, symbol: "arrow.triangle.branch")
+                    SmallBadge(text: "分支", color: palette.accent, symbol: "arrow.triangle.branch")
                 }
                 Spacer(minLength: 8)
                 IconButton(symbol: "magnifyingglass", label: "搜索消息 ⌘F") { model.showFind.toggle() }
@@ -66,6 +67,8 @@ struct SessionDetailView: View {
                 IconButton(symbol: "sidebar.right", label: "会话信息") { model.showInspector.toggle() }
                 Menu {
                     Button("重命名会话…", systemImage: "pencil") { model.renameTarget = session }
+                    Button("删除会话…", systemImage: "trash", role: .destructive) { model.requestDelete(session) }
+                        .disabled(session.active || model.operationInProgress)
                     Toggle("显示 Markdown 源码", isOn: $model.showRawMarkdown)
                     Toggle("显示工具与系统记录", isOn: $model.showAllMessages)
                     Picker("阅读字号", selection: $model.readerFontSize) {
@@ -81,7 +84,7 @@ struct SessionDetailView: View {
                     Image(systemName: "ellipsis").font(.system(size: 15)).frame(width: 28, height: 28)
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundStyle(
-                    Palette.muted
+                    palette.muted
                 ).help("更多操作")
             }
             Text(session.title).font(.system(size: 23, weight: .semibold)).tracking(-0.65)
@@ -89,12 +92,12 @@ struct SessionDetailView: View {
             HStack(spacing: 8) {
                 if let name = model.detail?.messages.last(where: { $0.model != nil })?.model {
                     Text(name).lineLimit(1).truncationMode(.middle)
-                    Text("·").foregroundStyle(Palette.faint)
+                    Text("·").foregroundStyle(palette.faint)
                 }
                 Text("\(model.visibleMessages.count) 条消息").fixedSize()
                 if session.active {
-                    Circle().fill(Palette.accent).frame(width: 5, height: 5)
-                    Text("运行中").foregroundStyle(Palette.accent)
+                    Circle().fill(palette.accent).frame(width: 5, height: 5)
+                    Text("运行中").foregroundStyle(palette.accent)
                 }
                 Spacer(minLength: 12)
                 Button {
@@ -102,21 +105,21 @@ struct SessionDetailView: View {
                 } label: {
                     Label("继续对话", systemImage: "terminal")
                 }.buttonStyle(ActionButtonStyle(prominent: true))
-                    .disabled(model.operationInProgress || session.project == nil)
+                    .disabled(model.operationInProgress)
                     .help("在独立终端中运行原生 Agent ⌘Return")
-            }.font(.system(size: 11)).foregroundStyle(Palette.muted)
+            }.font(.system(size: 11)).foregroundStyle(palette.muted)
         }.padding(.horizontal, 30).padding(.top, 23).padding(.bottom, 22)
-            .background(Palette.canvas)
-            .overlay(alignment: .bottom) { Rectangle().fill(Palette.line).frame(height: 1) }
+            .background(palette.canvas)
+            .overlay(alignment: .bottom) { Rectangle().fill(palette.line).frame(height: 1) }
     }
 
     private var findBar: some View {
         HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").foregroundStyle(Palette.faint)
+            Image(systemName: "magnifyingglass").foregroundStyle(palette.faint)
             TextField("在会话中查找", text: $model.findText).textFieldStyle(.plain).focused($findFocused)
                 .accessibilityIdentifier("message-search").onSubmit { selectNextMatch() }
             if !model.findText.isEmpty {
-                Text("\(matchingMessageIDs.count) 条消息").font(.system(size: 11)).foregroundStyle(Palette.muted)
+                Text("\(matchingMessageIDs.count) 条消息").font(.system(size: 11)).foregroundStyle(palette.muted)
             }
             IconButton(symbol: "chevron.down", label: "下一个匹配") { selectNextMatch() }.disabled(
                 matchingMessageIDs.isEmpty)
@@ -124,7 +127,7 @@ struct SessionDetailView: View {
                 model.showFind = false
                 model.findText = ""
             }
-        }.font(.system(size: 13)).padding(.horizontal, 29).padding(.vertical, 8).background(Palette.list)
+        }.font(.system(size: 13)).padding(.horizontal, 29).padding(.vertical, 8).background(palette.list)
     }
 
     private func transcript(_ session: DesktopSession) -> some View {
@@ -160,19 +163,19 @@ struct SessionDetailView: View {
 
     private var footer: some View {
         HStack(spacing: 13) {
-            Image(systemName: "arrow.triangle.branch").font(.system(size: 16)).foregroundStyle(Palette.accent)
+            Image(systemName: "arrow.triangle.branch").font(.system(size: 16)).foregroundStyle(palette.accent)
                 .frame(width: 34, height: 34).background(
-                    Palette.selected, in: RoundedRectangle(cornerRadius: 11))
+                    palette.selected, in: RoundedRectangle(cornerRadius: 11))
             VStack(alignment: .leading, spacing: 5) {
                 if let message = model.selectedMessage,
                     let index = model.visibleMessages.firstIndex(where: { $0.id == message.id })
                 {
                     Text("第 \(index + 1) 条消息").font(.system(size: 12, weight: .semibold))
-                    Text(message.nativeFork ? "可保留原生历史" : "携带上下文开始新对话")
-                        .font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(1)
+                    Text(!message.canFork ? "工具与系统记录不能分叉" : message.nativeFork ? "可保留原生历史" : "携带上下文开始新对话")
+                        .font(.system(size: 11)).foregroundStyle(palette.muted).lineLimit(1)
                 } else {
                     Text("选择你的分叉起点").font(.system(size: 12, weight: .medium))
-                    Text("点击消息，或使用方向键").font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    Text("点击消息，或使用方向键").font(.system(size: 11)).foregroundStyle(palette.muted)
                 }
             }
             Spacer(minLength: 2)
@@ -188,14 +191,14 @@ struct SessionDetailView: View {
                 Label("从这里分叉", systemImage: "arrow.up.right")
             }
             .buttonStyle(ActionButtonStyle(prominent: true)).disabled(
-                model.selectedMessage == nil || model.operationInProgress
+                model.selectedMessage?.canFork != true || model.operationInProgress
             )
             .accessibilityIdentifier("fork-message").help("从选中消息分叉 ⌘⇧F")
-        }.padding(15).background(Palette.elevated, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Palette.line))
+        }.padding(15).background(palette.elevated, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(palette.line))
             .shadow(color: .black.opacity(0.06), radius: 18, y: 5)
             .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 20)
-            .frame(maxWidth: 860).frame(maxWidth: .infinity).background(Palette.canvas)
+            .frame(maxWidth: 860).frame(maxWidth: .infinity).background(palette.canvas)
     }
 
     private var matchingMessageIDs: [String] {
@@ -212,6 +215,7 @@ struct SessionDetailView: View {
 }
 
 private struct MessageCard: View {
+    @Environment(\.menaPalette) private var palette
     let message: DesktopMessage
     let provider: String
     let selected: Bool
@@ -228,35 +232,49 @@ private struct MessageCard: View {
     private var dialogue: Bool { ["USER", "ASSISTANT"].contains(message.role) }
 
     var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            if message.role == "USER" { Spacer(minLength: 52) }
+            bubble.frame(maxWidth: 710)
+            if message.role != "USER" { Spacer(minLength: 52) }
+        }.frame(maxWidth: .infinity, alignment: message.role == "USER" ? .trailing : .leading)
+    }
+
+    private var bubble: some View {
         VStack(alignment: .leading, spacing: 17) {
             HStack(spacing: 8) {
                 if message.role == "ASSISTANT" {
                     ProviderMark(provider: provider, size: 27)
                 } else {
                     Image(systemName: message.role == "USER" ? "person.fill" : "terminal")
-                        .font(.system(size: 11)).foregroundStyle(Palette.muted).frame(width: 27, height: 27)
-                        .background(Palette.text.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+                        .font(.system(size: 11)).foregroundStyle(palette.muted).frame(width: 27, height: 27)
+                        .background(palette.text.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
                 }
                 Text(
                     message.role == "USER"
-                        ? "你" : message.role == "ASSISTANT" ? providerName(provider) : roleName(message.role)
+                        ? "USER"
+                        : message.role == "ASSISTANT" ? providerName(provider) : roleName(message.role)
                 )
                 .font(.system(size: 12, weight: .semibold))
-                if selected { SmallBadge(text: "分叉起点", color: Palette.accent, symbol: "checkmark") }
+                if selected {
+                    SmallBadge(
+                        text: message.canFork ? "分叉起点" : "已选中", color: palette.accent, symbol: "checkmark")
+                }
                 Spacer(minLength: 4)
                 if let timestamp = message.timestamp {
-                    Text(messageTime(timestamp)).font(.system(size: 10)).foregroundStyle(Palette.faint)
+                    Text(messageTime(timestamp)).font(.system(size: 10)).foregroundStyle(palette.faint)
                 }
                 HStack(spacing: 0) {
                     IconButton(symbol: "doc.on.doc", label: "复制完整消息") { copy() }
-                    IconButton(symbol: "arrow.triangle.branch", label: "从此消息分叉", action: fork)
+                    if message.canFork {
+                        IconButton(symbol: "arrow.triangle.branch", label: "从此消息分叉", action: fork)
+                    }
                 }.opacity(hovered || selected ? 1 : 0.2)
             }
             if message.role == "USER", message.content.count > 1600, !longMessageExpanded, query.isEmpty {
                 Text(String(message.content.prefix(500))).font(.system(size: fontSize)).lineSpacing(5)
-                    .lineLimit(5).textSelection(.enabled).foregroundStyle(Palette.text)
+                    .lineLimit(5).textSelection(.enabled).foregroundStyle(palette.text)
                 Button("展开完整消息") { longMessageExpanded = true }.font(.system(size: 12))
-                    .buttonStyle(.plain).foregroundStyle(Palette.accent)
+                    .buttonStyle(.plain).foregroundStyle(palette.accent)
             } else if dialogue || expanded {
                 MessageBody(content: message.content, query: query, raw: raw || !dialogue, fontSize: fontSize)
             } else {
@@ -264,28 +282,29 @@ private struct MessageCard: View {
                     expanded = true
                 } label: {
                     Label(String(message.content.prefix(120)), systemImage: "chevron.right")
-                        .font(.system(size: 12)).lineLimit(2).foregroundStyle(Palette.muted)
+                        .font(.system(size: 12)).lineLimit(2).foregroundStyle(palette.muted)
                 }.buttonStyle(.plain)
             }
             if !dialogue && expanded {
                 Button("收起记录") { expanded = false }.font(.system(size: 11)).buttonStyle(.plain)
-                    .foregroundStyle(Palette.muted)
+                    .foregroundStyle(palette.muted)
             }
         }.padding(21).frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                selected ? Palette.accent.opacity(0.045) : message.role == "USER" ? Palette.list : .clear,
+                message.role == "USER"
+                    ? palette.selected : selected ? palette.accent.opacity(0.045) : palette.elevated,
                 in: RoundedRectangle(cornerRadius: 15)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 15).strokeBorder(
-                    selected ? Palette.accent.opacity(0.25) : .clear)
+                    selected ? palette.accent.opacity(0.25) : palette.line)
             )
             .overlay(alignment: .leading) {
-                if selected { Capsule().fill(Palette.accent).frame(width: 2).padding(.vertical, 20) }
+                if selected { Capsule().fill(palette.accent).frame(width: 2).padding(.vertical, 20) }
             }
             .contentShape(Rectangle()).onTapGesture(perform: select).onHover { hovered = $0 }
             .contextMenu {
-                Button("从这里分叉…", systemImage: "arrow.triangle.branch", action: fork)
+                if message.canFork { Button("从这里分叉…", systemImage: "arrow.triangle.branch", action: fork) }
                 Button("复制消息", systemImage: "doc.on.doc") { copy() }
             }
             .accessibilityElement(children: .contain)
@@ -299,6 +318,7 @@ private struct MessageCard: View {
     }
 }
 private struct SessionInspector: View {
+    @Environment(\.menaPalette) private var palette
     @Bindable var model: WorkspaceModel
     let session: DesktopSession
 
@@ -325,7 +345,7 @@ private struct SessionInspector: View {
                 Text("用量仅展示 provider 持久化的精确值。").font(.system(size: 10)).foregroundStyle(.tertiary)
                     .lineSpacing(4)
             }.padding(20)
-        }.background(Palette.sidebar)
+        }.background(palette.sidebar)
     }
 
     private var fields: [(String, String)] {

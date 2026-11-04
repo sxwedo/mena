@@ -45,6 +45,188 @@ fn fresh_agent_preparation_reuses_native_argv_and_validates_the_project() {
 }
 
 #[test]
+fn trash_restores_titles_and_permanent_delete_leaves_other_recovery_entries() {
+    let home = tempfile::tempdir().expect("home");
+    let store = home.path().join(".codex/sessions");
+    std::fs::create_dir_all(&store).expect("store");
+    for id in ["keep", "restore", "permanent"] {
+        std::fs::write(
+            store.join(format!("{id}.jsonl")),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/tmp\"}}}}\n"
+            ),
+        )
+        .expect("fixture");
+    }
+    let client = DesktopClient {
+        home: home.path().to_owned(),
+        settings: Settings::default(),
+        catalog: Mutex::new(None),
+        search_generation: AtomicU64::new(0),
+    };
+    assert!(
+        client
+            .delete_session("codex:keep".to_owned(), true, "Y".to_owned())
+            .is_err()
+    );
+    assert!(store.join("keep.jsonl").exists());
+    let catalog = SessionCatalog::scan(home.path()).expect("catalog");
+    catalog
+        .set_title(
+            resolve(&catalog, "codex:restore").expect("session"),
+            "Custom display title",
+        )
+        .expect("title");
+    let catalog = SessionCatalog::scan(home.path()).expect("updated catalog");
+    for id in ["keep", "restore"] {
+        catalog
+            .delete_session(resolve(&catalog, &format!("codex:{id}")).expect("session"))
+            .expect("trash");
+    }
+    catalog
+        .delete_session_permanently(resolve(&catalog, "codex:permanent").expect("session"))
+        .expect("permanent delete");
+    assert!(!store.join("permanent.jsonl").exists());
+    let entries = client.trash_sessions().expect("trash list");
+    assert_eq!(entries.len(), 2);
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.target == "codex:permanent")
+    );
+    let entry = entries
+        .iter()
+        .find(|entry| entry.target == "codex:restore")
+        .expect("recoverable");
+    assert_eq!(entry.title, "Custom display title");
+    client.restore_session(entry.key.clone()).expect("restore");
+    assert!(store.join("restore.jsonl").exists());
+    let restored = SessionCatalog::scan(home.path()).expect("restored catalog");
+    assert_eq!(
+        resolve(&restored, "codex:restore")
+            .expect("restored")
+            .title
+            .as_deref(),
+        Some("Custom display title")
+    );
+    assert_eq!(client.trash_sessions().expect("remaining").len(), 1);
+}
+
+#[test]
+fn tools_system_and_error_records_cannot_create_context_forks() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join(".codex/sessions/test.jsonl");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &path,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"test\",\"cwd\":\"/tmp\"}}\n",
+    )
+    .expect("fixture");
+    let catalog = SessionCatalog::scan(home.path()).expect("catalog");
+    let mut detail = SessionDetail {
+        session: resolve(&catalog, "codex:test").expect("session").clone(),
+        messages: Vec::new(),
+    };
+    for kind in [
+        SessionMessageKind::ToolCall,
+        SessionMessageKind::ToolResult,
+        SessionMessageKind::System,
+        SessionMessageKind::Skill,
+        SessionMessageKind::Error,
+    ] {
+        detail.messages = vec![message(kind, "must not fork")];
+        assert!(!kind.can_fork());
+        assert!(prepare_message_fork(&detail, 0, &AgentKind::Codex).is_err());
+        assert!(catalog.fork_native(&detail, 0, None).is_err());
+    }
+}
+
+#[test]
+fn both_deletion_modes_fail_closed_for_an_unconfirmed_live_provider() {
+    let home = tempfile::tempdir().expect("home");
+    let source = home.path().join(".codex/sessions/protected.jsonl");
+    std::fs::create_dir_all(source.parent().expect("parent")).expect("store");
+    let record =
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"protected\",\"cwd\":\"/tmp\"}}\n";
+    std::fs::write(&source, record).expect("fixture");
+    let client = DesktopClient {
+        home: home.path().to_owned(),
+        settings: Settings::default(),
+        catalog: Mutex::new(None),
+        search_generation: AtomicU64::new(0),
+    };
+    let preview = client
+        .resume_preview("codex:protected".to_owned())
+        .expect("resume command");
+    assert_eq!(preview.launch.arguments, ["resume", "protected"]);
+    assert_eq!(preview.launch.directory, "/tmp");
+    let live = crate::process::LiveAgent {
+        kind: AgentKind::Codex,
+        process: crate::process::ProcessSnapshot {
+            pid: u32::MAX,
+            parent_pid: None,
+            executable: "/bin/codex".into(),
+            command: vec!["codex".to_owned()],
+            cwd: None,
+            started_at: 0,
+            run_time: 0,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            status: "Running".to_owned(),
+        },
+    };
+    for permanent in [false, true] {
+        assert!(
+            client
+                .delete_with_live_agents("codex:protected", permanent, std::slice::from_ref(&live))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("still intact"),
+            record
+        );
+        assert!(client.trash_sessions().expect("trash").is_empty());
+    }
+}
+
+#[test]
+fn restore_rejects_manifest_destination_and_stored_path_escapes_before_moving_files() {
+    let home = tempfile::tempdir().expect("home");
+    let outside = tempfile::tempdir().expect("outside");
+    let source = home.path().join(".codex/sessions/day/safe.jsonl");
+    std::fs::create_dir_all(source.parent().expect("parent")).expect("store");
+    std::fs::write(
+        &source,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"safe\",\"cwd\":\"/tmp\"}}\n",
+    )
+    .expect("fixture");
+    let catalog = SessionCatalog::scan(home.path()).expect("catalog");
+    catalog
+        .delete_session(resolve(&catalog, "codex:safe").expect("session"))
+        .expect("trash");
+    let entry = crate::session::list_trashed_sessions(home.path())
+        .expect("entries")
+        .remove(0);
+    let manifest = home
+        .path()
+        .join(".config/mena/trash/sessions")
+        .join(&entry.key)
+        .join("session.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("decode");
+    value["moved"][0]["from"] = serde_json::json!(outside.path().join("escape.jsonl"));
+    std::fs::write(&manifest, serde_json::to_vec(&value).expect("encode")).expect("tamper");
+    assert!(crate::session::restore_session(home.path(), &entry.key).is_err());
+    assert!(!outside.path().join("escape.jsonl").exists());
+    value["moved"][0]["from"] = serde_json::json!(source);
+    value["moved"][0]["stored"] = serde_json::json!("../../escape");
+    std::fs::write(&manifest, serde_json::to_vec(&value).expect("encode")).expect("tamper");
+    assert!(crate::session::restore_session(home.path(), &entry.key).is_err());
+    assert!(!source.exists());
+    assert!(manifest.exists());
+}
+
+#[test]
 fn desktop_export_preserves_scope_private_permissions_and_source() {
     let home = tempfile::tempdir().expect("home");
     let source = home.path().join(".codex/sessions/export.jsonl");

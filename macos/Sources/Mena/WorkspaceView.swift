@@ -2,6 +2,7 @@ import MenaCore
 import SwiftUI
 
 struct WorkspaceView: View {
+    @Environment(\.menaPalette) private var palette
     @Bindable var model: WorkspaceModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var focusedReading = false
@@ -13,8 +14,10 @@ struct WorkspaceView: View {
                 detailPane
             } else {
                 HSplitView {
-                    SidebarView(model: model)
-                        .frame(minWidth: 196, idealWidth: 216, maxWidth: 260)
+                    if !model.sidebarCollapsed {
+                        SidebarView(model: model)
+                            .frame(minWidth: 196, idealWidth: 216, maxWidth: 260)
+                    }
                     CatalogView(model: model)
                         .frame(minWidth: 280, idealWidth: 324, maxWidth: 420)
                     detailPane
@@ -23,13 +26,22 @@ struct WorkspaceView: View {
             }
         }
         .frame(minWidth: 1040, minHeight: 650)
-        .foregroundStyle(Palette.text).modifier(AccentTint())
+        .background { WorkspaceBackground(model: model) }
+        .background(WindowTransparency())
+        .foregroundStyle(palette.text).modifier(AccentTint())
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                IconButton(symbol: "sidebar.left", label: model.sidebarCollapsed ? "展开侧边栏 ⌘⌥S" : "收起侧边栏 ⌘⌥S")
+                {
+                    focusedReading = false
+                    model.sidebarCollapsed.toggle()
+                }.keyboardShortcut("s", modifiers: [.command, .option])
+            }
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 7) {
-                    Circle().fill(Palette.accent).frame(width: 5, height: 5)
+                    Circle().fill(palette.accent).frame(width: 5, height: 5)
                     Text(model.project.map(projectName) ?? "本地工作区")
-                }.font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
+                }.font(.system(size: 11, weight: .medium)).foregroundStyle(palette.muted)
             }
             ToolbarItem(placement: .automatic) {
                 IconButton(
@@ -63,20 +75,22 @@ struct WorkspaceView: View {
         .overlay(alignment: .bottom) {
             if let notice = model.notice {
                 HStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.accent)
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.accent)
                     Text(notice)
                     if let url = model.noticeURL {
                         Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                            .buttonStyle(.plain).foregroundStyle(Palette.accent)
+                            .buttonStyle(.plain).foregroundStyle(palette.accent)
                     }
                 }.font(.system(size: 12)).padding(.horizontal, 18).padding(.vertical, 13)
-                    .background(Palette.elevated, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Palette.line))
+                    .background(palette.elevated, in: Capsule())
+                    .overlay(Capsule().strokeBorder(palette.line))
                     .shadow(color: .black.opacity(0.12), radius: 20, y: 8)
                     .padding(.bottom, model.section == .sessions ? 100 : 24)
             }
         }
         .sheet(item: $model.forkDraft) { ForkSheet(model: model, draft: $0) }
+        .sheet(item: $model.resumeDraft) { ResumeSheet(model: model, draft: $0) }
+        .sheet(item: $model.deletionDraft) { DeleteSessionSheet(model: model, draft: $0) }
         .sheet(isPresented: $model.showNewChat) { NewChatSheet(model: model) }
         .sheet(
             isPresented: Binding(
@@ -106,13 +120,16 @@ struct WorkspaceView: View {
             switch model.section {
             case .sessions: SessionDetailView(model: model)
             case .processes: ProcessDetailView(model: model)
+            case .agents: AgentDetailView(model: model)
+            case .trash: TrashDetailView(model: model)
             default: ResourceDetailView(model: model)
             }
-        }.background(Palette.canvas)
+        }.background(palette.canvas)
     }
 }
 
 private struct SidebarView: View {
+    @Environment(\.menaPalette) private var palette
     @Bindable var model: WorkspaceModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var allProjects = false
@@ -123,7 +140,7 @@ private struct SidebarView: View {
                 BrandMark(size: 54)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("mena").font(.system(size: 25, weight: .semibold, design: .rounded)).tracking(-1)
-                    Text("让工作接着发生").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    Text("让工作接着发生").font(.system(size: 10)).foregroundStyle(palette.muted)
                 }
                 Spacer(minLength: 0)
             }.padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 22)
@@ -143,9 +160,9 @@ private struct SidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     sectionLabel("工作").padding(.top, 24)
-                    ForEach([WorkspaceSection.sessions, .processes]) { navigation($0) }
+                    ForEach([WorkspaceSection.sessions, .processes, .trash]) { navigation($0) }
                     sectionLabel("资源").padding(.top, 23)
-                    ForEach([WorkspaceSection.skills, .mcp, .memories]) { navigation($0) }
+                    ForEach([WorkspaceSection.agents, .skills, .mcp, .memories]) { navigation($0) }
                     HStack {
                         sectionLabel("最近项目")
                         Spacer()
@@ -164,30 +181,30 @@ private struct SidebarView: View {
                         Button(allProjects ? "收起项目" : "查看全部 \(model.projects.count) 个项目") {
                             allProjects.toggle()
                         }
-                        .font(.system(size: 11)).foregroundStyle(Palette.muted).buttonStyle(.plain)
+                        .font(.system(size: 11)).foregroundStyle(palette.muted).buttonStyle(.plain)
                         .padding(.leading, 12).padding(.top, 8)
                     }
                     if model.projects.isEmpty {
-                        Text("选择项目以浏览本地工作").font(.system(size: 11)).foregroundStyle(Palette.muted).padding(12)
+                        Text("选择项目以浏览本地工作").font(.system(size: 11)).foregroundStyle(palette.muted).padding(12)
                     }
                 }.padding(.horizontal, 12).padding(.bottom, 22)
             }
             HStack(spacing: 7) {
-                Circle().fill(Palette.accent).frame(width: 5, height: 5)
-                Text("数据仅在本机").font(.system(size: 11)).foregroundStyle(Palette.muted)
+                Circle().fill(palette.accent).frame(width: 5, height: 5)
+                Text("数据仅在本机").font(.system(size: 11)).foregroundStyle(palette.muted)
                 Spacer()
                 IconButton(symbol: colorScheme == .dark ? "sun.max" : "moon", label: "切换深浅色") {
                     model.appearance = colorScheme == .dark ? "light" : "dark"
                 }
                 SettingsLink { Image(systemName: "slider.horizontal.3").font(.system(size: 13)) }
-                    .buttonStyle(.plain).foregroundStyle(Palette.muted).help("设置")
+                    .buttonStyle(.plain).foregroundStyle(palette.muted).help("设置")
             }.padding(.horizontal, 19).padding(.vertical, 15)
-                .background(Palette.text.opacity(0.025))
-        }.background(Palette.sidebar)
+                .background(palette.text.opacity(0.025))
+        }.background(palette.sidebar)
     }
 
     private func sectionLabel(_ title: String) -> some View {
-        Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.faint)
+        Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(palette.faint)
             .padding(.horizontal, 12).padding(.bottom, 5)
     }
 
@@ -210,16 +227,16 @@ private struct SidebarView: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: symbol).font(.system(size: 13)).frame(width: 18)
-                    .foregroundStyle(selected ? Palette.accent : Palette.muted)
+                    .foregroundStyle(selected ? palette.accent : palette.muted)
                 Text(title).font(.system(size: 13, weight: selected ? .semibold : .regular)).lineLimit(1)
                 Spacer(minLength: 4)
                 if let count {
                     Text(count.formatted()).font(.system(size: 10, weight: .medium)).monospacedDigit()
-                        .foregroundStyle(Palette.muted)
+                        .foregroundStyle(palette.muted)
                 }
-            }.foregroundStyle(selected ? Palette.text : Palette.muted)
+            }.foregroundStyle(selected ? palette.text : palette.muted)
                 .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(selected ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 10))
+                .background(selected ? palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 10))
                 .shadow(color: .black.opacity(selected ? 0.035 : 0), radius: 5, y: 2)
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
@@ -227,6 +244,7 @@ private struct SidebarView: View {
 }
 
 private struct CatalogView: View {
+    @Environment(\.menaPalette) private var palette
     @Bindable var model: WorkspaceModel
     @FocusState private var searchFocused: Bool
 
@@ -252,7 +270,7 @@ private struct CatalogView: View {
                                         Text(group.title)
                                         Spacer()
                                         Text(group.sessions.count.formatted()).monospacedDigit()
-                                    }.font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.faint)
+                                    }.font(.system(size: 10, weight: .medium)).foregroundStyle(palette.faint)
                                         .padding(.horizontal, 12).padding(.top, 17).padding(.bottom, 5)
                                     ForEach(group.sessions, id: \.target) { session in
                                         SessionRow(
@@ -271,6 +289,11 @@ private struct CatalogView: View {
                                                 Button("导出 Markdown…", systemImage: "square.and.arrow.up") {
                                                     Task { await model.exportSession(target: session.target) }
                                                 }
+                                                Divider()
+                                                Button("删除会话…", systemImage: "trash", role: .destructive) {
+                                                    model.requestDelete(session)
+                                                }
+                                                .disabled(session.active || model.operationInProgress)
                                             }
                                     }
                                 }
@@ -284,6 +307,31 @@ private struct CatalogView: View {
                                             subtitle: process.project.map(projectName) ?? "未知工作目录",
                                             scope: "PID \(process.pid)", status: "运行中",
                                             selected: model.selectedResourceID == String(process.pid))
+                                    }.buttonStyle(.plain)
+                                }
+                            } else if model.section == .agents {
+                                ForEach(model.filteredAgents, id: \.provider) { agent in
+                                    Button {
+                                        model.selectedResourceID = agent.provider
+                                    } label: {
+                                        GenericRow(
+                                            title: agent.name, provider: agent.provider,
+                                            subtitle: agent.custom ? "自定义 Agent" : "原生 CLI Agent",
+                                            scope: agent.provider,
+                                            status: agent.executable == nil ? "未安装" : "已安装",
+                                            selected: model.selectedResourceID == agent.provider)
+                                    }.buttonStyle(.plain)
+                                }
+                            } else if model.section == .trash {
+                                ForEach(model.filteredTrash, id: \.key) { entry in
+                                    Button {
+                                        model.selectedResourceID = entry.key
+                                    } label: {
+                                        GenericRow(
+                                            title: entry.title, provider: entry.provider,
+                                            subtitle: entry.target, scope: sessionDate(entry.deletedAt),
+                                            status: "可恢复",
+                                            selected: model.selectedResourceID == entry.key)
                                     }.buttonStyle(.plain)
                                 }
                             } else {
@@ -309,7 +357,7 @@ private struct CatalogView: View {
             }
             if model.section == .sessions {
                 subagentFooter
-            } else {
+            } else if model.section.resourceKind != nil {
                 Button {
                     model.chooseProject()
                 } label: {
@@ -318,10 +366,10 @@ private struct CatalogView: View {
                         Text(model.project.map(projectName) ?? "用户级资源").lineLimit(1)
                         Spacer()
                         Image(systemName: "chevron.down").font(.system(size: 9))
-                    }.font(.system(size: 11)).foregroundStyle(Palette.muted).padding(18)
-                }.buttonStyle(.plain).background(Palette.text.opacity(0.025))
+                    }.font(.system(size: 11)).foregroundStyle(palette.muted).padding(18)
+                }.buttonStyle(.plain).background(palette.text.opacity(0.025))
             }
-        }.background(Palette.list)
+        }.background(palette.list)
             .task(id: model.listSearchRequest) {
                 guard model.listSearchRequest > 0 else { return }
                 await Task.yield()
@@ -341,28 +389,28 @@ private struct CatalogView: View {
                 }
             }
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(Palette.faint)
+                Image(systemName: "magnifyingglass").foregroundStyle(palette.faint)
                 TextField(model.section == .sessions ? "搜索会话与消息" : "搜索名称与内容", text: $model.query)
                     .textFieldStyle(.plain).font(.system(size: 12)).focused($searchFocused)
                     .accessibilityIdentifier("catalog-search")
                 if model.query.isEmpty {
-                    Text("⌘K").font(.system(size: 10)).foregroundStyle(Palette.faint)
+                    Text("⌘K").font(.system(size: 10)).foregroundStyle(palette.faint)
                 } else {
                     Button {
                         model.query = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                     }
-                    .buttonStyle(.plain).foregroundStyle(Palette.faint).accessibilityLabel("清除搜索")
+                    .buttonStyle(.plain).foregroundStyle(palette.faint).accessibilityLabel("清除搜索")
                 }
             }.padding(.horizontal, 12).padding(.vertical, 11)
-                .background(Palette.elevated, in: RoundedRectangle(cornerRadius: 11))
+                .background(palette.elevated, in: RoundedRectangle(cornerRadius: 11))
                 .overlay(
                     RoundedRectangle(cornerRadius: 11).strokeBorder(
-                        searchFocused ? Palette.accent.opacity(0.55) : Palette.line))
+                        searchFocused ? palette.accent.opacity(0.55) : palette.line))
             HStack {
                 Text("\(model.catalogCount.formatted()) \(model.section == .sessions ? "段会话" : "项记录")")
-                    .foregroundStyle(Palette.faint)
+                    .foregroundStyle(palette.faint)
                 Spacer()
                 if model.section == .sessions {
                     Menu {
@@ -375,7 +423,7 @@ private struct CatalogView: View {
                         HStack(spacing: 5) {
                             Text(model.provider.isEmpty ? "全部 Agent" : providerName(model.provider))
                             Image(systemName: "chevron.down").font(.system(size: 8))
-                        }.foregroundStyle(Palette.muted)
+                        }.foregroundStyle(palette.muted)
                     }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 }
             }.font(.system(size: 11))
@@ -384,7 +432,7 @@ private struct CatalogView: View {
 
     private var subagentFooter: some View {
         HStack(spacing: 9) {
-            Image(systemName: "arrow.triangle.branch").foregroundStyle(Palette.faint)
+            Image(systemName: "arrow.triangle.branch").foregroundStyle(palette.faint)
             VStack(alignment: .leading, spacing: 3) {
                 Text("SubAgents").font(.system(size: 12, weight: .medium))
                 Text(
@@ -392,13 +440,14 @@ private struct CatalogView: View {
                         ? "搜索消息中…"
                         : "\(model.hiddenSubagentCount) 条子会话 · \(model.showSubagents ? "已显示" : "已隐藏")"
                 )
-                .font(.system(size: 10)).foregroundStyle(Palette.faint)
+                .font(.system(size: 10)).foregroundStyle(palette.faint)
             }
             Spacer()
             Toggle("显示 SubAgents", isOn: $model.showSubagents).labelsHidden().toggleStyle(.switch)
+                .tint(palette.accent)
                 .controlSize(.mini)
                 .accessibilityIdentifier("subagent-toggle")
-        }.padding(.horizontal, 22).padding(.vertical, 16).background(Palette.text.opacity(0.025))
+        }.padding(.horizontal, 22).padding(.vertical, 16).background(palette.text.opacity(0.025))
     }
 
     private var sessionGroups: [(title: String, sessions: [DesktopSession])] {
@@ -419,6 +468,7 @@ private struct CatalogView: View {
 }
 
 private struct SessionRow: View {
+    @Environment(\.menaPalette) private var palette
     let session: DesktopSession
     let snippet: String?
     let selected: Bool
@@ -431,38 +481,38 @@ private struct SessionRow: View {
                 HStack(spacing: 7) {
                     ProviderMark(provider: session.provider, size: 21)
                     Text(providerName(session.provider)).font(.system(size: 11)).foregroundStyle(
-                        Palette.muted)
+                        palette.muted)
                     Spacer()
                     Text(sessionDate(session.updatedAt)).font(.system(size: 10)).foregroundStyle(
-                        Palette.faint)
+                        palette.faint)
                 }
                 Text(session.title).font(.system(size: 13, weight: selected ? .semibold : .medium))
-                    .lineLimit(2).lineSpacing(4).foregroundStyle(Palette.text)
+                    .lineLimit(2).lineSpacing(4).foregroundStyle(palette.text)
                 if let snippet {
-                    Text(snippet).font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(2)
+                    Text(snippet).font(.system(size: 11)).foregroundStyle(palette.muted).lineLimit(2)
                 }
                 HStack(spacing: 5) {
                     Image(systemName: "folder").font(.system(size: 10))
                     Text(session.project.map(projectName) ?? "无项目").lineLimit(1)
                     Spacer(minLength: 0)
                     if session.isSubagent {
-                        SmallBadge(text: "SubAgent", color: Palette.accent)
+                        SmallBadge(text: "SubAgent", color: palette.accent)
                     } else if session.parentTarget != nil {
-                        Image(systemName: "arrow.triangle.branch").foregroundStyle(Palette.accent)
+                        Image(systemName: "arrow.triangle.branch").foregroundStyle(palette.accent)
                     }
-                    if session.active { Circle().fill(Palette.accent).frame(width: 5, height: 5).help("运行中") }
-                }.font(.system(size: 10)).foregroundStyle(Palette.faint)
+                    if session.active { Circle().fill(palette.accent).frame(width: 5, height: 5).help("运行中") }
+                }.font(.system(size: 10)).foregroundStyle(palette.faint)
             }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
                 .background(
-                    selected ? Palette.elevated : hovered ? Palette.text.opacity(0.035) : .clear,
+                    selected ? palette.elevated : hovered ? palette.text.opacity(0.035) : .clear,
                     in: RoundedRectangle(cornerRadius: 13)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 13).strokeBorder(
-                        selected ? Palette.accent.opacity(0.25) : .clear)
+                        selected ? palette.accent.opacity(0.25) : .clear)
                 )
                 .overlay(alignment: .leading) {
-                    if selected { Capsule().fill(Palette.accent).frame(width: 3, height: 22) }
+                    if selected { Capsule().fill(palette.accent).frame(width: 3, height: 22) }
                 }
                 .shadow(color: .black.opacity(selected ? 0.04 : 0), radius: 8, y: 3)
                 .contentShape(Rectangle())
@@ -475,6 +525,7 @@ private struct SessionRow: View {
 }
 
 private struct GenericRow: View {
+    @Environment(\.menaPalette) private var palette
     let title: String
     let provider: String
     let subtitle: String
@@ -487,24 +538,24 @@ private struct GenericRow: View {
             HStack(spacing: 8) {
                 ProviderMark(provider: provider, size: 22)
                 Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1).foregroundStyle(
-                    Palette.text)
+                    palette.text)
                 Spacer(minLength: 0)
-                if selected { Circle().fill(Palette.accent).frame(width: 5, height: 5) }
+                if selected { Circle().fill(palette.accent).frame(width: 5, height: 5) }
             }
             if !subtitle.isEmpty {
                 Text(subtitle).font(.system(size: 12)).lineLimit(2).lineSpacing(4).foregroundStyle(
-                    Palette.muted)
+                    palette.muted)
             }
             HStack {
                 Text(scope)
                 Spacer()
                 Text(status)
-            }.font(.system(size: 10)).foregroundStyle(Palette.faint)
+            }.font(.system(size: 10)).foregroundStyle(palette.faint)
         }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 13))
+            .background(selected ? palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 13))
             .overlay(
                 RoundedRectangle(cornerRadius: 13).strokeBorder(
-                    selected ? Palette.accent.opacity(0.25) : .clear)
+                    selected ? palette.accent.opacity(0.25) : .clear)
             )
             .contentShape(Rectangle())
     }

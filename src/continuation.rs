@@ -123,6 +123,9 @@ pub fn prepare_message_fork(
     if message >= detail.messages.len() {
         bail!("selected message no longer exists");
     }
+    if !detail.messages[message].kind.can_fork() {
+        bail!("only user and assistant messages can be forked");
+    }
     let mut prefix = detail.clone();
     prefix.messages.truncate(message + 1);
     prefix.session.tokens = None;

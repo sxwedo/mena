@@ -15,6 +15,8 @@ mod titles;
 mod trash;
 
 pub use relocate::{commit_claude_relocation, preview_claude_relocation};
+#[cfg(feature = "desktop")]
+pub use trash::list_trashed_sessions;
 pub use trash::restore_session;
 
 pub use adapter::{NativeResumeCommand, NativeSessionFork};
@@ -234,6 +236,11 @@ pub enum SessionMessageKind {
 }
 
 impl SessionMessageKind {
+    #[must_use]
+    pub const fn can_fork(self) -> bool {
+        matches!(self, Self::User | Self::Assistant)
+    }
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -723,6 +730,18 @@ impl SessionCatalog {
     }
 
     pub fn delete_session(&self, selected: &AgentSession) -> Result<DeletionSummary> {
+        self.remove_session(selected, false)
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn delete_session_permanently(
+        &self,
+        selected: &AgentSession,
+    ) -> Result<DeletionSummary> {
+        self.remove_session(selected, true)
+    }
+
+    fn remove_session(&self, selected: &AgentSession, permanent: bool) -> Result<DeletionSummary> {
         if !self.sessions.iter().any(|session| {
             session.kind == selected.kind
                 && session.id == selected.id
@@ -741,7 +760,7 @@ impl SessionCatalog {
         let adapter = adapter::ProviderAdapter::from_kind(&selected.kind)
             .with_context(|| format!("{} sessions do not support local deletion", selected.kind))?;
         let target = selected.target();
-        let summary = adapter.delete(&self.home, selected, files)?;
+        let summary = adapter.delete(&self.home, selected, files, permanent)?;
         titles::put(&self.overlay_path, &target, None).with_context(|| {
             format!(
                 "deleted native session files but failed to clear the title overlay for {target}"
@@ -758,6 +777,13 @@ impl SessionCatalog {
     ) -> Result<NativeSessionFork> {
         let title = title.map(titles::normalize).transpose()?.flatten();
         let current = self.resolve(Some(detail.session.kind.slug()), &detail.session.id)?;
+        anyhow::ensure!(
+            detail
+                .messages
+                .get(message)
+                .is_some_and(|message| message.kind.can_fork()),
+            "only user and assistant messages can be forked"
+        );
         let point = detail
             .messages
             .get(message)
